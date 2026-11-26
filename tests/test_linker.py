@@ -73,15 +73,11 @@ def test_next_item_respects_dependencies(mini: Path):
     assert next_ready(load_backlog(pkg)) is None
 
 
-def test_index_next_up_respects_dependencies(mini: Path):
-    pkg = Package.load(mini)
-    link_package(pkg)
-    index = (mini / "planning/README.md").read_text()
-    assert "**Next up:** [T-1.1 — First]" in index
-    backlog = mini / "planning/07-backlog.md"
-    backlog.write_text(backlog.read_text().replace("**Depends on:** —", "**Depends on:** T-1.2"))
+def test_index_has_no_live_backlog_state(mini: Path):
     link_package(Package.load(mini))
-    assert "nothing is ready" in (mini / "planning/README.md").read_text()
+    index = (mini / "planning/README.md").read_text()
+    assert "Next up" not in index and "| todo |" not in index
+    assert "Run `its next`" in index
 
 
 def test_link_is_idempotent_and_check_reports_drift(mini: Path):

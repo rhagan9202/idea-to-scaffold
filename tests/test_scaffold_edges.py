@@ -56,14 +56,11 @@ def test_force_prompt_declined(plan: Path, tmp_path: Path, monkeypatch):
     assert (out / "streak" / "AGENTS.md").exists()
 
 
-def test_handoff_skips_items_waiting_on_dependencies(plan: Path, tmp_path: Path):
-    backlog = plan / "planning/07-backlog.md"
-    text = backlog.read_text()
-    # Put T-2.1 (depends on T-1.1) first; HANDOFF must still start at T-1.1.
-    start, mid = text.index("### T-1.1"), text.index("### T-2.1")
-    end = text.index("### T-2.2")
-    backlog.write_text(text[:start] + text[mid:end] + text[start:mid] + text[end:])
+def test_handoff_names_no_item_unless_the_plan_does(plan: Path, tmp_path: Path):
     repo = scaffold(plan, tmp_path / "out", git=False).path
     handoff = (repo / "HANDOFF.md").read_text()
-    assert "### T-1.1 — Project setup verified" in handoff
-    assert "**Next up:** [T-1.1" in (repo / "docs/planning/README.md").read_text()
+    assert "T-1.1" not in handoff and "run `its next`" in handoff  # HANDOFF names no item, so it can't go stale
+    manifest = plan / "package.yaml"
+    manifest.write_text(manifest.read_text() + 'first_task: "T-2.2"\n')
+    repo = scaffold(plan, tmp_path / "out2", git=False).path
+    assert "implement-task.md for T-2.2" in (repo / "HANDOFF.md").read_text()

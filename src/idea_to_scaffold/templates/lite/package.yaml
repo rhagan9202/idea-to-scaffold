@@ -1,0 +1,32 @@
+spec_version: "0.1"
+profile: lite        # idea, vision, requirements and backlog; see spec section 15
+
+project:
+  name: "<Project Name>"
+  slug: "<project-slug>"
+  summary: "<One sentence: what it does and for whom.>"
+  license: "MIT"
+
+stack:
+  language: "python"
+  runtime: "3.12"
+  framework: ""
+  package_manager: "uv"
+  test: "pytest"
+  lint: "ruff"
+
+agents: [codex, claude, copilot, cursor]
+
+commands:
+  setup: "uv sync"
+  test: "uv run pytest"
+  lint: "uv run ruff check ."
+  run: ""
+
+artifacts:
+  planning/00-idea.md: draft
+  planning/01-vision.md: draft
+  planning/03-requirements.md: draft
+  planning/07-backlog.md: draft
+
+first_task: ""   # optional; HANDOFF.md names it. Otherwise agents run `its next` for the first ready item

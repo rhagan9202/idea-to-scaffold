@@ -2,14 +2,12 @@
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
 
-from .backlog import blocked_by, item_section, load_backlog, next_ready
 from .linker import link_package
 from .package import GENERATED_MARKER, Package, parse_front_matter, templates_dir
 from .validate import Report, validate
@@ -59,7 +57,7 @@ def _write(root: Path, rel: str, content: str, written: list[str]) -> None:
 
 def _copy_tree(src: Path, dest_root: Path, dest_prefix: str, written: list[str]) -> None:
     for path in sorted(src.rglob("*")):
-        if path.is_file() and path.suffix != ".orig":
+        if path.is_file() and path.suffix != ".orig" and path.name != "backlog.json":  # the mirror is generated
             rel = f"{dest_prefix}/{path.relative_to(src).as_posix()}"
             target = dest_root / rel
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -150,33 +148,21 @@ def _adapters(pkg: Package, root: Path, written: list[str]) -> None:
 
 
 def _handoff(pkg: Package, report: Report) -> str:
-    items = load_backlog(pkg)
-    ready = next_ready(items)
-    first = str(pkg.get("first_task") or (ready.id if ready else ""))
-    if not first:
-        first = next((i.id for i in items if i.status == "todo"), "T-1.1")
-    chosen = next((i for i in items if i.id == first), None)
-    waiting = blocked_by(chosen, items) if chosen else []
-    task = item_section(pkg, first) or f"(Item {first} was not found in docs/planning/07-backlog.md.)"
-    task = re.sub(r"^#+\s+", "### ", task, count=1)
-
-    def rebase(m: re.Match) -> str:  # links in the section are relative to docs/planning/
-        href = m.group(2)
-        if re.match(r"^[a-z][a-z0-9+.-]*:", href):
-            return m.group(0)
-        href = f"07-backlog.md{href}" if href.startswith("#") else href
-        return f"[{m.group(1)}](docs/planning/{href})"
-
-    task = re.sub(r"\[([^\]\n]*)\]\(([^)\s]+)\)", rebase, task)
+    """The first-session brief. It names no item's status: `its next` answers that live, so this file never goes
+    stale as the backlog moves."""
+    first = str(pkg.get("first_task") or "").strip()
     cmds = pkg.commands
     cmd_lines = "\n".join(f"- **{k.title()}:** `{v}`" for k, v in cmds.items()) or "- (none set in package.yaml)"
-    wait_note = (
-        f"\n\n> **Note:** {first} depends on {', '.join(waiting)}, which {'is' if len(waiting) == 1 else 'are'} not done."
-        " Finish those first, or pick another ready item from the backlog."
-        if waiting else ""
-    )
-    open_items = "\n".join(f"- {w}" for w in report.warnings) or "- None. All planning docs are approved."
-    prompt = f"Read HANDOFF.md and AGENTS.md, then follow docs/playbooks/implement-task.md for {first}."
+    open_items = "\n".join(f"- {w}" for w in report.warnings) or "- None."
+    if first:
+        pick = f"Start with {first}, as the plan asks."
+        prompt = f"Read HANDOFF.md and AGENTS.md, then follow docs/playbooks/implement-task.md for {first}."
+    else:
+        pick = "Work the backlog in order:"
+        prompt = (
+            "Read HANDOFF.md and AGENTS.md, run `its next` to pick the next ready backlog item, "
+            "then follow docs/playbooks/implement-task.md for it."
+        )
     return f"""# Handoff: {pkg.name}
 
 {pkg.summary}
@@ -186,7 +172,7 @@ agent needs is in the repo; there is no other context.
 
 ## Read first
 1. `AGENTS.md`: rules for every agent
-2. `docs/planning/README.md`: the planning index. It links every doc, shows live statuses, and says where each ID is defined
+2. `docs/planning/README.md`: the planning index. It links every doc and says where each ID is defined
 3. `docs/planning/07-backlog.md`: the only list of work items
 4. `docs/playbooks/`: repeatable procedures
 
@@ -194,7 +180,11 @@ agent needs is in the repo; there is no other context.
 {cmd_lines}
 
 ## Start here
-{task}{wait_note}
+{pick}
+
+- `its next` prints the next ready item: the first `todo` whose dependencies are `done` (`--json` for agents).
+- `its start <ID>` marks it `in-progress`; `its done <ID>` runs its checks and marks it `done`.
+- Without `its`, read `docs/planning/07-backlog.md` and apply the same rule by hand.
 
 ## Kick-off prompt
 Use the same prompt with any agent:
@@ -206,7 +196,7 @@ Use the same prompt with any agent:
 - **Copilot:** open an issue with the prompt above and assign it to Copilot, or paste it into Copilot Chat in agent mode
 - **Cursor:** paste the prompt into the Agent panel
 
-## Open items from planning
+## Open items when this repo was scaffolded
 {open_items}
 """
 
@@ -256,8 +246,9 @@ def scaffold(
     if not report.valid:
         raise ScaffoldError("package is not valid:\n  " + "\n  ".join(report.errors))
     if not report.ready and not allow_unready:
+        names = ", ".join(rel.split("/")[-1] for rel in pkg.ready_requires_approved)
         raise ScaffoldError(
-            "package is valid but not ready (vision, features and requirements must be approved). "
+            f"package is valid but not ready ({names} must be approved). "
             "Use --allow-unready to scaffold anyway.\n  " + "\n  ".join(report.warnings)
         )
 
