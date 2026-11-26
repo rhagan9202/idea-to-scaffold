@@ -42,8 +42,8 @@ artifacts:
   planning/04-architecture.md: approved
   planning/05-design.md: approved
   planning/06-project-plan.md: approved
+  planning/07-backlog.md: approved
 
-first_task: "T-1.1"
 ```
 <!-- end file -->
 
@@ -58,17 +58,23 @@ first_task: "T-1.1"
 Streak is a single-user command-line habit tracker. You add habits, check them off each day, and it shows your current and best streak. It stores data locally in SQLite and has no network access.
 
 ## Source of truth
-Planning docs live in `docs/planning/`. Read them in this order before starting work:
+Planning docs live in `docs/planning/`. **Start at `docs/planning/README.md`**, the generated index: it lists
+every doc with its live status, where every ID is defined, and the next backlog item. Every doc has a nav block
+(upstream docs, next doc, backlinks) and every ID reference is a link to its definition, so follow links rather
+than searching.
 
 1. `01-vision.md` — goals (G-n) and non-goals
 2. `02-features.md` — features (F-nn)
 3. `03-requirements.md` — requirements (FR-nnn, NFR-nnn) and acceptance criteria
 4. `04-architecture.md` — components (C-name), data model, flows
-5. `05-design.md` — CLI surface and output formats
-6. `06-project-plan.md` — milestones (Mn) and tasks (T-n.m)
-7. `adr/` — decisions already made
+5. `05-design.md` and `wireframes/` — screens (S-name), API contracts
+6. `06-project-plan.md` — milestones (Mn) and sequencing
+7. `07-backlog.md` — **the only list of work items** (T-n.m), with status
+8. `adr/` — decisions already made
 
-Docs with `status: approved` are binding. If the code needs to diverge from an approved doc, stop and propose the change (see `docs/playbooks/update-plan.md`) instead of diverging silently.
+Docs with `status: approved` are binding. If the code needs to diverge from an
+approved doc, stop and propose the change (see `docs/playbooks/update-plan.md`)
+instead of diverging silently. `draft` docs are guidance.
 
 ## Stack & commands
 - **Language / runtime:** <language> <runtime>
@@ -89,11 +95,17 @@ docs/playbooks/ repeatable procedures for agents
 ```
 
 ## How to work
-1. Pick the next unblocked task from `06-project-plan.md` (start at the task named in `HANDOFF.md`).
-2. Read the requirements it satisfies and their acceptance criteria.
+1. Take the next `todo` item from `07-backlog.md` whose dependencies are `done` (or the one named in `HANDOFF.md`). Set its **Status** to `in-progress`.
+2. Follow its links to the requirements it satisfies and their acceptance criteria, and on to the components and screens that serve them.
 3. Implement in small steps with tests that prove each acceptance criterion.
-4. Commit using `<type>(<scope>): <summary> [T-n.m]` with `Refs: FR-xxx` in the body.
-5. Tick the task's `- [ ] Done` box in `06-project-plan.md` in the same change.
+4. Set the item's **Status** to `done` and commit in the same change, using `<type>(<scope>): <summary> [T-n.m]` with `Refs: FR-xxx` in the body.
+5. Found more work? Add it to the backlog as a new item with `Status: proposed`. Don't keep TODO lists anywhere else.
+6. If you edited anything in `docs/planning/`, refresh the links (see *Keeping docs in sync*).
+
+### Keeping docs in sync
+- Each ID is defined in one place; elsewhere refer to it by ID only. Don't copy requirement text into code comments or other docs: link or cite the ID.
+- If `its` (idea-to-scaffold) is installed, run `its link .` after editing planning docs and `its validate .` before committing. CI may run `its link --check .`.
+- Without `its`, keep links relative and update `docs/planning/README.md`'s backlog summary by hand.
 
 ## Conventions
 - Standard library only at runtime. Type hints everywhere; `from __future__ import annotations`.
@@ -377,41 +389,80 @@ depends_on: [requirements, architecture, design]
 
 # Project Plan
 
+Work items for each milestone are in the backlog.
+
 ## Milestones
-| ID | Name | Outcome | Features |
-| -- | ---- | ------- | -------- |
-| M1 | Walking skeleton | `streak --help` runs, CI green | — |
-| M2 | Core habits | Add, done, list, remove all work | F-01, F-02, F-03 |
+| ID | Name | Outcome (demoable) | Features | Exit criteria |
+| -- | ---- | ------------------ | -------- | ------------- |
+| M1 | Walking skeleton | `streak --help` runs, CI green | — | CI green on main |
+| M2 | Core habits | Add, done, list, remove all work | F-01, F-02, F-03 | Every FR acceptance criterion has a passing test |
 
-## Tasks
+## Sequencing
+M1 first so every later change is checked by CI. In M2, T-2.1 and T-2.2 can run in parallel; T-2.3 needs both.
 
-### M1 — Walking skeleton
+## Risks
+| Risk | Likelihood | Impact | Mitigation |
+| ---- | ---------- | ------ | ---------- |
+| Timezone edge cases break streaks | Medium | Medium | Streak maths takes dates, never datetimes (see C-streaks) |
+```
+<!-- end file -->
 
-#### T-1.1 — Project setup verified
-**Satisfies:** NFR-002 · **Depends on:** —
+<!-- file: planning/07-backlog.md -->
+```markdown
+---
+id: backlog
+title: Backlog
+status: approved
+version: 1.0
+updated: 2026-11-26
+depends_on: [project-plan, requirements]
+---
+
+# Backlog
+
+The only list of work items, in priority order. Status: proposed, todo, in-progress, blocked, done, dropped.
+
+## Items
+
+### T-1.1 — Project setup verified
+- **Milestone:** M1
+- **Status:** todo
+- **Satisfies:** NFR-002
+- **Depends on:** —
 - **Do:** Run setup, test and lint on the fresh scaffold; add `src/streak/__main__.py` with an argparse stub so `python -m streak --help` works.
 - **Done when:** CI passes and `uv run python -m streak --help` prints usage.
-- [ ] Done
 
-### M2 — Core habits
-
-#### T-2.1 — Store
-**Satisfies:** FR-001, FR-002, NFR-002 · **Depends on:** T-1.1
+### T-2.1 — Store
+- **Milestone:** M2
+- **Status:** todo
+- **Satisfies:** FR-001, FR-002, NFR-002
+- **Depends on:** T-1.1
 - **Do:** Implement C-store with the schema from the architecture doc.
 - **Done when:** add/remove tests pass against a temp database.
-- [ ] Done
 
-#### T-2.2 — Streak maths
-**Satisfies:** FR-004, NFR-001 · **Depends on:** T-1.1
+### T-2.2 — Streak maths
+- **Milestone:** M2
+- **Status:** todo
+- **Satisfies:** FR-004, NFR-001
+- **Depends on:** T-1.1
 - **Do:** Implement C-streaks as pure functions.
 - **Done when:** tests cover consecutive, broken and empty histories.
-- [ ] Done
 
-#### T-2.3 — CLI commands
-**Satisfies:** FR-001, FR-002, FR-003, FR-004 · **Depends on:** T-2.1, T-2.2
+### T-2.3 — CLI commands
+- **Milestone:** M2
+- **Status:** todo
+- **Satisfies:** FR-001, FR-002, FR-003, FR-004
+- **Depends on:** T-2.1, T-2.2
 - **Do:** Wire C-cli commands to C-store and C-streaks.
 - **Done when:** every acceptance criterion has a passing CLI test.
-- [ ] Done
+
+### T-9.1 — Export to CSV
+- **Milestone:** —
+- **Status:** proposed
+- **Satisfies:** —
+- **Depends on:** —
+- **Do:** `streak export` writes habits and check-ins as CSV.
+- **Done when:** idea agreed and scheduled.
 ```
 <!-- end file -->
 

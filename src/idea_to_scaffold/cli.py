@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import __version__
 from .importer import import_export
+from .linker import backlog_items, link_package
 from .package import Package, PackageError, blank_package_dir
 from .scaffold import ScaffoldError, scaffold
 from .validate import validate
@@ -35,6 +36,11 @@ def cmd_import(args: argparse.Namespace) -> int:
         print(f"  {rel}")
     if seeded:
         print(f"added {len(seeded)} default file(s): {', '.join(seeded)}")
+    try:
+        changed = link_package(Package.load(Path(args.into)))
+        print(f"cross-linked {len(changed)} file(s) and wrote planning/README.md")
+    except PackageError as exc:
+        print(f"warning: could not cross-link: {exc}")
     return cmd_validate(argparse.Namespace(dir=args.into, quiet=True))
 
 
@@ -56,6 +62,47 @@ def cmd_validate(args: argparse.Namespace) -> int:
     else:
         print(f"package has {len(report.errors)} error(s)")
     return 0 if report.valid else 1
+
+
+def cmd_link(args: argparse.Namespace) -> int:
+    try:
+        pkg = Package.load(Path(args.dir))
+    except PackageError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    changed = link_package(pkg, check=args.check)
+    if args.check:
+        if changed:
+            print("cross-links are out of date in:")
+            for rel in changed:
+                print(f"  {rel}")
+            print("run `its link` and commit the result")
+            return 1
+        print("cross-links are up to date")
+        return 0
+    print(f"updated {len(changed)} file(s)" if changed else "already up to date")
+    for rel in changed:
+        print(f"  {rel}")
+    return 0
+
+
+def cmd_backlog(args: argparse.Namespace) -> int:
+    try:
+        pkg = Package.load(Path(args.dir))
+    except PackageError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    items = backlog_items(pkg)
+    if args.status:
+        items = [i for i in items if i["status"] == args.status]
+    if not items:
+        print("no backlog items")
+        return 0
+    width = max(len(i["title"]) for i in items)
+    print(f"{'ID':<8} {'STATUS':<12} {'MILESTONE':<10} TITLE")
+    for i in items:
+        print(f"{i['id']:<8} {i['status']:<12} {i['milestone'] or '—':<10} {i['title'][:width]}")
+    return 0
 
 
 def cmd_scaffold(args: argparse.Namespace) -> int:
@@ -101,9 +148,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-defaults", action="store_true", help="don't add default playbooks and ADR-0001")
     s.set_defaults(func=cmd_import)
 
-    s = sub.add_parser("validate", help="check a package against the spec")
-    s.add_argument("dir")
+    s = sub.add_parser("validate", help="check a package (or scaffolded repo) against the spec")
+    s.add_argument("dir", nargs="?", default=".")
     s.set_defaults(func=cmd_validate)
+
+    s = sub.add_parser("link", help="cross-link IDs, refresh nav blocks and the planning index")
+    s.add_argument("dir", nargs="?", default=".", help="package folder or scaffolded repo (default: .)")
+    s.add_argument("--check", action="store_true", help="don't write; exit 1 if anything is out of date (for CI)")
+    s.set_defaults(func=cmd_link)
+
+    s = sub.add_parser("backlog", help="list backlog items")
+    s.add_argument("dir", nargs="?", default=".", help="package folder or scaffolded repo (default: .)")
+    s.add_argument("--status", help="only items with this status")
+    s.set_defaults(func=cmd_backlog)
 
     s = sub.add_parser("scaffold", help="create the project repo from a package")
     s.add_argument("package", help="planning package folder")

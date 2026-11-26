@@ -23,7 +23,23 @@ REQUIRED_FILES = [
     "planning/04-architecture.md",
     "planning/05-design.md",
     "planning/06-project-plan.md",
+    "planning/07-backlog.md",
 ]
+
+# Reading order for agents; also drives "Next" links in nav blocks.
+READING_ORDER = [
+    "planning/00-idea.md",
+    "planning/01-vision.md",
+    "planning/02-features.md",
+    "planning/03-requirements.md",
+    "planning/04-architecture.md",
+    "planning/05-design.md",
+    "planning/06-project-plan.md",
+    "planning/07-backlog.md",
+    "planning/08-glossary.md",
+]
+
+BACKLOG_STATUSES = ["proposed", "todo", "in-progress", "blocked", "done", "dropped"]
 
 AGENTS_SECTIONS = [
     "Project",
@@ -74,22 +90,47 @@ def parse_front_matter(text: str) -> tuple[dict[str, Any], str]:
 
 @dataclass
 class Package:
+    """A planning package, in package layout (package.yaml at root) or repo layout (docs/planning/package.yaml).
+
+    Paths inside the package are referred to by *logical* names that are the same in both layouts:
+    ``package.yaml``, ``AGENTS.md``, ``planning/...`` and ``playbooks/...``.
+    """
+
     root: Path
     manifest: dict[str, Any] = field(default_factory=dict)
+    planning_dir: Path = Path()
+    playbooks_dir: Path = Path()
+    manifest_path: Path = Path()
+    repo_layout: bool = False
 
     @classmethod
     def load(cls, root: Path) -> "Package":
         root = Path(root)
-        manifest_path = root / "package.yaml"
-        if not manifest_path.is_file():
-            raise PackageError(f"no package.yaml in {root}")
+        if (root / "package.yaml").is_file():
+            manifest_path, planning, playbooks, repo = root / "package.yaml", root / "planning", root / "playbooks", False
+        elif (root / "docs/planning/package.yaml").is_file():
+            manifest_path = root / "docs/planning/package.yaml"
+            planning, playbooks, repo = root / "docs/planning", root / "docs/playbooks", True
+        else:
+            raise PackageError(f"no package.yaml (or docs/planning/package.yaml) in {root}")
         try:
             manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
         except yaml.YAMLError as exc:
             raise PackageError(f"package.yaml is not valid YAML: {exc}") from exc
         if not isinstance(manifest, dict):
             raise PackageError("package.yaml must be a mapping")
-        return cls(root=root, manifest=manifest)
+        return cls(root=root, manifest=manifest, planning_dir=planning, playbooks_dir=playbooks,
+                   manifest_path=manifest_path, repo_layout=repo)
+
+    def path_of(self, logical: str) -> Path:
+        """Turn a logical path into a real path on disk."""
+        if logical == "package.yaml":
+            return self.manifest_path
+        if logical.startswith("planning/"):
+            return self.planning_dir / logical[len("planning/"):]
+        if logical.startswith("playbooks/"):
+            return self.playbooks_dir / logical[len("playbooks/"):]
+        return self.root / logical
 
     # --- manifest helpers -------------------------------------------------
     def get(self, dotted: str, default: Any = None) -> Any:
@@ -127,23 +168,29 @@ class Package:
         return {k: str(v) for k, v in cmds.items() if v}
 
     # --- files ------------------------------------------------------------
-    def markdown_files(self, sub: str) -> list[Path]:
-        base = self.root / sub
+    def _md(self, base: Path) -> list[Path]:
         if not base.is_dir():
             return []
         return sorted(p for p in base.rglob("*.md") if p.is_file())
 
     def planning_files(self) -> list[Path]:
-        return self.markdown_files("planning")
+        return self._md(self.planning_dir)
 
     def playbooks(self) -> list[Path]:
-        return self.markdown_files("playbooks")
+        return self._md(self.playbooks_dir)
 
     def rel(self, path: Path) -> str:
+        """Logical name for a real path."""
+        path = Path(path)
+        for base, prefix in ((self.planning_dir, "planning/"), (self.playbooks_dir, "playbooks/")):
+            try:
+                return prefix + path.relative_to(base).as_posix()
+            except ValueError:
+                pass
         return path.relative_to(self.root).as_posix()
 
     def status_of(self, rel_path: str) -> str | None:
-        path = self.root / rel_path
+        path = self.path_of(rel_path)
         if path.is_file():
             fm, _ = parse_front_matter(path.read_text(encoding="utf-8"))
             if "status" in fm:

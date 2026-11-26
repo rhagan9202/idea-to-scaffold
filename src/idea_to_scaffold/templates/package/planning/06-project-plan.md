@@ -9,30 +9,17 @@ depends_on: [requirements, architecture, design]
 
 # Project Plan
 
+This doc defines **milestones** and how they are sequenced. It does not list tasks: every work item lives in the
+[backlog](07-backlog.md), tagged with the milestone it belongs to.
+
 ## Milestones
-| ID | Name | Outcome | Features |
-| -- | ---- | ------- | -------- |
-| M1 | Walking skeleton | App runs end to end with one trivial path, CI green | — |
-| M2 |      |         | F-01     |
+| ID | Name | Outcome (demoable) | Features | Exit criteria |
+| -- | ---- | ------------------ | -------- | ------------- |
+| M1 | Walking skeleton | App builds, tests and lint run, CI green, one trivial path works end to end | — | CI green on main |
+| M2 |      |                    | F-01     |               |
 
-## Tasks
-
-Each task should be small enough for one agent session (roughly half a day of
-human work or less).
-
-### M1 — Walking skeleton
-
-#### T-1.1 — Project setup verified
-**Satisfies:** NFR-004 · **Depends on:** —
-- **Do:** Install dependencies, confirm `test` and `lint` commands pass on the empty scaffold, add CI.
-- **Done when:** CI runs on push and passes.
-- [ ] Done
-
-#### T-1.2 — 
-**Satisfies:** FR-001 · **Depends on:** T-1.1
-- **Do:** 
-- **Done when:** 
-- [ ] Done
+## Sequencing
+<!-- Why the milestones are in this order; what can run in parallel; external dependencies and dates. -->
 
 ## Risks
 | Risk | Likelihood | Impact | Mitigation |

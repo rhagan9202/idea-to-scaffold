@@ -28,6 +28,20 @@ its scaffold my-idea-plan/ --out ~/code --github      # also create a private Gi
 
 Then open `HANDOFF.md` in the new repo and give its kick-off prompt to any agent.
 
+`link`, `validate` and `backlog` also work inside a scaffolded repo (they find `docs/planning/package.yaml`),
+so you can add `its link --check .` to CI or a pre-commit hook to stop the docs drifting.
+
+## How the docs stay connected
+
+- **One backlog.** `planning/07-backlog.md` is the only list of work items; each has a Milestone, Status,
+  what it Satisfies and what it Depends on. The project plan holds milestones only.
+- **Define once, link everywhere.** Each ID (`FR-003`, `T-2.1`, `C-store`, …) is defined in one doc. `its link`
+  turns every other mention into a link to that definition, and re-points links when headings change.
+- **Nav blocks with backlinks.** Each doc starts with links to the index, its upstream docs, the next doc, and
+  every doc that references it, so an agent changing a requirement knows exactly what else to revisit.
+- **Generated index.** `planning/README.md` shows reading order with live statuses, a backlog summary and next item,
+  and where every ID is defined. A status change without re-linking shows up in `its link --check`.
+
 Try it on the bundled example:
 
 ```bash
@@ -45,7 +59,9 @@ its scaffold /tmp/streak-plan --out /tmp
 ├── .cursor/rules/00-project.mdc     alwaysApply rule pointing to AGENTS.md
 ├── .claude/skills/<playbook>/       one Claude skill per playbook
 ├── HANDOFF.md                       first task + kick-off prompt per agent
-├── docs/planning/                   the planning package (source of truth)
+├── docs/planning/README.md          generated planning index: live statuses, ID map, next backlog item
+├── docs/planning/07-backlog.md      the only list of work items
+├── docs/planning/                   the planning package (source of truth), fully cross-linked
 ├── docs/playbooks/                  implement-task, update-plan, write-adr, …
 └── stack skeleton                   e.g. pyproject.toml, src/, tests/, CI
 ```
@@ -55,8 +71,10 @@ its scaffold /tmp/streak-plan --out /tmp
 | Command | What it does |
 | ------- | ------------ |
 | `its new DIR` | Create a blank planning package to fill in by hand |
-| `its import EXPORT.md --into DIR` | Extract `<!-- file: … -->` blocks from a chat export, add default playbooks, validate |
-| `its validate DIR` | Check required files, front matter, ID definitions, traceability, `AGENTS.md` sections, readiness |
+| `its import EXPORT.md --into DIR` | Extract `<!-- file: … -->` blocks from a chat export, add default playbooks, cross-link, validate |
+| `its link [DIR] [--check]` | Link every ID reference to its definition, refresh nav blocks (upstream, next, backlinks) and `planning/README.md`. `--check` exits 1 if anything drifted (for CI) |
+| `its validate [DIR]` | Check required files, front matter, ID definitions, traceability, backlog rules, broken links and anchors, `AGENTS.md` sections, readiness |
+| `its backlog [DIR] [--status S]` | List backlog items |
 | `its scaffold DIR [--out PARENT] [--github [OWNER/NAME]] [--no-git] [--force] [--allow-unready]` | Build the repo |
 
 ## Repository layout

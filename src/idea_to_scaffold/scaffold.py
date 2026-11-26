@@ -10,6 +10,7 @@ from pathlib import Path
 from string import Template
 
 from .package import GENERATED_MARKER, Package, parse_front_matter, templates_dir
+from .linker import backlog_items, link_package
 from .validate import Report, validate
 
 
@@ -136,7 +137,7 @@ def _adapters(pkg: Package, root: Path, written: list[str]) -> None:
 
 
 def _task_section(pkg: Package, task_id: str) -> str:
-    plan = pkg.root / "planning/06-project-plan.md"
+    plan = pkg.path_of("planning/07-backlog.md")
     if not plan.is_file():
         return ""
     _, body = parse_front_matter(plan.read_text(encoding="utf-8"))
@@ -151,9 +152,19 @@ def _task_section(pkg: Package, task_id: str) -> str:
 
 
 def _handoff(pkg: Package, report: Report) -> str:
-    first = str(pkg.get("first_task", "T-1.1"))
-    task = _task_section(pkg, first) or f"(Task {first} was not found in docs/planning/06-project-plan.md.)"
+    todo = next((i["id"] for i in backlog_items(pkg) if i["status"] == "todo"), "T-1.1")
+    first = str(pkg.get("first_task") or todo)
+    task = _task_section(pkg, first) or f"(Item {first} was not found in docs/planning/07-backlog.md.)"
     task = re.sub(r"^#+\s+", "### ", task, count=1)
+
+    def rebase(m: re.Match) -> str:  # links in the section are relative to docs/planning/
+        href = m.group(2)
+        if re.match(r"^[a-z][a-z0-9+.-]*:", href):
+            return m.group(0)
+        href = f"07-backlog.md{href}" if href.startswith("#") else href
+        return f"[{m.group(1)}](docs/planning/{href})"
+
+    task = re.sub(r"\[([^\]\n]*)\]\(([^)\s]+)\)", rebase, task)
     cmds = pkg.commands
     cmd_lines = "\n".join(f"- **{k.title()}:** `{v}`" for k, v in cmds.items()) or "- (none set in package.yaml)"
     open_items = "\n".join(f"- {w}" for w in report.warnings) or "- None. All planning docs are approved."
@@ -167,8 +178,9 @@ agent needs is in the repo; there is no other context.
 
 ## Read first
 1. `AGENTS.md`: rules for every agent
-2. `docs/planning/`: the plan, in numbered order (source of truth)
-3. `docs/playbooks/`: repeatable procedures
+2. `docs/planning/README.md`: the planning index. It links every doc, shows live statuses, and says where each ID is defined
+3. `docs/planning/07-backlog.md`: the only list of work items
+4. `docs/playbooks/`: repeatable procedures
 
 ## Commands
 {cmd_lines}
@@ -259,7 +271,11 @@ def scaffold(
         _copy_tree(pkg.root / "playbooks", root, "docs/playbooks", written)
     _write(root, "AGENTS.md", _fill_agents_md(pkg, (pkg.root / "AGENTS.md").read_text(encoding="utf-8")), written)
     _adapters(pkg, root, written)
-    _write(root, "HANDOFF.md", _handoff(pkg, report), written)
+    repo_pkg = Package.load(root)
+    link_package(repo_pkg)  # cross-link docs in their repo locations and write docs/planning/README.md
+    if "docs/planning/README.md" not in written:
+        written.append("docs/planning/README.md")
+    _write(root, "HANDOFF.md", _handoff(repo_pkg, report), written)
     if not (root / "README.md").exists():
         _write(root, "README.md", _readme(pkg), written)
 

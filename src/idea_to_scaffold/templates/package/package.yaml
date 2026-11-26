@@ -30,5 +30,6 @@ artifacts:
   planning/04-architecture.md: draft
   planning/05-design.md: draft
   planning/06-project-plan.md: draft
+  planning/07-backlog.md: draft
 
-first_task: "T-1.1"
+first_task: ""   # optional; defaults to the first `todo` item in the backlog

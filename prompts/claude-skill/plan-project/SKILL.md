@@ -19,7 +19,7 @@ Work through the stages in `references/stages/` in order. Read each stage file w
 | 3 | `03-requirements.md` | `03-requirements.md` |
 | 4 | `04-architecture.md` | `04-architecture.md`, ADRs |
 | 5 | `05-design.md` | `05-design.md`, wireframes |
-| 6 | `06-project-plan.md` | `06-project-plan.md` |
+| 6 | `06-project-plan.md` | `06-project-plan.md`, `07-backlog.md` |
 | 7 | `07-agents.md` | `AGENTS.md`, `package.yaml`, extra playbooks |
 | 8 | `08-export.md` | consistency report and full export |
 
@@ -34,5 +34,6 @@ Start by reading `00-primer.md` and adopting its rules (treat it as if the user 
 
 - Every ID is defined once and referenced correctly.
 - Every Must requirement has testable acceptance criteria and is covered by a task.
-- M1 is a walking skeleton.
+- M1 is a walking skeleton, and every work item is in `07-backlog.md` and nowhere else.
+- IDs are written bare; `its link` (run by `its import`) adds the cross-links. If you wrote files directly, tell the user to run `its link <slug>-plan/`.
 - `AGENTS.md` has the eight required sections and real commands.
