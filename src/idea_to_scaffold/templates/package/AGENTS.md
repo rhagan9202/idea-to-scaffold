@@ -51,6 +51,18 @@ docs/playbooks/ repeatable procedures for agents
 5. Found more work? Add it to the end of the backlog as a new item with a placeholder ID (`### T-new-<short-name> — Title`) and `Status: proposed`. Don't pick the next number yourself, and don't keep TODO lists anywhere else.
 6. If you edited anything in `docs/planning/`, refresh the links (see *Keeping docs in sync*).
 
+### Working in parallel
+When several agents work at once, each item gets its own branch and worktree, and the branch is the claim:
+- `its start <ID> --worktree` creates the branch `its/<ID>-<slug>` from `main` in a new worktree and prints the
+  command to start Claude Code or Codex there. `its next` never offers an item someone has claimed.
+- On a claim branch, don't set the item `in-progress`: the branch says that. Commit `done` with the work
+  (`its done` with no ID finds the item from the branch name).
+- An item's dependencies count as done only once they are merged to `main`.
+- `its next --parallel` lists ready items whose **Touches** don't overlap the claimed ones. List **Touches** on
+  items you expect to run in parallel.
+- After merging, release the claim with `its release <ID>`, and run `its renumber` on `main` to give proposed
+  `T-new-...` items their permanent IDs.
+
 ### Keeping docs in sync
 - Each ID is defined in one place; elsewhere refer to it by ID only. Don't copy requirement text into code comments or other docs: link or cite the ID.
 - If `its` (idea-to-scaffold) is installed, run `its link .` after editing planning docs and `its validate .` before committing. CI may run `its link --check .`.
