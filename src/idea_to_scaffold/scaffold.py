@@ -9,8 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
 
+from .linker import backlog_items, blocked_by, link_package, next_item
 from .package import GENERATED_MARKER, Package, parse_front_matter, templates_dir
-from .linker import backlog_items, link_package
 from .validate import Report, validate
 
 
@@ -25,6 +25,7 @@ class Result:
     report: Report | None = None
     committed: bool = False
     remote: str | None = None
+    warnings: list[str] = field(default_factory=list)
 
 
 def _marker(source: str) -> str:
@@ -57,7 +58,7 @@ def _write(root: Path, rel: str, content: str, written: list[str]) -> None:
 
 def _copy_tree(src: Path, dest_root: Path, dest_prefix: str, written: list[str]) -> None:
     for path in sorted(src.rglob("*")):
-        if path.is_file():
+        if path.is_file() and path.suffix != ".orig":
             rel = f"{dest_prefix}/{path.relative_to(src).as_posix()}"
             target = dest_root / rel
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -65,16 +66,27 @@ def _copy_tree(src: Path, dest_root: Path, dest_prefix: str, written: list[str])
             written.append(rel)
 
 
-def _render_stack(pkg: Package, root: Path, written: list[str]) -> None:
+def available_stacks() -> list[str]:
+    stacks = templates_dir() / "stacks"
+    return sorted(p.name for p in stacks.iterdir() if p.is_dir())
+
+
+def _render_stack(pkg: Package, root: Path, written: list[str], warnings: list[str]) -> None:
     stacks = templates_dir() / "stacks"
     stack = stacks / pkg.language
     if not stack.is_dir():
+        warnings.append(
+            f"no skeleton for stack.language {pkg.language!r} (available: {', '.join(available_stacks())}); "
+            "used the generic skeleton (empty src/ and tests/, no build or CI files)"
+        )
         stack = stacks / "generic"
     variables = _variables(pkg)
     for path in sorted(stack.rglob("*")):
         if not path.is_file():
             continue
         rel = path.relative_to(stack).as_posix().replace("__module__", variables["module"])
+        if rel.endswith(".tmpl"):
+            rel = rel[: -len(".tmpl")]
         text = path.read_text(encoding="utf-8")
         _write(root, rel, Template(text).safe_substitute(variables), written)
 
@@ -152,8 +164,13 @@ def _task_section(pkg: Package, task_id: str) -> str:
 
 
 def _handoff(pkg: Package, report: Report) -> str:
-    todo = next((i["id"] for i in backlog_items(pkg) if i["status"] == "todo"), "T-1.1")
-    first = str(pkg.get("first_task") or todo)
+    items = backlog_items(pkg)
+    ready = next_item(items)
+    first = str(pkg.get("first_task") or (ready["id"] if ready else ""))
+    if not first:
+        first = next((i["id"] for i in items if i["status"] == "todo"), "T-1.1")
+    chosen = next((i for i in items if i["id"] == first), None)
+    waiting = blocked_by(chosen, items) if chosen else []
     task = _task_section(pkg, first) or f"(Item {first} was not found in docs/planning/07-backlog.md.)"
     task = re.sub(r"^#+\s+", "### ", task, count=1)
 
@@ -167,6 +184,11 @@ def _handoff(pkg: Package, report: Report) -> str:
     task = re.sub(r"\[([^\]\n]*)\]\(([^)\s]+)\)", rebase, task)
     cmds = pkg.commands
     cmd_lines = "\n".join(f"- **{k.title()}:** `{v}`" for k, v in cmds.items()) or "- (none set in package.yaml)"
+    wait_note = (
+        f"\n\n> **Note:** {first} depends on {', '.join(waiting)}, which {'is' if len(waiting) == 1 else 'are'} not done."
+        " Finish those first, or pick another ready item from the backlog."
+        if waiting else ""
+    )
     open_items = "\n".join(f"- {w}" for w in report.warnings) or "- None. All planning docs are approved."
     prompt = f"Read HANDOFF.md and AGENTS.md, then follow docs/playbooks/implement-task.md for {first}."
     return f"""# Handoff: {pkg.name}
@@ -186,7 +208,7 @@ agent needs is in the repo; there is no other context.
 {cmd_lines}
 
 ## Start here
-{task}
+{task}{wait_note}
 
 ## Kick-off prompt
 Use the same prompt with any agent:
@@ -254,6 +276,12 @@ def scaffold(
         )
 
     root = Path(out_dir) / pkg.slug
+    src_root = pkg.root.resolve()
+    target = root.resolve()
+    if target == src_root or src_root.is_relative_to(target) or target.is_relative_to(src_root):
+        raise ScaffoldError(
+            f"the target {root} overlaps the package being scaffolded ({pkg.root}); choose a different --out"
+        )
     if root.exists() and any(root.iterdir()):
         if not force:
             raise ScaffoldError(f"{root} already exists and is not empty (use --force to replace it)")
@@ -263,13 +291,15 @@ def scaffold(
     result = Result(path=root, report=report)
     written = result.files
 
-    _render_stack(pkg, root, written)
-    _copy_tree(pkg.root / "planning", root, "docs/planning", written)
-    shutil.copy2(pkg.root / "package.yaml", root / "docs/planning/package.yaml")
-    written.append("docs/planning/package.yaml")
-    if (pkg.root / "playbooks").is_dir():
-        _copy_tree(pkg.root / "playbooks", root, "docs/playbooks", written)
-    _write(root, "AGENTS.md", _fill_agents_md(pkg, (pkg.root / "AGENTS.md").read_text(encoding="utf-8")), written)
+    _render_stack(pkg, root, written, result.warnings)
+    _copy_tree(pkg.planning_dir, root, "docs/planning", written)
+    if "docs/planning/package.yaml" not in written:
+        shutil.copy2(pkg.manifest_path, root / "docs/planning/package.yaml")
+        written.append("docs/planning/package.yaml")
+    if pkg.playbooks_dir.is_dir():
+        _copy_tree(pkg.playbooks_dir, root, "docs/playbooks", written)
+    agents_md = pkg.path_of("AGENTS.md").read_text(encoding="utf-8")
+    _write(root, "AGENTS.md", _fill_agents_md(pkg, agents_md), written)
     _adapters(pkg, root, written)
     repo_pkg = Package.load(root)
     link_package(repo_pkg)  # cross-link docs in their repo locations and write docs/planning/README.md

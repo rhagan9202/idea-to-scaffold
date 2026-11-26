@@ -8,7 +8,7 @@ license = "MIT"
 dependencies = ["PyYAML>=6"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
 its = "idea_to_scaffold.cli:main"
@@ -25,3 +25,11 @@ idea_to_scaffold = ["templates/**/*", "templates/**/.*", "templates/**/.*/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 140
+target-version = "py310"
+extend-exclude = ["src/idea_to_scaffold/templates"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]

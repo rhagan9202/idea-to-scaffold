@@ -10,12 +10,11 @@ from .ids import (
     META_FILES,
     github_slug,
     id_kind,
-    owned_by,
     scan_lines,
     sections,
     strip_links,
 )
-from .linker import backlog_items, build_index, link_package
+from .linker import backlog_items, link_package, scan_package
 from .package import (
     AGENTS_SECTIONS,
     BACKLOG_STATUSES,
@@ -145,30 +144,21 @@ def validate(pkg: Package, *, check_links_current: bool = True) -> Report:
     planning = {rel: b for rel, b in bodies.items() if rel.startswith("planning/") and rel not in META_FILES}
 
     # IDs: definitions vs references
-    index = build_index(pkg)
-    defined = set(index)
-    heading_defs: dict[str, list[str]] = {}
-    referenced: dict[str, set[str]] = {}
-    for rel, body in planning.items():
-        for line in scan_lines(body):
-            # IDs inside code blocks (e.g. Mermaid diagrams) count as references too.
-            for m in ID_RE.finditer(strip_links(line.text)):
-                ident = m.group(1)
-                if not owned_by(id_kind(ident), rel):
-                    referenced.setdefault(ident, set()).add(rel)
-            if line.heading is not None and not line.in_code:
-                first = ID_RE.match(strip_links(line.heading))
-                if first and owned_by(id_kind(first.group(1)), rel):
-                    heading_defs.setdefault(first.group(1), []).append(rel)
-    for ident, rels in sorted(referenced.items()):
+    scan = scan_package(pkg)
+    defined = set(scan.index)
+    for ident, rels in sorted(scan.references.items()):
         if ident not in defined:
             r.errors.append(f"{ident}: referenced in {', '.join(sorted(rels))} but never defined")
-    for ident, rels in sorted(heading_defs.items()):
-        if len(rels) > 1:
-            r.errors.append(f"{ident}: defined in more than one heading ({', '.join(rels)})")
+    for ident, sites in sorted(scan.definitions.items()):
+        files = sorted({rel for rel, _ in sites})
+        headings = [rel for rel, is_heading in sites if is_heading]
+        if len(files) > 1:
+            r.errors.append(f"{ident}: defined in more than one file ({', '.join(files)})")
+        elif len(headings) > 1:
+            r.errors.append(f"{ident}: defined in more than one heading in {files[0]}")
 
     # Traceability
-    for rel, body in planning.items():
+    for body in planning.values():
         for heading, section in sections(body):
             first = ID_RE.match(strip_links(heading))
             if not first:

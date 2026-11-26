@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .importer import import_export
+from .importer import ImportConflict, import_export
 from .linker import backlog_items, link_package
 from .package import Package, PackageError, blank_package_dir
 from .scaffold import ScaffoldError, scaffold
@@ -27,11 +27,13 @@ def cmd_new(args: argparse.Namespace) -> int:
 
 def cmd_import(args: argparse.Namespace) -> int:
     try:
-        written, seeded = import_export(Path(args.export), Path(args.into), seed=not args.no_defaults)
-    except (ValueError, OSError) as exc:
+        written, seeded = import_export(
+            Path(args.export), Path(args.into), seed=not args.no_defaults, overwrite=args.overwrite
+        )
+    except (ValueError, OSError, ImportConflict) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"imported {len(written)} file(s) into {args.into}:")
+    print(f"imported {len(written)} new or changed file(s) into {args.into}" + (":" if written else ""))
     for rel in written:
         print(f"  {rel}")
     if seeded:
@@ -105,10 +107,34 @@ def cmd_backlog(args: argparse.Namespace) -> int:
     return 0
 
 
+def _confirm_delete(target: Path, assume_yes: bool) -> bool:
+    count = sum(1 for p in target.rglob("*") if p.is_file())
+    if assume_yes:
+        return True
+    if not sys.stdin.isatty():
+        print(
+            f"error: --force would delete {target} ({count} files). Re-run with --yes to confirm non-interactively.",
+            file=sys.stderr,
+        )
+        return False
+    answer = input(f"--force will delete {target} and everything in it ({count} files). Continue? [y/N] ")
+    return answer.strip().lower() in ("y", "yes")
+
+
 def cmd_scaffold(args: argparse.Namespace) -> int:
     github = None
     if args.github is not None:
         github = args.github  # "" means use the slug
+    if args.force:
+        try:
+            slug = Package.load(Path(args.package)).slug
+        except PackageError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        target = Path(args.out) / slug
+        if target.exists() and any(target.iterdir()) and not _confirm_delete(target, args.yes):
+            print("aborted: nothing was changed", file=sys.stderr)
+            return 1
     try:
         result = scaffold(
             Path(args.package),
@@ -122,6 +148,8 @@ def cmd_scaffold(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"scaffolded {result.path} ({len(result.files)} files)")
+    for w in result.warnings:
+        print(f"warning {w}")
     if result.report and result.report.warnings:
         for w in result.report.warnings:
             print(f"warning {w}")
@@ -146,6 +174,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("export", help="the exported chat .md file")
     s.add_argument("--into", required=True, help="package folder to write into")
     s.add_argument("--no-defaults", action="store_true", help="don't add default playbooks and ADR-0001")
+    s.add_argument(
+        "--overwrite", action="store_true",
+        help="replace existing files that differ from the export (keeps each original as <name>.orig)",
+    )
     s.set_defaults(func=cmd_import)
 
     s = sub.add_parser("validate", help="check a package (or scaffolded repo) against the spec")
@@ -165,7 +197,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("scaffold", help="create the project repo from a package")
     s.add_argument("package", help="planning package folder")
     s.add_argument("--out", default=".", help="parent folder for the new repo (default: current)")
-    s.add_argument("--force", action="store_true", help="replace an existing non-empty target folder")
+    s.add_argument("--force", action="store_true", help="delete and replace an existing non-empty target folder")
+    s.add_argument("--yes", "-y", action="store_true", help="don't ask before --force deletes the target folder")
     s.add_argument("--no-git", action="store_true", help="skip git init and the initial commit")
     s.add_argument(
         "--github", nargs="?", const="", default=None, metavar="OWNER/NAME",

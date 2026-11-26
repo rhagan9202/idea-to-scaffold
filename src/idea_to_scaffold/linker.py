@@ -28,6 +28,8 @@ from .ids import (
     KIND_LABELS,
     META_FILES,
     OWNERS,
+    STRICT_KINDS,
+    definition_on_line,
     field_value,
     github_slug,
     id_kind,
@@ -35,6 +37,7 @@ from .ids import (
     scan_lines,
     sections,
     strip_links,
+    trace_field_spans,
 )
 from .package import BACKLOG_STATUSES, READING_ORDER, Package, parse_front_matter
 
@@ -76,33 +79,67 @@ def _load_docs(pkg: Package) -> dict[str, Doc]:
     return docs
 
 
-def build_index(pkg: Package, docs: dict[str, Doc] | None = None) -> dict[str, Target]:
-    """Map every defined ID to where it is defined."""
+@dataclass
+class Scan:
+    index: dict[str, Target]                     # ID -> where it is defined
+    definitions: dict[str, list[tuple[str, bool]]]  # ID -> [(rel, is_heading)] for every definition site
+    references: dict[str, set[str]]              # ID -> files that reference it (definite references only)
+
+
+def scan_package(pkg: Package, docs: dict[str, Doc] | None = None) -> Scan:
+    """Find where every ID is defined and where it is referenced.
+
+    A definition is a heading starting with the ID, a table row whose first cell is the ID, a line starting with the
+    ID in bold, an ADR's front-matter id, or a wireframe file named after a screen ID, in the file that owns that kind
+    of ID. Anything else is a reference. Ambiguous kinds (``M1``, ``C-x``, ``S-x``, ``F-nn``, ``G-n``) only count as
+    references when defined, or when they sit in a traceability field (``**Supports:** G-1``), so prose like
+    "M1 Mac" or "C-suite" is ignored.
+    """
     docs = docs if docs is not None else _load_docs(pkg)
     index: dict[str, Target] = {}
-    heading_defined: set[str] = set()
+    definitions: dict[str, list[tuple[str, bool]]] = {}
+    candidates: list[tuple[str, str, bool]] = []  # (ident, rel, definite)
+
+    def define(ident: str, target: Target, heading: bool) -> None:
+        definitions.setdefault(ident, []).append((target.rel, heading))
+        current = index.get(ident)
+        if current is None or (target.own_heading and not current.own_heading):
+            index[ident] = target
+
     for rel, doc in sorted(docs.items()):
         if rel.startswith("planning/adr/") and doc.meta.get("id"):
-            index[str(doc.meta["id"])] = Target(rel, None, True)
-            heading_defined.add(str(doc.meta["id"]))
-        if rel.startswith("planning/wireframes/") and re.fullmatch(r"S-[a-z0-9-]+", Path(rel).stem):
-            index[Path(rel).stem] = Target(rel, None, True)
-            heading_defined.add(Path(rel).stem)
+            define(str(doc.meta["id"]), Target(rel, None, True), False)
+        if rel.startswith("planning/wireframes/") and re.fullmatch(r"S-[a-z0-9]+(?:-[a-z0-9]+)*", Path(rel).stem):
+            define(Path(rel).stem, Target(rel, None, True), False)
         for line in scan_lines(doc.body):
-            if line.in_code:
-                continue
-            for m in ID_RE.finditer(strip_links(line.text)):
+            text = strip_links(line.text)
+            defined_here = definition_on_line(line)
+            if defined_here and owned_by(id_kind(defined_here), rel):
+                if line.heading is not None:
+                    define(defined_here, Target(rel, github_slug(line.heading), True), True)
+                else:
+                    anchor = github_slug(line.section) if line.section else None
+                    define(defined_here, Target(rel, anchor), False)
+            else:
+                defined_here = None
+            spans = trace_field_spans(text)
+            for m in ID_RE.finditer(text):
                 ident = m.group(1)
-                if not owned_by(id_kind(ident), rel) or ident in heading_defined:
+                if ident == defined_here and m.start() == text.find(ident):
                     continue
-                if line.heading is not None and ID_RE.match(line.heading.strip()):
-                    if ID_RE.match(line.heading.strip()).group(1) == ident:
-                        index[ident] = Target(rel, github_slug(line.heading), True)
-                        heading_defined.add(ident)
-                        continue
-                if ident not in index:
-                    index[ident] = Target(rel, github_slug(line.section) if line.section else None)
-    return index
+                in_field = any(a <= m.start() < b for a, b in spans)
+                candidates.append((ident, rel, in_field or id_kind(ident) in STRICT_KINDS))
+
+    references: dict[str, set[str]] = {}
+    for ident, rel, definite in candidates:
+        if definite or ident in index:
+            references.setdefault(ident, set()).add(rel)
+    return Scan(index, definitions, references)
+
+
+def build_index(pkg: Package, docs: dict[str, Doc] | None = None) -> dict[str, Target]:
+    """Map every defined ID to where it is defined."""
+    return scan_package(pkg, docs).index
 
 
 def _href(from_rel: str, target: Target, pkg: Package) -> str:
@@ -213,7 +250,10 @@ def backlog_items(pkg: Package) -> list[dict[str, str]]:
         m = re.match(r"(T-\d+\.\d+)\b\s*(?:[—–:-]+\s*)?(.*)", strip_links(heading))
         if not m:
             continue
-        get = lambda name: strip_links(field_value(section, name) or "").strip()  # noqa: E731
+
+        def get(name: str, section: str = section) -> str:
+            return strip_links(field_value(section, name) or "").strip()
+
         items.append({
             "id": m.group(1),
             "title": m.group(2).strip(),
@@ -223,6 +263,25 @@ def backlog_items(pkg: Package) -> list[dict[str, str]]:
             "depends": get("Depends on"),
         })
     return items
+
+
+def _dependency_ids(item: dict[str, str]) -> list[str]:
+    return [m.group(1) for m in ID_RE.finditer(item["depends"]) if id_kind(m.group(1)) == "T"]
+
+
+def next_item(items: list[dict[str, str]]) -> dict[str, str] | None:
+    """The first `todo` item whose dependencies are all `done` (spec section 11)."""
+    status = {i["id"]: i["status"] for i in items}
+    for item in items:
+        if item["status"] == "todo" and all(status.get(d) == "done" for d in _dependency_ids(item)):
+            return item
+    return None
+
+
+def blocked_by(item: dict[str, str], items: list[dict[str, str]]) -> list[str]:
+    """Dependencies of `item` that are not done yet."""
+    status = {i["id"]: i["status"] for i in items}
+    return [d for d in _dependency_ids(item) if status.get(d) != "done"]
 
 
 def _index_md(pkg: Package, docs: dict[str, Doc], index: dict[str, Target]) -> str:
@@ -271,10 +330,13 @@ def _index_md(pkg: Package, docs: dict[str, Doc], index: dict[str, Target]) -> s
             if counts.get(status):
                 ids = ", ".join(i["id"] for i in items if (i["status"] or "?") == status)
                 out.append(f"| {status} | {counts[status]}: {ids} |")
-        nxt = next((i for i in items if i["status"] == "todo"), None)
+        nxt = next_item(items)
         if nxt:
             anchor = index.get(nxt["id"])
-            out += ["", f"**Next up:** [{nxt['id']} — {nxt['title']}]({href(anchor.rel, anchor.anchor) if anchor else href('planning/07-backlog.md')})"]
+            target = href(anchor.rel, anchor.anchor) if anchor else href("planning/07-backlog.md")
+            out += ["", f"**Next up:** [{nxt['id']} — {nxt['title']}]({target})"]
+        elif any(i["status"] == "todo" for i in items):
+            out += ["", "**Next up:** nothing is ready. Every `todo` item is waiting on a dependency that isn't done."]
 
     if index:
         out += ["", "## Where each ID is defined", "", "| ID | Kind | Defined in |", "| -- | ---- | ---------- |"]

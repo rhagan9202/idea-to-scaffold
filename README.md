@@ -71,11 +71,11 @@ its scaffold /tmp/streak-plan --out /tmp
 | Command | What it does |
 | ------- | ------------ |
 | `its new DIR` | Create a blank planning package to fill in by hand |
-| `its import EXPORT.md --into DIR` | Extract `<!-- file: … -->` blocks from a chat export, add default playbooks, cross-link, validate |
+| `its import EXPORT.md --into DIR [--overwrite]` | Extract `<!-- file: … -->` blocks from a chat export, add default playbooks, cross-link, validate. Refuses to replace files you've edited unless `--overwrite` (originals kept as `.orig`) |
 | `its link [DIR] [--check]` | Link every ID reference to its definition, refresh nav blocks (upstream, next, backlinks) and `planning/README.md`. `--check` exits 1 if anything drifted (for CI) |
 | `its validate [DIR]` | Check required files, front matter, ID definitions, traceability, backlog rules, broken links and anchors, `AGENTS.md` sections, readiness |
 | `its backlog [DIR] [--status S]` | List backlog items |
-| `its scaffold DIR [--out PARENT] [--github [OWNER/NAME]] [--no-git] [--force] [--allow-unready]` | Build the repo |
+| `its scaffold DIR [--out PARENT] [--github [OWNER/NAME]] [--no-git] [--force [--yes]] [--allow-unready]` | Build the repo from a package or an existing scaffolded repo. `--force` asks before deleting the target. Stacks: `python`, plus `generic` (with a warning) for anything else |
 
 ## Repository layout
 
@@ -94,7 +94,10 @@ tests/                                  end-to-end tests
 
 ```bash
 pip install -e '.[dev]'
+ruff check src tests
 pytest
 ```
+
+CI runs lint and the tests on Python 3.10 to 3.13.
 
 Adding a language: create `src/idea_to_scaffold/templates/stacks/<language>/` (see the README there).
