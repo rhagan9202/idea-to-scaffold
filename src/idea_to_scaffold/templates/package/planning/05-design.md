@@ -15,7 +15,7 @@ depends_on: [features, architecture]
 ## Screens & navigation
 | ID       | Screen | Purpose | Wireframe | Requirements |
 | -------- | ------ | ------- | --------- | ------------ |
-| S-home   |        |         | [wireframes/S-home.md](wireframes/S-home.md) | FR-001 |
+| S-home   |        |         | `wireframes/S-home.md` | FR-001 |
 
 ```mermaid
 flowchart LR

@@ -34,7 +34,9 @@ so you can add `its link --check .` to CI or a pre-commit hook to stop the docs 
 ## How the docs stay connected
 
 - **One backlog.** `planning/07-backlog.md` is the only list of work items; each has a Milestone, Status,
-  what it Satisfies and what it Depends on. The project plan holds milestones only.
+  what it Satisfies and what it Depends on, plus optional Verify (how to check it is done) and Touches (the files
+  it changes, so parallel items stay apart). Agents propose new items with a placeholder ID (`T-new-<name>`), so
+  parallel branches never mint the same number. The project plan holds milestones only.
 - **Define once, link everywhere.** Each ID (`FR-003`, `T-2.1`, `C-store`, …) is defined in one doc. `its link`
   turns every other mention into a link to that definition, and re-points links when headings change.
 - **Nav blocks with backlinks.** Each doc starts with links to the index, its upstream docs, the next doc, and

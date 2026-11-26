@@ -25,5 +25,5 @@ Priority uses MoSCoW: **Must**, **Should**, **Could**, **Won't (this release)**.
 **Description:**
 <!-- What it does, key behaviours, edge cases. -->
 
-**Requirements:** FR-001, FR-002
+**Requirements:** FR-001
 **Screens:** S-<name>

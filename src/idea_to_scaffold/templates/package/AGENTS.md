@@ -48,7 +48,7 @@ docs/playbooks/ repeatable procedures for agents
 2. Follow its links to the requirements it satisfies and their acceptance criteria, and on to the components and screens that serve them.
 3. Implement in small steps with tests that prove each acceptance criterion.
 4. Set the item's **Status** to `done` and commit in the same change, using `<type>(<scope>): <summary> [T-n.m]` with `Refs: FR-xxx` in the body.
-5. Found more work? Add it to the backlog as a new item with `Status: proposed`. Don't keep TODO lists anywhere else.
+5. Found more work? Add it to the end of the backlog as a new item with a placeholder ID (`### T-new-<short-name> — Title`) and `Status: proposed`. Don't pick the next number yourself, and don't keep TODO lists anywhere else.
 6. If you edited anything in `docs/planning/`, refresh the links (see *Keeping docs in sync*).
 
 ### Keeping docs in sync

@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
 
-from .linker import backlog_items, blocked_by, link_package, next_item
+from .backlog import blocked_by, item_section, load_backlog, next_ready
+from .linker import link_package
 from .package import GENERATED_MARKER, Package, parse_front_matter, templates_dir
 from .validate import Report, validate
 
@@ -148,30 +149,15 @@ def _adapters(pkg: Package, root: Path, written: list[str]) -> None:
     # Codex reads AGENTS.md natively; nothing to generate.
 
 
-def _task_section(pkg: Package, task_id: str) -> str:
-    plan = pkg.path_of("planning/07-backlog.md")
-    if not plan.is_file():
-        return ""
-    _, body = parse_front_matter(plan.read_text(encoding="utf-8"))
-    match = re.search(rf"^(#+)\s+{re.escape(task_id)}\b.*$", body, re.MULTILINE)
-    if not match:
-        return ""
-    level = len(match.group(1))
-    rest = body[match.end():]
-    end = re.search(rf"^#{{1,{level}}}\s", rest, re.MULTILINE)
-    section = match.group(0) + rest[: end.start() if end else len(rest)]
-    return section.strip()
-
-
 def _handoff(pkg: Package, report: Report) -> str:
-    items = backlog_items(pkg)
-    ready = next_item(items)
-    first = str(pkg.get("first_task") or (ready["id"] if ready else ""))
+    items = load_backlog(pkg)
+    ready = next_ready(items)
+    first = str(pkg.get("first_task") or (ready.id if ready else ""))
     if not first:
-        first = next((i["id"] for i in items if i["status"] == "todo"), "T-1.1")
-    chosen = next((i for i in items if i["id"] == first), None)
+        first = next((i.id for i in items if i.status == "todo"), "T-1.1")
+    chosen = next((i for i in items if i.id == first), None)
     waiting = blocked_by(chosen, items) if chosen else []
-    task = _task_section(pkg, first) or f"(Item {first} was not found in docs/planning/07-backlog.md.)"
+    task = item_section(pkg, first) or f"(Item {first} was not found in docs/planning/07-backlog.md.)"
     task = re.sub(r"^#+\s+", "### ", task, count=1)
 
     def rebase(m: re.Match) -> str:  # links in the section are relative to docs/planning/
