@@ -288,3 +288,29 @@ does not block, if other artifacts are still `draft`.
 
 The spec uses `MAJOR.MINOR`. Minor versions only add optional fields or files.
 The scaffolder refuses packages with a newer major version than it supports.
+
+---
+
+## 10. Chat export format
+
+So a package can travel through a chat window, files are emitted inside marker
+comments. Anything outside markers (conversation, questions) is ignored on import.
+
+````text
+<!-- file: planning/01-vision.md -->
+```markdown
+---
+id: vision
+...
+```
+<!-- end file -->
+````
+
+Rules for the importer:
+
+- A block runs from `<!-- file: <path> -->` to the next `<!-- end file -->`.
+- If the block's content is wrapped in a single outer code fence (three or more
+  backticks, optional `markdown`/`md`/`yaml` tag), that fence is removed.
+- If the same path appears more than once, the **last** occurrence wins, so a
+  revised file later in the chat replaces the earlier draft.
+- Paths must be relative, use `/`, and stay inside the package (no `..`).

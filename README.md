@@ -12,7 +12,7 @@ A reproducible workflow for starting agent-assisted software projects:
 | Step | What | State |
 | ---- | ---- | ----- |
 | 1 | Planning package spec + templates (`spec/`, `templates/package/`) | draft |
-| 2 | Ideation-to-plan prompt pack + Claude skill (`prompts/`) | not started |
+| 2 | Ideation-to-plan prompt pack + Claude skill (`prompts/`) | draft |
 | 3 | Python scaffolder CLI (`src/`) | not started |
 | 4 | End-to-end example (`examples/`) | not started |
 
