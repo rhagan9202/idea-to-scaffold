@@ -32,4 +32,4 @@ artifacts:
   planning/06-project-plan.md: draft
   planning/07-backlog.md: draft
 
-first_task: ""   # optional; defaults to the first ready item (a `todo` whose dependencies are `done`)
+first_task: ""   # optional; HANDOFF.md names it. Otherwise agents run `its next` for the first ready item

@@ -61,7 +61,7 @@ def test_scaffold_creates_agent_files_and_commits(plan: Path, tmp_path: Path):
         assert (repo / rel).is_file(), rel
     agents = (repo / "AGENTS.md").read_text()
     assert "`uv run pytest`" in agents and "<test>" not in agents
-    assert "T-1.1 — Project setup verified" in (repo / "HANDOFF.md").read_text()
+    assert "run `its next`" in (repo / "HANDOFF.md").read_text()
     log = subprocess.run(["git", "log", "--oneline"], cwd=repo, capture_output=True, text=True)
     assert "scaffold streak" in log.stdout
     status = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True)
@@ -97,7 +97,7 @@ def test_import_cross_links_ids_and_adds_nav(plan: Path):
     assert "[T-1.1](#t-11--project-setup-verified)" in backlog  # same-doc link to its own heading
     assert "<!-- its:nav" in backlog and "**Referenced by:**" in (plan / "planning/03-requirements.md").read_text()
     index = (plan / "planning/README.md").read_text()
-    assert "**Next up:** [T-1.1" in index
+    assert "Run `its next`" in index and "Next up" not in index
     assert "| [FR-003](03-requirements.md#fr-003--check-in-for-today) |" in index
     assert link_package(Package.load(plan), check=True) == []  # idempotent
 
@@ -114,14 +114,12 @@ def test_heading_rename_is_detected_and_repaired(plan: Path):
     assert "#fr-003--mark-done-today" in (plan / "planning/07-backlog.md").read_text()
 
 
-def test_status_change_makes_index_stale(plan: Path):
+def test_status_change_leaves_generated_files_alone(plan: Path):
+    """The index carries no backlog status, so a status change on a task branch can't make it stale or conflict."""
     backlog = plan / "planning/07-backlog.md"
     backlog.write_text(backlog.read_text().replace("- **Status:** todo", "- **Status:** done", 1))
-    pkg = Package.load(plan)
-    assert link_package(pkg, check=True) == ["planning/README.md"]
-    assert main(["link", "--check", str(plan)]) == 1
-    link_package(pkg)
-    assert "**Next up:** [T-2.1" in (plan / "planning/README.md").read_text()
+    assert link_package(Package.load(plan), check=True) == []
+    assert main(["link", "--check", str(plan)]) == 0
 
 
 def test_backlog_rules(plan: Path):
@@ -151,5 +149,4 @@ def test_scaffolded_repo_validates_in_place(plan: Path, tmp_path: Path):
     assert pkg.repo_layout
     assert validate(pkg).errors == []
     assert link_package(pkg, check=True) == []
-    handoff = (repo / "HANDOFF.md").read_text()
-    assert "(docs/planning/03-requirements.md#non-functional-requirements)" in handoff
+    assert "docs/planning/backlog.json" in (repo / ".gitignore").read_text()

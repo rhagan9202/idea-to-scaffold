@@ -28,8 +28,28 @@ its scaffold my-idea-plan/ --out ~/code --github      # also create a private Gi
 
 Then open `HANDOFF.md` in the new repo and give its kick-off prompt to any agent.
 
-`link`, `validate` and `backlog` also work inside a scaffolded repo (they find `docs/planning/package.yaml`),
-so you can add `its link --check .` to CI or a pre-commit hook to stop the docs drifting.
+Every command except `new`, `import` and `scaffold` also works inside a scaffolded repo (it finds
+`docs/planning/package.yaml`), so you can add `its link --check .` to CI or a pre-commit hook to stop the docs
+drifting.
+
+For a small project, `its new DIR --profile lite` starts a lighter plan: idea, vision, requirements (with features
+folded in) and backlog. Architecture, design and a project plan are optional, and only the requirements need
+approval before scaffolding.
+
+## Working the backlog
+
+Agents (or you) drive the backlog with four commands instead of reading and editing Markdown by hand:
+
+```bash
+its next                 # the next ready item: the first todo whose dependencies are done (exit 3 if none)
+its start T-2.1          # set it in-progress (exit 4 if a dependency isn't done; --force to override)
+its show FR-003          # any ID: its definition, and the docs that mention it
+its done T-2.1           # run its Verify command plus test and lint; set it done only if they pass (exit 5)
+```
+
+Add `--json` to any of them, or to `its backlog`, for a structured answer in a versioned format
+([spec section 16](spec/PACKAGE_SPEC.md#16-json-output)). `its backlog --write` writes `backlog.json` next to the
+backlog for tools that want a file; it is generated and gitignored, never committed.
 
 ## How the docs stay connected
 
@@ -41,8 +61,9 @@ so you can add `its link --check .` to CI or a pre-commit hook to stop the docs 
   turns every other mention into a link to that definition, and re-points links when headings change.
 - **Nav blocks with backlinks.** Each doc starts with links to the index, its upstream docs, the next doc, and
   every doc that references it, so an agent changing a requirement knows exactly what else to revisit.
-- **Generated index.** `planning/README.md` shows reading order with live statuses, a backlog summary and next item,
-  and where every ID is defined. A status change without re-linking shows up in `its link --check`.
+- **Generated index.** `planning/README.md` shows the reading order, each doc's status and where every ID is
+  defined. It carries no backlog status, so starting or finishing an item never touches it and parallel branches
+  don't conflict on it; `its next` and `its backlog` answer that live.
 
 Try it on the bundled example:
 
@@ -60,8 +81,8 @@ its scaffold /tmp/streak-plan --out /tmp
 ├── .github/copilot-instructions.md  points to AGENTS.md
 ├── .cursor/rules/00-project.mdc     alwaysApply rule pointing to AGENTS.md
 ├── .claude/skills/<playbook>/       one Claude skill per playbook
-├── HANDOFF.md                       first task + kick-off prompt per agent
-├── docs/planning/README.md          generated planning index: live statuses, ID map, next backlog item
+├── HANDOFF.md                       how to pick work (`its next`) + kick-off prompt per agent
+├── docs/planning/README.md          generated planning index: reading order, doc statuses, ID map
 ├── docs/planning/07-backlog.md      the only list of work items
 ├── docs/planning/                   the planning package (source of truth), fully cross-linked
 ├── docs/playbooks/                  implement-task, update-plan, write-adr, …
@@ -72,11 +93,15 @@ its scaffold /tmp/streak-plan --out /tmp
 
 | Command | What it does |
 | ------- | ------------ |
-| `its new DIR` | Create a blank planning package to fill in by hand |
+| `its new DIR [--profile lite]` | Create a blank planning package to fill in by hand |
 | `its import EXPORT.md --into DIR [--overwrite]` | Extract `<!-- file: … -->` blocks from a chat export, add default playbooks, cross-link, validate. Refuses to replace files you've edited unless `--overwrite` (originals kept as `.orig`) |
 | `its link [DIR] [--check]` | Link every ID reference to its definition, refresh nav blocks (upstream, next, backlinks) and `planning/README.md`. `--check` exits 1 if anything drifted (for CI) |
 | `its validate [DIR]` | Check required files, front matter, ID definitions, traceability, backlog rules, broken links and anchors, `AGENTS.md` sections, readiness |
-| `its backlog [DIR] [--status S]` | List backlog items |
+| `its backlog [DIR] [--status S] [--ready] [--json] [--write]` | List backlog items; `--write` writes the gitignored `backlog.json` mirror |
+| `its next [DIR] [--all] [--json]` | The next ready item, or with `--all` every ready item. Exit 3 if nothing is ready |
+| `its show ID [DIR] [--json]` | Where any ID is defined, its text, and the docs that mention it |
+| `its start ID [DIR] [--force] [--json]` | Set a ready `todo` item `in-progress`. Exit 4 if a dependency isn't done |
+| `its done [ID] [DIR] [--no-verify] [--json]` | Run the item's Verify command and the test and lint commands (in a repo), then set it `done`. Exit 5 if a check fails. With no ID, the only in-progress item |
 | `its scaffold DIR [--out PARENT] [--github [OWNER/NAME]] [--no-git] [--force [--yes]] [--allow-unready]` | Build the repo from a package or an existing scaffolded repo. `--force` asks before deleting the target. Stacks: `python`, plus `generic` (with a warning) for anything else |
 
 ## Repository layout

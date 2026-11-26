@@ -20,8 +20,7 @@ from .package import (
     AGENTS_SECTIONS,
     BACKLOG_STATUSES,
     DOC_STATUSES,
-    READY_REQUIRES_APPROVED,
-    REQUIRED_FILES,
+    PROFILES,
     SLUG_RE,
     SUPPORTED_MAJOR,
     Package,
@@ -68,6 +67,9 @@ def _check_manifest(pkg: Package, r: Report) -> None:
             r.errors.append(f"package.yaml: {key} is required")
     if pkg.slug and not pkg.slug.startswith("<") and not SLUG_RE.match(pkg.slug):
         r.errors.append(f"package.yaml: project.slug {pkg.slug!r} must be lowercase letters, digits and hyphens")
+    profile = pkg.get("profile")
+    if profile is not None and str(profile).strip().lower() not in PROFILES:
+        r.errors.append(f"package.yaml: profile {profile!r} must be one of {', '.join(PROFILES)}")
     agents = pkg.get("agents")
     if agents is not None and not isinstance(agents, (list, str)):
         r.errors.append("package.yaml: agents must be a list, e.g. [codex, claude]")
@@ -127,7 +129,7 @@ def _check_backlog(pkg: Package, defined: set[str], must_frs: set[str], r: Repor
             )
         milestone = item.milestone.strip()
         if milestone.lower() in NO_VALUE:
-            if status in ("todo", "in-progress"):
+            if status in ("todo", "in-progress") and pkg.profile != "lite":
                 r.warnings.append(f"{ident}: is {status} but has no Milestone")
         elif not ID_RE.fullmatch(milestone) or milestone not in defined:
             r.errors.append(f"{ident}: Milestone {milestone!r} is not a milestone defined in the project plan")
@@ -197,7 +199,7 @@ def validate(pkg: Package, *, check_links_current: bool = True) -> Report:
             "ignored. Remove the root package files if this is a scaffolded repo"
         )
 
-    for rel in REQUIRED_FILES:
+    for rel in pkg.required_files:
         if not pkg.path_of(rel).is_file():
             r.errors.append(f"{rel}: missing")
 
@@ -261,6 +263,8 @@ def validate(pkg: Package, *, check_links_current: bool = True) -> Report:
                 continue
             ident = first.group(1)
             for kind, needs, label in TRACE_RULES:
+                if kind == "FR" and pkg.profile == "lite":
+                    continue  # lite folds features into the requirements doc, so FRs name no F-nn
                 if id_kind(ident) == kind:
                     kinds_found = {id_kind(m.group(1)) for m in ID_RE.finditer(strip_links(section))}
                     if not kinds_found & set(needs):
@@ -291,11 +295,12 @@ def validate(pkg: Package, *, check_links_current: bool = True) -> Report:
                 r.errors.append(f"AGENTS.md: missing section '## {section}'")
 
     # Readiness
-    not_approved = [rel for rel in READY_REQUIRES_APPROVED if pkg.status_of(rel) != "approved"]
+    needs_approval = pkg.ready_requires_approved
+    not_approved = [rel for rel in needs_approval if pkg.status_of(rel) != "approved"]
     for rel in not_approved:
         r.warnings.append(f"{rel}: not approved yet (needed before scaffolding)")
-    for rel in REQUIRED_FILES:
-        if rel.startswith("planning/") and rel not in READY_REQUIRES_APPROVED:
+    for rel in pkg.required_files:
+        if rel.startswith("planning/") and rel not in needs_approval:
             status = pkg.status_of(rel)
             if status not in (None, "approved"):
                 r.warnings.append(f"{rel}: still {status}")

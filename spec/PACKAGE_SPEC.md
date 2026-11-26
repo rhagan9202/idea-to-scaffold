@@ -81,6 +81,7 @@ Codex reads `AGENTS.md` directly, so it needs no adapter.
 
 ```yaml
 spec_version: "0.1"
+profile: full                      # optional: full (default) or lite; see section 15
 
 project:
   name: "Recipe Box"               # human name
@@ -117,7 +118,7 @@ artifacts:                         # status of each planning file
   planning/06-project-plan.md: draft
   planning/07-backlog.md: draft
 
-first_task: "T-1.1"                # optional; defaults to the first ready item (a `todo` whose dependencies are `done`)
+first_task: "T-1.1"                # optional; HANDOFF.md names it, otherwise it tells agents to run `its next`
 ```
 
 Only `spec_version`, `project.name`, `project.slug`, `project.summary` and
@@ -168,7 +169,9 @@ ADR-0004)` rather than deleted; a struck-through ID is still a definition.
 
 - Every feature links to at least one goal (`Supports: G-1`).
 - Every `FR` names the feature it belongs to (`Feature: F-02`) and has
-  testable acceptance criteria written as Given/When/Then or a checklist.
+  testable acceptance criteria written as Given/When/Then or a checklist. In
+  the lite profile features are headings in the requirements doc, so an `FR`
+  names the goal it serves instead (`Supports: G-1`), and this rule is off.
 - Every backlog item names the requirements it satisfies
   (`Satisfies: FR-004, FR-005`) and a definition of done (items with status
   `proposed` or `dropped` are exempt).
@@ -299,8 +302,9 @@ A package is **valid** when:
 - `AGENTS.md` contains the eight required section headings.
 
 A package is **ready to scaffold** when it is valid and `01-vision`,
-`02-features` and `03-requirements` are `approved`. The scaffolder warns, but
-does not block, if other artifacts are still `draft`.
+`02-features` and `03-requirements` are `approved` (in the lite profile, only
+`03-requirements`). The scaffolder warns, but does not block, if other
+artifacts are still `draft`.
 
 ---
 
@@ -372,8 +376,12 @@ Each field is one line (`- **Name:** value`). An empty field is empty; it never 
 - The project plan defines milestones only; an item's milestone is its
   `Milestone` field, so membership is never stated twice.
 - Agents may change the `Status` of the item they work on, in the same commit
-  as the work, and may add items with `Status: proposed`. Any other planning
-  change goes through the `update-plan` playbook.
+  as the work, and may add items with `Status: proposed`. `its start` and
+  `its done` make those changes (section 16); editing the field by hand is
+  equivalent. A clarification that adds, removes or renames no ID and changes
+  no scope may go in with the work (bump the doc's `version`, add a
+  `Plan: <doc> — <change>` line to the commit). Any other planning change goes
+  through the `update-plan` playbook.
 - Item IDs follow `T-<milestone>.<n>` at creation; they are not renumbered if
   an item moves milestone.
 - An agent proposing an item on a branch uses a placeholder ID,
@@ -403,14 +411,16 @@ things:
    doc that references IDs defined here (**Referenced by**). The backlinks tell
    an editor exactly which docs to revisit after a change.
 3. **Planning index.** `planning/README.md` is regenerated with the reading
-   order and live statuses, decisions, wireframes, a backlog summary with the
-   next item, and a table of where every ID is defined.
+   order and each doc's status, decisions, wireframes, and a table of where
+   every ID is defined. It deliberately carries no backlog status or "next
+   item": those change on every task branch, so a committed copy would go stale
+   and conflict when parallel branches merge. `its next` and `its backlog`
+   answer them live.
 
-Drift is caught three ways: `its validate` reports broken links, undefined IDs
-and stale cross-links; `its link --check` exits non-zero when regeneration
-would change anything (suitable for CI or a pre-commit hook); and because the
-index carries live statuses, any status change without a re-link shows up as a
-diff.
+Drift is caught two ways: `its validate` reports broken links, undefined IDs
+and stale cross-links; and `its link --check` exits non-zero when regeneration
+would change anything (suitable for CI or a pre-commit hook). A backlog status
+change never makes generated files stale.
 
 ## 13. ID recognition
 
@@ -441,3 +451,61 @@ wireframe files named `S-<name>.md`.
   `docs/planning/package.yaml`). It refuses a target that overlaps its source.
   `--force` deletes an existing target only after confirmation (`--yes` skips the
   prompt; without a terminal, `--yes` is required).
+
+## 15. Profiles
+
+`profile` in `package.yaml` picks how much planning a project needs.
+
+| | `full` (default) | `lite` |
+| --- | --- | --- |
+| Required docs | `00` to `07` | `00-idea`, `01-vision`, `03-requirements`, `07-backlog` |
+| Features | `02-features.md`, F-nn IDs | `## Feature: <name>` headings in `03-requirements.md`; FRs cite goals with `Supports:` |
+| Architecture, design, project plan | required | optional; add the file when it is worth writing |
+| Milestones | every open item has one | optional (`—`) |
+| Approved before scaffolding | vision, features, requirements | requirements |
+
+`its new DIR --profile lite` creates a lite package. A lite package can grow
+into a full one by adding the missing docs and changing `profile`.
+
+## 16. JSON output
+
+`its backlog`, `next`, `show`, `start` and `done` take `--json`. Output is one
+JSON object on stdout, so agents never parse text or stderr.
+
+- Every object has `"schema": 1` and `"ok"`. A new field is not a schema
+  change; removing or renaming one is.
+- A backlog item is `{id, title, status, milestone, satisfies, depends_on,
+  done_when, verify, touches, placeholder, ready, blocked_by, file, line}`.
+- `next`: `{item, ready (with --all), in_progress, waiting: [{id, title,
+  blocked_by}], cycles}`. `item` is `null` when nothing is ready.
+- `show`: `{id, kind, file, anchor, line, text, referenced_by}`, plus `item`
+  for a backlog ID. `referenced_by` lists the docs that mention the ID: the
+  ones to revisit when it changes.
+- `start`: `{id, previous_status, status, forced, item}`.
+- `done`: `{id, previous_status, status, checks: [{name, command, exit_code,
+  passed, output}], checks_skipped, manual_verify, now_ready}`. Checks are the
+  item's `Verify` command, then `commands.test` and `commands.lint`, run from
+  the repo root; they run only in a scaffolded repo, and `--no-verify` skips
+  them. A `Verify` that isn't a command (`manual: ...`, a test ID) is returned
+  as `manual_verify` for a person to check.
+- An error is `{"schema": 1, "ok": false, "error": {"code", "message", ...}}`.
+  Codes: `not_found`, `placeholder`, `bad_status`, `already_started`,
+  `already_done`, `blocked` (with `blocked_by`), `which_item`, `check_failed`
+  (with `checks`), `no_package`.
+
+Exit codes, the same with or without `--json`:
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | ok |
+| 1 | error |
+| 2 | bad command-line usage |
+| 3 | `next`: nothing is ready |
+| 4 | `start`: a dependency isn't done |
+| 5 | `done`: a check failed; the status is unchanged |
+
+`its backlog --write` saves the `its backlog --json` object as
+`planning/backlog.json` (`docs/planning/backlog.json` in a repo), and `start`
+and `done` keep it current once it exists. It is a generated mirror for tools
+that prefer a file: never edited by hand, gitignored, and not copied by
+`its scaffold`. The Markdown backlog stays the only source of truth.

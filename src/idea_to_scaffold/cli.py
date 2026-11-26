@@ -1,18 +1,33 @@
-"""Command line interface: `its new | import | validate | scaffold`."""
+"""Command line interface: `its new | import | validate | link | backlog | next | show | start | done | scaffold`."""
 from __future__ import annotations
 
 import argparse
-import shutil
+import json
+import re
 import sys
 from pathlib import Path
 
 from . import __version__
-from .backlog import load_backlog
+from .ids import TASK_PATTERN
 from .importer import ImportConflict, import_export
 from .linker import link_package
-from .package import BACKLOG_STATUSES, Package, PackageError, blank_package_dir
+from .package import BACKLOG_STATUSES, PROFILES, Package, PackageError, new_package
 from .scaffold import ScaffoldError, scaffold
 from .validate import validate
+from .work import (
+    EXIT_NOTHING_READY,
+    SCHEMA,
+    WorkError,
+    backlog_payload,
+    done,
+    next_payload,
+    show_payload,
+    shown,
+    start,
+    write_backlog_json,
+)
+
+TASK_RE = re.compile(TASK_PATTERN)
 
 
 def cmd_new(args: argparse.Namespace) -> int:
@@ -20,8 +35,8 @@ def cmd_new(args: argparse.Namespace) -> int:
     if dest.exists() and any(dest.iterdir()):
         print(f"error: {dest} exists and is not empty", file=sys.stderr)
         return 1
-    shutil.copytree(blank_package_dir(), dest, dirs_exist_ok=True)
-    print(f"created blank planning package in {dest}")
+    new_package(dest, args.profile)
+    print(f"created blank {args.profile} planning package in {dest}")
     print("next: fill it in with the prompts in prompts/stages/, or run the plan-project skill")
     return 0
 
@@ -69,14 +84,6 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0 if report.valid else 1
 
 
-def _shown(pkg: Package, rel: str) -> str:
-    """A logical path as the user sees it on disk (docs/planning/... in a scaffolded repo)."""
-    try:
-        return pkg.path_of(rel).relative_to(pkg.root).as_posix()
-    except ValueError:
-        return rel
-
-
 def cmd_link(args: argparse.Namespace) -> int:
     try:
         pkg = Package.load(Path(args.dir))
@@ -88,7 +95,7 @@ def cmd_link(args: argparse.Namespace) -> int:
     except UnicodeDecodeError as exc:
         print(f"error: a planning file is not valid UTF-8 text ({exc.reason})", file=sys.stderr)
         return 1
-    changed = [_shown(pkg, rel) for rel in changed]
+    changed = [shown(pkg, rel) for rel in changed]
     if args.check:
         if changed:
             print("cross-links are out of date in:")
@@ -104,22 +111,166 @@ def cmd_link(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_backlog(args: argparse.Namespace) -> int:
+def _load(args: argparse.Namespace) -> Package | None:
     try:
-        pkg = Package.load(Path(args.dir))
+        return Package.load(Path(args.dir))
     except PackageError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        _fail(args, WorkError("no_package", str(exc)))
+        return None
+
+
+def _emit(payload: dict) -> None:
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+def _fail(args: argparse.Namespace, err: WorkError) -> int:
+    if getattr(args, "json", False):
+        _emit(err.to_dict())
+    else:
+        print(f"error: {err.message}", file=sys.stderr)
+    return err.exit_code
+
+
+def _item_line(item: dict) -> str:
+    milestone = f" ({item['milestone']})" if item.get("milestone") and item["milestone"] not in ("—", "-") else ""
+    return f"{item['id']} — {item['title']}{milestone}"
+
+
+def cmd_backlog(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
         return 1
-    items = load_backlog(pkg)
+    if args.write:
+        path = write_backlog_json(pkg)
+        if not args.json:
+            print(f"wrote {path.relative_to(pkg.root).as_posix()} (generated and gitignored; don't edit it)")
+            return 0
+    payload = backlog_payload(pkg)
     if args.status:
-        items = [i for i in items if i.status == args.status]
-    if not items:
-        print(f"no backlog items with status {args.status}" if args.status else "no backlog items")
+        payload["items"] = [i for i in payload["items"] if i["status"] == args.status]
+    if args.ready:
+        payload["items"] = [i for i in payload["items"] if i["ready"]]
+    if args.json:
+        _emit(payload)
         return 0
-    id_width = max(8, *(len(i.id) + 1 for i in items))
+    items = payload["items"]
+    if not items:
+        what = " ready" if args.ready else (f" with status {args.status}" if args.status else "")
+        print(f"no backlog items{what}")
+        return 0
+    id_width = max(8, *(len(i["id"]) + 1 for i in items))
     print(f"{'ID':<{id_width}} {'STATUS':<12} {'MILESTONE':<10} TITLE")
     for i in items:
-        print(f"{i.id:<{id_width}} {i.status:<12} {i.milestone or '—':<10} {i.title}")
+        print(f"{i['id']:<{id_width}} {i['status']:<12} {i['milestone'] or '—':<10} {i['title']}")
+    return 0
+
+
+def cmd_next(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+    payload = next_payload(pkg)
+    if not args.all:
+        payload.pop("ready")
+    code = 0 if payload["item"] else EXIT_NOTHING_READY
+    if args.json:
+        _emit(payload)
+        return code
+    if payload["item"] is None:
+        print("nothing is ready")
+        if payload["in_progress"]:
+            print(f"  in progress: {', '.join(payload['in_progress'])}")
+        for w in payload["waiting"]:
+            print(f"  {w['id']} waits on {', '.join(w['blocked_by'])}")
+        for cycle in payload["cycles"]:
+            print(f"  dependency cycle: {' -> '.join(cycle)}")
+        return code
+    shown_items = payload["ready"] if args.all else [payload["item"]]
+    for item in shown_items:
+        print(_item_line(item))
+        if item["satisfies"]:
+            print(f"  satisfies: {', '.join(item['satisfies'])}")
+        if item["verify"]:
+            print(f"  verify:    {item['verify']}")
+    if not args.all:
+        print(f"next: its start {payload['item']['id']}")
+    return code
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+    try:
+        payload = show_payload(pkg, args.id)
+    except WorkError as err:
+        return _fail(args, err)
+    if args.json:
+        _emit(payload)
+        return 0
+    where = f"{payload['file']}#{payload['anchor']}" if payload["anchor"] else payload["file"]
+    print(f"{payload['id']} ({payload['kind']}), defined in {where}, line {payload['line']}")
+    print()
+    print(payload["text"])
+    print()
+    refs = payload["referenced_by"]
+    print("mentioned in: " + (", ".join(refs) if refs else "no other doc"))
+    return 0
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+    try:
+        payload = start(pkg, args.id, force=args.force)
+    except WorkError as err:
+        if err.code == "blocked" and not args.json:
+            print(f"error: {err.message} (use --force to start it anyway)", file=sys.stderr)
+            return err.exit_code
+        return _fail(args, err)
+    if args.json:
+        _emit(payload)
+        return 0
+    item = payload["item"]
+    print(f"{_item_line(item)} is now in-progress (was {payload['previous_status']})")
+    if item["verify"]:
+        print(f"  verify: {item['verify']}")
+    print(f"when it's finished: its done {item['id']}")
+    return 0
+
+
+def cmd_done(args: argparse.Namespace) -> int:
+    if args.id and args.dir == "." and not TASK_RE.fullmatch(args.id):  # `its done <dir>`: no ID, just a folder
+        args.dir, args.id = args.id, None
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+
+    def announce(check) -> None:
+        if not args.json:
+            print(f"running {check.name}: {check.command}", flush=True)
+
+    try:
+        payload = done(pkg, args.id, verify=not args.no_verify, on_check=announce)
+    except WorkError as err:
+        if err.code == "check_failed" and not args.json:
+            for check in err.details["checks"]:
+                if not check["passed"]:
+                    print(f"\n{check['name']} failed (exit {check['exit_code']}): {check['command']}")
+                    if check["output"]:
+                        print(check["output"])
+        return _fail(args, err)
+    if args.json:
+        _emit(payload)
+        return 0
+    if payload["checks_skipped"]:
+        print(f"checks skipped: {payload['checks_skipped']}")
+    print(f"{payload['id']} is now done (was {payload['previous_status']})")
+    if payload["manual_verify"]:
+        print(f"  check by hand: {payload['manual_verify']}")
+    if payload["now_ready"]:
+        print(f"  now ready: {', '.join(payload['now_ready'])}")
     return 0
 
 
@@ -187,6 +338,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("new", help="create a blank planning package")
     s.add_argument("dir")
+    s.add_argument(
+        "--profile", choices=PROFILES, default="full",
+        help="lite: idea, vision, requirements and backlog only; architecture, design and plan are optional",
+    )
     s.set_defaults(func=cmd_new)
 
     s = sub.add_parser("import", help="import a chat export (Markdown with file markers) into a package")
@@ -208,10 +363,42 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--check", action="store_true", help="don't write; exit 1 if anything is out of date (for CI)")
     s.set_defaults(func=cmd_link)
 
+    dir_help = "package folder or scaffolded repo (default: .)"
+    json_help = f"print JSON (schema {SCHEMA}) instead of text"
+
     s = sub.add_parser("backlog", help="list backlog items")
-    s.add_argument("dir", nargs="?", default=".", help="package folder or scaffolded repo (default: .)")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--status", choices=BACKLOG_STATUSES, help="only items with this status")
+    s.add_argument("--ready", action="store_true", help="only items that can start now")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.add_argument("--write", action="store_true", help="write the backlog.json mirror next to the backlog")
     s.set_defaults(func=cmd_backlog)
+
+    s = sub.add_parser("next", help="the next ready backlog item (exit 3 if nothing is ready)")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--all", action="store_true", help="every ready item, in backlog order")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_next)
+
+    s = sub.add_parser("show", help="where an ID is defined, its text, and the docs that mention it")
+    s.add_argument("id")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_show)
+
+    s = sub.add_parser("start", help="set a ready item in-progress (exit 4 if a dependency isn't done)")
+    s.add_argument("id")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--force", action="store_true", help="start it even if dependencies aren't done, or it is blocked")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_start)
+
+    s = sub.add_parser("done", help="run an item's checks, then set it done (exit 5 if a check fails)")
+    s.add_argument("id", nargs="?", help="the item (default: the only in-progress item)")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--no-verify", action="store_true", help="don't run Verify, test and lint first")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_done)
 
     s = sub.add_parser("scaffold", help="create the project repo from a package")
     s.add_argument("package", help="planning package folder")
