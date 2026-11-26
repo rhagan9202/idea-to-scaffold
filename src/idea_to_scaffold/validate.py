@@ -9,7 +9,6 @@ from .ids import (
     ID_RE,
     META_FILES,
     field_value,
-    github_slug,
     id_kind,
     scan_lines,
     sections,
@@ -96,8 +95,7 @@ def _check_links(pkg: Package, rel: str, body: str, r: Report, slug_cache: dict)
             if anchor and target.suffix == ".md":
                 if target not in slug_cache:
                     _, tbody = parse_front_matter(target.read_text(encoding="utf-8"))
-                    slug_cache[target] = {github_slug(h) for h in
-                                          (ln.heading for ln in scan_lines(tbody)) if h is not None}
+                    slug_cache[target] = {ln.anchor for ln in scan_lines(tbody) if ln.anchor}
                 if anchor not in slug_cache[target]:
                     r.errors.append(f"{rel}: link {href} points to a heading that doesn't exist (run `its link` to re-point ID links)")
 

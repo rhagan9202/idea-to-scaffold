@@ -7,6 +7,7 @@ from pathlib import Path, PureWindowsPath
 import pytest
 
 from idea_to_scaffold.cli import main
+from idea_to_scaffold.ids import scan_lines
 from idea_to_scaffold.importer import ImportErrorBadPath, _safe_path, import_export
 from idea_to_scaffold.linker import link_package
 from idea_to_scaffold.package import Package
@@ -136,3 +137,35 @@ def test_blank_template_only_reports_its_placeholders(tmp_path: Path, capsys):
 def test_no_git_with_github_is_rejected(plan: Path, tmp_path: Path, capsys):
     assert main(["scaffold", str(plan), "--out", str(tmp_path / "o"), "--no-git", "--github", "me/x"]) == 2
     assert "--github needs git" in capsys.readouterr().err
+
+
+# --- anchors and indented code --------------------------------------------------------------------------------
+
+def test_repeated_headings_get_numbered_anchors():
+    lines = scan_lines("# Doc\n\n## Notes\n\nx\n\n## Notes\n\ny\n\n## Notes 1\n")
+    assert [ln.anchor for ln in lines if ln.heading] == ["doc", "notes", "notes-1", "notes-1-1"]
+    assert lines[8].section_anchor == "notes-1"
+
+
+def test_ids_under_a_repeated_heading_link_to_the_right_section(mini: Path):
+    write(mini, "planning/01-vision.md", "vision", "Vision",
+          "# Vision\n\n## Notes\nNothing here.\n\n## Notes\n- **G-1** — Be tiny.\n")
+    pkg = Package.load(mini)
+    link_package(pkg)
+    feats = (mini / "planning/02-features.md").read_text()
+    assert "(01-vision.md#notes-1)" in feats
+    assert not any("heading that doesn't exist" in e for e in validate(pkg).errors)
+
+
+def test_indented_code_is_not_linked_but_nested_list_items_are(mini: Path):
+    vision = mini / "planning/01-vision.md"
+    vision.write_text(vision.read_text() + (
+        "\nExample output:\n\n    $ tool --check FR-001\n    ok\n\n"
+        "- Parent item\n\n    Continuation that mentions FR-001.\n\n"
+        "1. Step\n    - nested bullet about FR-001\n"
+    ))
+    link_package(Package.load(mini))
+    text = vision.read_text()
+    assert "    $ tool --check FR-001\n" in text
+    assert "Continuation that mentions [FR-001](" in text
+    assert "nested bullet about [FR-001](" in text
