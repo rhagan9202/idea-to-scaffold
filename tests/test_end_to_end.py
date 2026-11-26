@@ -13,16 +13,6 @@ from idea_to_scaffold.package import Package
 from idea_to_scaffold.scaffold import ScaffoldError, scaffold
 from idea_to_scaffold.validate import validate
 
-ROOT = Path(__file__).resolve().parent.parent
-EXAMPLE = ROOT / "examples" / "streak" / "chat-export.md"
-
-
-@pytest.fixture
-def plan(tmp_path: Path) -> Path:
-    dest = tmp_path / "streak-plan"
-    assert main(["import", str(EXAMPLE), "--into", str(dest)]) == 0
-    return dest
-
 
 def test_parse_export_strips_fences_and_last_wins():
     text = (
@@ -49,7 +39,9 @@ def test_validation_catches_broken_traceability(plan: Path):
     text = req.read_text()
     req.write_text(re.sub(r"\*\*Feature:\*\* \[F-02\]\([^)]*\)", "**Feature:** none", text))
     feats = plan / "planning/02-features.md"
-    feats.write_text(re.sub(r"\*\*Requirements:\*\* \[FR-003\]\([^)]*\)", "**Requirements:** FR-099", feats.read_text()))
+    feats.write_text(
+        re.sub(r"\*\*Requirements:\*\* \[FR-003\]\([^)]*\)", "**Requirements:** FR-099", feats.read_text())
+    )
     errors = validate(Package.load(plan)).errors
     assert any(e.startswith("FR-003: functional requirement must name") for e in errors)
     assert any(e.startswith("FR-099: referenced") for e in errors)

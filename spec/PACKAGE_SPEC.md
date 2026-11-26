@@ -89,7 +89,7 @@ project:
   license: "MIT"                   # optional
 
 stack:                             # what the scaffolder sets up
-  language: "python"               # python | typescript | ...
+  language: "python"               # python has a skeleton; anything else gets the generic one, with a warning
   runtime: "3.12"
   framework: "fastapi"             # optional
   package_manager: "uv"            # optional
@@ -380,3 +380,33 @@ and stale cross-links; `its link --check` exits non-zero when regeneration
 would change anything (suitable for CI or a pre-commit hook); and because the
 index carries live statuses, any status change without a re-link shows up as a
 diff.
+
+## 13. ID recognition
+
+IDs with an unmistakable shape (`FR-nnn`, `NFR-nnn`, `ADR-nnnn`, `T-n.m`) are
+always treated as references, so a typo such as `FR-099` is reported. Shorter
+shapes (`Mn`, `F-nn`, `G-n`, `C-name`, `S-name`) also occur in ordinary prose
+("M1 Mac", "C-suite", "F-16", "S-expression"), so they count as references only
+when the ID is defined somewhere, or when they appear in a traceability field
+(`**Supports:**`, `**Feature:**`, `**Requirements:**`, `**Screens:**`,
+`**Serves:**`, `**Satisfies:**`, `**Depends on:**`, `**Milestone:**`), where
+nothing but IDs is expected.
+
+A prose word that matches a *defined* ID ("we ship M1 first") is linked. Wrap it
+in backticks to keep it as plain text.
+
+An ID is defined by a heading that starts with it, a table row whose first cell
+is the ID, or a line that starts with the ID in bold (`- **G-1** — ...`), in the
+file that owns that kind of ID (section 4.2), plus ADR front-matter ids and
+wireframe files named `S-<name>.md`.
+
+## 14. Re-importing and re-scaffolding
+
+- `its import` into an existing package leaves files that match the export
+  alone (generated links and nav blocks are ignored when comparing). If any
+  existing file differs, nothing is written and the conflicting files are
+  listed; `--overwrite` replaces them and keeps each original as `<name>.orig`.
+- `its scaffold` accepts a package folder or a scaffolded repo (it reads
+  `docs/planning/package.yaml`). It refuses a target that overlaps its source.
+  `--force` deletes an existing target only after confirmation (`--yes` skips the
+  prompt; without a terminal, `--yes` is required).

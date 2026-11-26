@@ -68,19 +68,61 @@ def seed_defaults(dest: Path) -> list[str]:
     return copied
 
 
-def import_export(export_file: Path, dest: Path, *, seed: bool = True) -> tuple[list[str], list[str]]:
-    """Write files from a chat export into dest. Returns (written, seeded)."""
+NAV_RE = re.compile(r"\n?<!-- its:nav[^>]*-->.*?<!-- /its:nav -->\n?", re.DOTALL)
+ID_LINK_RE = re.compile(r"\[([^\]\n]+)\]\([^)\s]*\)")
+
+
+def normalise(text: str) -> str:
+    """Content with generated parts removed (nav blocks, links), so a file that `its link` touched still compares
+    equal to the export it came from."""
+    text = NAV_RE.sub("\n", text.replace("\r\n", "\n"))
+    text = ID_LINK_RE.sub(r"\1", text)
+    return "\n".join(line.rstrip() for line in text.split("\n") if line.strip())
+
+
+class ImportConflict(Exception):
+    """Raised when an import would replace files that differ from the export."""
+
+    def __init__(self, paths: list[str]):
+        self.paths = paths
+        super().__init__(
+            f"{len(paths)} existing file(s) differ from the export and would be overwritten: "
+            + ", ".join(paths)
+            + ". Nothing was written. Re-run with --overwrite to replace them (originals are kept as .orig)."
+        )
+
+
+def import_export(
+    export_file: Path, dest: Path, *, seed: bool = True, overwrite: bool = False
+) -> tuple[list[str], list[str]]:
+    """Write files from a chat export into dest. Returns (written, seeded).
+
+    Files that already exist and differ from the export (after ignoring generated links and nav blocks) are
+    conflicts: the import is refused as a whole unless ``overwrite`` is set, in which case each replaced file's
+    previous content is saved next to it as ``<name>.orig``. Files identical to the export are left untouched.
+    """
     files = parse_export(Path(export_file).read_text(encoding="utf-8"))
     if not files:
-        raise ValueError(
-            "no <!-- file: ... --> blocks found. Did you export the chat after stage 8?"
-        )
-    dest.mkdir(parents=True, exist_ok=True)
-    written = []
+        raise ValueError("no <!-- file: ... --> blocks found. Did you export the chat after stage 8?")
+    dest = Path(dest)
+    to_write: dict[str, str] = {}
+    conflicts: list[str] = []
     for rel, content in files.items():
         target = dest / rel
+        if target.exists():
+            if normalise(target.read_text(encoding="utf-8")) == normalise(content):
+                continue  # unchanged; keep the linked version on disk
+            conflicts.append(rel)
+        to_write[rel] = content
+    if conflicts and not overwrite:
+        raise ImportConflict(conflicts)
+
+    dest.mkdir(parents=True, exist_ok=True)
+    for rel, content in to_write.items():
+        target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
+        if rel in conflicts:
+            target.with_name(target.name + ".orig").write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
         target.write_text(content, encoding="utf-8")
-        written.append(rel)
     seeded = seed_defaults(dest) if seed else []
-    return written, seeded
+    return list(to_write), seeded

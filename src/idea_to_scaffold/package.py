@@ -104,7 +104,7 @@ class Package:
     repo_layout: bool = False
 
     @classmethod
-    def load(cls, root: Path) -> "Package":
+    def load(cls, root: Path) -> Package:
         root = Path(root)
         if (root / "package.yaml").is_file():
             manifest_path, planning, playbooks, repo = root / "package.yaml", root / "planning", root / "playbooks", False

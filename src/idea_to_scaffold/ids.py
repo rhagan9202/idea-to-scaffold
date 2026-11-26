@@ -34,6 +34,17 @@ KIND_EXAMPLES = {
     "M": "M1", "T": "T-1.1", "ADR": "ADR-0001",
 }
 
+# Kinds whose format can't be confused with ordinary prose. Other kinds ("M1 Mac", "C-suite", "F-16",
+# "S-expression", "G-7") only count as references when they are defined somewhere, or when they appear in a
+# traceability field such as `**Supports:**`, where nothing but IDs is expected.
+STRICT_KINDS = {"FR", "NFR", "ADR", "T"}
+TRACE_FIELDS = (
+    "Supports", "Feature", "Requirements", "Screens", "Serves", "Satisfies", "Depends on", "Milestone",
+)
+TRACE_FIELD_RE = re.compile(rf"\*\*(?:{'|'.join(re.escape(f) for f in TRACE_FIELDS)}):\*\*(.*)")
+TABLE_FIRST_CELL_RE = re.compile(r"^\s*\|\s*(?:\[([^\]]+)\]\([^)]*\)|([^|]+?))\s*\|")
+BOLD_LEAD_RE = re.compile(r"^\s*(?:[-*+]\s+)?\*\*\[?([^*\]]+)\]?(?:\([^)]*\))?\*\*")
+
 # Generated / meta files that are not scanned for IDs.
 META_FILES = {"planning/README.md", "planning/wireframes/README.md"}
 
@@ -43,6 +54,28 @@ def id_kind(identifier: str) -> str:
         if identifier.startswith(prefix):
             return prefix.rstrip("-")
     return "M"
+
+
+def definition_on_line(line: Line) -> str | None:
+    """The ID this line *defines*, if any: a heading that starts with the ID, a table row whose first cell is the
+    ID, or a list item / paragraph that starts with the ID in bold (`- **G-1** — ...`)."""
+    if line.in_code:
+        return None
+    if line.heading is not None:
+        m = ID_RE.match(strip_links(line.heading).strip())
+        return m.group(1) if m else None
+    for regex in (TABLE_FIRST_CELL_RE, BOLD_LEAD_RE):
+        m = regex.match(line.text)
+        if m:
+            cell = next(g for g in m.groups() if g is not None).strip()
+            if ID_RE.fullmatch(cell):
+                return cell
+    return None
+
+
+def trace_field_spans(text: str) -> list[tuple[int, int]]:
+    """Character spans of traceability-field values on a line (where every ID-shaped token is an ID)."""
+    return [(m.start(1), m.end(1)) for m in TRACE_FIELD_RE.finditer(text)]
 
 
 def owned_by(kind: str, rel: str) -> bool:
