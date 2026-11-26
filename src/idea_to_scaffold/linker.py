@@ -30,7 +30,6 @@ from .ids import (
     OWNERS,
     STRICT_KINDS,
     definition_on_line,
-    github_slug,
     id_kind,
     owned_by,
     scan_lines,
@@ -130,9 +129,9 @@ def scan_package(pkg: Package, docs: dict[str, Doc] | None = None) -> Scan:
             defined_here = definition_on_line(line)
             if defined_here and owned_by(id_kind(defined_here), rel):
                 if line.heading is not None:
-                    define(defined_here, Target(rel, github_slug(line.heading), True), True)
+                    define(defined_here, Target(rel, line.anchor, True), True)
                 else:
-                    anchor = github_slug(line.section) if line.section else None
+                    anchor = line.section_anchor
                     define(defined_here, Target(rel, anchor), False)
             else:
                 defined_here = None

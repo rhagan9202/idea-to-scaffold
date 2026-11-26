@@ -100,35 +100,85 @@ def github_slug(heading: str) -> str:
     return text.replace(" ", "-")
 
 
+class SlugCounter:
+    """Unique heading anchors within one document, the way GitHub numbers repeats: `notes`, `notes-1`, `notes-2`."""
+
+    def __init__(self) -> None:
+        self.seen: set[str] = set()
+
+    def slug(self, heading: str) -> str:
+        base = github_slug(heading)
+        slug, n = base, 0
+        while slug in self.seen:
+            n += 1
+            slug = f"{base}-{n}"
+        self.seen.add(slug)
+        return slug
+
+
 @dataclass
 class Line:
     number: int
     text: str
-    in_code: bool       # inside a fenced block (or the fence line itself)
+    in_code: bool       # inside a fenced or indented code block (or a fence line itself)
     heading: str | None  # heading text if this line is a heading
     section: str | None  # text of the nearest heading above (or this heading)
+    anchor: str | None = None          # this heading's unique anchor, if it is a heading
+    section_anchor: str | None = None  # unique anchor of the nearest heading above (or this heading)
+
+
+LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d{1,9}[.)])(?:\s|$)")
+INDENTED_RE = re.compile(r"^(?: {4}|\t)")
 
 
 def scan_lines(body: str) -> list[Line]:
+    """Classify every line: code (fenced, or indented by four spaces outside a list), heading, and the section it
+    sits in, with GitHub-style unique anchors for headings."""
     out: list[Line] = []
     fence: str | None = None
     section: str | None = None
+    anchor: str | None = None
+    slugs = SlugCounter()
+    in_list = False        # inside a list: indented lines continue the item instead of starting code
+    prev_blank = True      # an indented code block can't interrupt a paragraph
+    in_indented = False
     for i, text in enumerate(body.split("\n")):
         m = FENCE_RE.match(text)
         if fence:
-            out.append(Line(i, text, True, None, section))
+            out.append(Line(i, text, True, None, section, None, anchor))
             if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
                 fence = None
             continue
+        blank = text.strip() == ""
+        if blank:
+            out.append(Line(i, text, in_indented, None, section, None, anchor))
+            prev_blank = True
+            continue
+        indented = INDENTED_RE.match(text) is not None
+        if indented and not in_list and (prev_blank or in_indented):
+            in_indented = True
+            out.append(Line(i, text, True, None, section, None, anchor))
+            prev_blank = False
+            continue
+        in_indented = False
         if m:
             fence = m.group(1)
-            out.append(Line(i, text, True, None, section))
+            out.append(Line(i, text, True, None, section, None, anchor))
+            prev_blank = False
             continue
         h = HEADING_RE.match(text)
         heading = h.group(2) if h else None
+        own = None
         if heading is not None:
             section = heading
-        out.append(Line(i, text, False, heading, section))
+            own = anchor = slugs.slug(heading)
+            in_list = False
+        elif LIST_ITEM_RE.match(text):
+            in_list = True
+        elif not indented and not text.startswith(">"):
+            in_list = in_list and not prev_blank  # a paragraph after a blank line ends the list
+        out.append(Line(i, text, False, heading, section, own, anchor))
+        prev_blank = False
     return out
 
 
