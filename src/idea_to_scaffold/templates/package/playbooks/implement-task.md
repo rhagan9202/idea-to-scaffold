@@ -12,7 +12,7 @@ depends_on: []
 
 **Input:** a backlog item ID (for example `T-2.3`). If none is given, run `its next` (or, without `its`, use the first `todo` item in `docs/planning/07-backlog.md` whose dependencies are `done`).
 
-1. Open the item in `docs/planning/07-backlog.md`. Read its `Satisfies`, `Depends on`, `Done when` and `Verify`. Run `its start <ID>` to set **Status** to `in-progress` (it refuses if a dependency isn't done), or set it by hand.
+1. Open the item in `docs/planning/07-backlog.md`. Read its `Satisfies`, `Depends on`, `Done when` and `Verify`. Run `its start <ID>` to set **Status** to `in-progress` (it refuses if a dependency isn't done), or set it by hand. If you are on a claim branch (`its/<ID>-...`, made by `its start --worktree`), skip this: the branch is the claim.
 2. Follow each requirement link to its acceptance criteria in `03-requirements.md`; from there, follow the nav block's backlinks to the components and screens that serve it in `04-architecture.md` and `05-design.md`.
 3. Check `docs/planning/adr/` (listed in `docs/planning/README.md`) for decisions that constrain the work.
 4. Write or update tests that express the acceptance criteria. Confirm they fail.

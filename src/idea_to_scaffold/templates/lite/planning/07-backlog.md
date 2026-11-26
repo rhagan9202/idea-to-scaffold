@@ -24,7 +24,8 @@ item whose dependencies are `done` is next.
 - `Verify` (optional) is how to check the item is done: a command in backticks, a test ID, or `manual: ...`.
 - `Touches` (optional) lists the paths or globs the item is expected to change, so items that would edit the
   same files aren't run in parallel.
-- Update the item's status in the same commit as the work.
+- Update the item's status in the same commit as the work. On a claim branch (`its/<ID>-...`) the branch
+  itself marks the item as taken, so only `done` (or `blocked`) is committed.
 
 ## Items
 
