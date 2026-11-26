@@ -489,7 +489,7 @@ JSON object on stdout, so agents never parse text or stderr.
   `commands: {claude, codex}` for a claim. A claim is `{id, branch, remote,
   worktree, agent, started, finished}`.
 - `claims`: `{base, claims}`. `release`: `{id, deleted_branches,
-  removed_worktree, remote_branches}`. `renumber`: `{dry_run, renumbered:
+  removed_worktree, deleted_remote_branches, remote_branches}`. `renumber`: `{dry_run, renumbered:
   [{from, to}], files}`.
 - `done`: `{id, previous_status, status, checks: [{name, command, exit_code,
   passed, output}], checks_skipped, manual_verify, now_ready, merge_needed}`. Checks are the
@@ -500,7 +500,7 @@ JSON object on stdout, so agents never parse text or stderr.
 - An error is `{"schema": 1, "ok": false, "error": {"code", "message", ...}}`.
   Codes: `not_found`, `placeholder`, `not_placeholder`, `bad_status`,
   `already_started`, `already_done`, `blocked` (with `blocked_by`), `claimed`
-  (with `claim`), `which_item`, `check_failed` (with `checks`), `no_package`,
+  (with `claim`), `overlap` (with `overlaps`, `touches_listed`), `which_item`, `check_failed` (with `checks`), `no_package`,
   `no_base`, `not_git`, `worktree_exists`, `git_error`.
 
 Exit codes, the same with or without `--json`:
@@ -513,6 +513,7 @@ Exit codes, the same with or without `--json`:
 | 3 | `next`: nothing is ready (with `--parallel`: nothing can start alongside the claims) |
 | 4 | `start`: a dependency isn't done |
 | 5 | `done`: a check failed; the status is unchanged |
+| 6 | `start`: the item may change the same files as one already running |
 
 `its backlog --write` saves the `its backlog --json` object as
 `planning/backlog.json` (`docs/planning/backlog.json` in a repo), and `start`
@@ -546,16 +547,20 @@ or Codex in each; it never launches an agent itself.
   (`integration_branch` in `package.yaml`, default `main`; `--base` overrides
   it), `next` and `start` read statuses from the integration branch's copy of
   the backlog, so a dependency counts only once it is merged there.
-- **Touches keep parallel items apart.** `its next --parallel [N]` offers up to
-  N ready items (default 3) whose `Touches` overlap neither each other nor an
-  active claim. Two entries overlap when they could name the same file: equal
-  paths, a directory and a path inside it, or a glob and anything under its
-  fixed prefix. An item without `Touches` could touch anything, so it is never
-  offered next to another.
+- **Only items confirmed apart run in parallel.** Running items are active
+  claims and `in-progress` items. `its start` (with or without a branch)
+  refuses an item whose `Touches` might overlap a running item's, with exit 6,
+  unless `--allow-overlap`. `its next --parallel [N]` offers up to N ready
+  items (default 3) that overlap neither each other nor a running item. Two
+  entries overlap when they could name the same file: equal paths, a directory
+  and a path inside it, or a glob and anything under its fixed prefix. An item
+  without `Touches` could touch anything, so it never runs alongside another
+  item; it can start only when nothing else is running.
 - **Releasing.** `its claims` lists claims and marks finished ones;
   `its release <ID>` removes the claim's worktree and deletes its local branch
-  (`--force` if the worktree has changes or the branch isn't merged). Remote
-  branches are left for a person to delete.
+  (`--force` if the worktree has changes or the branch isn't merged).
+  `--remote` also deletes its pushed branches on every remote; one that isn't
+  merged into the integration branch needs `--force` too.
 - **Renumbering.** Branches propose items with placeholder IDs
   (`T-new-<name>`). After merging, run `its renumber` on the integration branch:
   each placeholder that isn't dropped gets `T-<n>.<next free>`, where `n` is its

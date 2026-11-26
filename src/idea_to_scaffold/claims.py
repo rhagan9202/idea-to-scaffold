@@ -217,15 +217,37 @@ class ClaimTaken(GitError):
         super().__init__(f"{claim.id} is already claimed by branch {claim.branch}{where}")
 
 
-def release_claim(cwd: Path, ident: str, *, force: bool = False) -> dict:
-    """Remove a claim: its worktree (if it is clean, or with force) and its local branch. Remote branches are left
-    for the user to delete, since they may hold someone else's pushed work."""
+def remote_claim_branches(cwd: Path, ident: str) -> list[str]:
+    """Every remote-tracking claim branch for an item, e.g. `origin/its/T-2.1-store`."""
+    refs = git(cwd, "for-each-ref", "--format=%(refname)", "refs/remotes/", check=False)
+    return [r.removeprefix("refs/remotes/") for r in refs.splitlines()
+            if r.startswith("refs/remotes/") and item_of_branch(r) == ident]
+
+
+def _merged(cwd: Path, ref: str, base_ref: str | None) -> bool:
+    if base_ref is None:
+        return False
+    return subprocess.run(["git", "merge-base", "--is-ancestor", ref, base_ref], cwd=cwd,
+                          capture_output=True).returncode == 0
+
+
+def release_claim(
+    cwd: Path, ident: str, *, force: bool = False, remote: bool = False, base_ref: str | None = None,
+) -> dict:
+    """Remove a claim: its worktree (if it is clean, or with force) and its local branch. With `remote`, also delete
+    its pushed branches; one that isn't merged into `base_ref` is only deleted with force."""
     with claims_lock(cwd) as store:
         data = _load_store(store)
         entry = data.get(ident) or {}
         local = [c for c in list_claims(cwd) if c.id == ident and not c.remote]
-        if not local and not entry:
-            raise GitError(f"{ident} has no local claim")
+        pushed = remote_claim_branches(cwd, ident)
+        if not local and not entry and not (remote and pushed):
+            hint = f" (it has pushed branches: {', '.join(pushed)}; add --remote)" if pushed else ""
+            raise GitError(f"{ident} has no local claim{hint}")
+        if remote and not force:
+            unmerged = [b for b in pushed if not _merged(cwd, f"refs/remotes/{b}", base_ref)]
+            if unmerged:
+                raise GitError(f"{', '.join(unmerged)} has work that isn't merged; add --force to delete it anyway")
         removed_worktree = None
         worktree = entry.get("worktree")
         if worktree and Path(worktree).exists():
@@ -237,10 +259,16 @@ def release_claim(cwd: Path, ident: str, *, force: bool = False) -> dict:
                 raise GitError(f"{claim.branch} is checked out here; switch to another branch first")
             git(cwd, "branch", "-D" if force else "-d", claim.branch)
             deleted.append(claim.branch)
+        deleted_remote = []
+        if remote:
+            for name in pushed:
+                remote_name, branch = name.split("/", 1)
+                git(cwd, "push", remote_name, "--delete", branch)
+                deleted_remote.append(name)
         data.pop(ident, None)
         _save_store(store, data)
-    remotes = [c.branch for c in list_claims(cwd) if c.id == ident and c.remote]
-    return {"id": ident, "deleted_branches": deleted, "removed_worktree": removed_worktree, "remote_branches": remotes}
+    return {"id": ident, "deleted_branches": deleted, "removed_worktree": removed_worktree,
+            "deleted_remote_branches": deleted_remote, "remote_branches": remote_claim_branches(cwd, ident)}
 
 
 # --- Touches overlap ------------------------------------------------------------------------------------------

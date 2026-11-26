@@ -58,9 +58,10 @@ When several agents work at once, each item gets its own branch and worktree, an
 - On a claim branch, don't set the item `in-progress`: the branch says that. Commit `done` with the work
   (`its done` with no ID finds the item from the branch name).
 - An item's dependencies count as done only once they are merged to `main`.
-- `its next --parallel` lists ready items whose **Touches** don't overlap the claimed ones. List **Touches** on
-  items you expect to run in parallel.
-- After merging, release the claim with `its release <ID>`, and run `its renumber` on `main` to give proposed
+- Items run side by side only when their **Touches** confirm they change different files. `its start` refuses
+  an item that might overlap one already running, and an item with no **Touches** never runs alongside another.
+  `its next --parallel` lists the ready items that can start now.
+- After merging, release the claim with `its release <ID>` (`--remote` also deletes the pushed branch), and run `its renumber` on `main` to give proposed
   `T-new-...` items their permanent IDs.
 
 ### Keeping docs in sync

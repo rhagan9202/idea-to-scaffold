@@ -243,10 +243,14 @@ def cmd_start(args: argparse.Namespace) -> int:
         return 1
     try:
         payload = start(pkg, args.id, force=args.force, branch=args.branch, worktree=args.worktree,
-                        agent=args.agent, base=args.base)
+                        agent=args.agent, base=args.base, allow_overlap=args.allow_overlap)
     except WorkError as err:
         if err.code == "blocked" and not args.json:
             print(f"error: {err.message} (use --force to start it anyway)", file=sys.stderr)
+            return err.exit_code
+        if err.code == "overlap" and not args.json:
+            print(f"error: {err.message}", file=sys.stderr)
+            print("see what can run now: its next --parallel", file=sys.stderr)
             return err.exit_code
         return _fail(args, err)
     if args.json:
@@ -293,7 +297,7 @@ def cmd_release(args: argparse.Namespace) -> int:
     if pkg is None:
         return 1
     try:
-        payload = release(pkg, args.id, force=args.force)
+        payload = release(pkg, args.id, force=args.force, remote=args.remote)
     except WorkError as err:
         return _fail(args, err)
     if args.json:
@@ -303,8 +307,10 @@ def cmd_release(args: argparse.Namespace) -> int:
         print(f"removed worktree {payload['removed_worktree']}")
     for b in payload["deleted_branches"]:
         print(f"deleted branch {b}")
+    for b in payload["deleted_remote_branches"]:
+        print(f"deleted pushed branch {b}")
     for b in payload["remote_branches"]:
-        print(f"still on the remote: {b} (delete it with `git push {b.split('/', 1)[0]} --delete {b.split('/', 1)[1]}`)")
+        print(f"still on the remote: {b} (add --remote to delete it)")
     return 0
 
 
@@ -493,6 +499,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="claim it with a branch in a new worktree (default: ../<repo>-<ID>)",
     )
     s.add_argument("--agent", help="who is working on it (recorded with the claim), e.g. claude or codex")
+    s.add_argument(
+        "--allow-overlap", action="store_true",
+        help="start it even though its Touches don't confirm it is apart from the items already running",
+    )
     s.add_argument("--base", help=base_help)
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_start)
@@ -506,7 +516,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("release", help="drop a claim: remove its worktree and delete its local branch")
     s.add_argument("id")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
-    s.add_argument("--force", action="store_true", help="also if the worktree has changes or the branch isn't merged")
+    s.add_argument("--remote", action="store_true", help="also delete the claim's pushed branches on every remote")
+    s.add_argument("--force", action="store_true", help="also if the worktree has changes or a branch isn't merged")
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_release)
 

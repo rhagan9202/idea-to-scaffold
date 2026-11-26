@@ -52,12 +52,14 @@ To run several agents at once, give each item its own branch and worktree:
 ```bash
 its next --parallel      # ready items whose Touches don't overlap each other or active claims
 its start T-2.1 --worktree   # branch its/T-2.1-<slug> in ../<repo>-T-2.1; prints the claude / codex command to run there
-its claims               # who has what; its release T-2.1 removes a finished claim
+its claims               # who has what; its release T-2.1 [--remote] removes a finished claim
 its renumber             # after merging, give proposed T-new-... items permanent IDs
 ```
 
 The branch is the claim, so a pushed branch is visible to every machine and cloud agent, and `its next` reads
-statuses from `main`, so a dependency counts as done only once it is merged
+statuses from `main`, so a dependency counts as done only once it is merged. Items run side by side only when
+their Touches confirm they change different files: `its start` refuses an item that might overlap one already
+running (exit 6), and an item with no Touches never runs alongside another
 ([spec section 17](spec/PACKAGE_SPEC.md#17-parallel-work)).
 
 Add `--json` to any of them, or to `its backlog`, for a structured answer in a versioned format
@@ -113,9 +115,9 @@ its scaffold /tmp/streak-plan --out /tmp
 | `its backlog [DIR] [--status S] [--ready] [--json] [--write]` | List backlog items; `--write` writes the gitignored `backlog.json` mirror |
 | `its next [DIR] [--all] [--parallel [N]] [--base BRANCH] [--json]` | The next ready, unclaimed item; `--all` for every one, `--parallel` for up to N that don't overlap. Exit 3 if nothing is ready |
 | `its show ID [DIR] [--json]` | Where any ID is defined, its text, and the docs that mention it |
-| `its start ID [DIR] [--force] [--branch \| --worktree [PATH]] [--agent NAME] [--json]` | Set a ready `todo` item `in-progress`, or with `--branch`/`--worktree` claim it with a branch instead. Exit 4 if a dependency isn't done |
+| `its start ID [DIR] [--force] [--branch \| --worktree [PATH]] [--agent NAME] [--allow-overlap] [--json]` | Set a ready `todo` item `in-progress`, or with `--branch`/`--worktree` claim it with a branch instead. Exit 4 if a dependency isn't done, 6 if it may overlap running work |
 | `its claims [DIR] [--json]` | List claim branches, local and remote |
-| `its release ID [DIR] [--force] [--json]` | Remove a claim's worktree and local branch |
+| `its release ID [DIR] [--remote] [--force] [--json]` | Remove a claim's worktree and local branch; `--remote` also deletes its pushed branches |
 | `its renumber [ID ...] [--dir DIR] [--dry-run] [--json]` | Give placeholder items permanent `T-n.m` IDs and update every mention |
 | `its done [ID] [DIR] [--no-verify] [--json]` | Run the item's Verify command and the test and lint commands (in a repo), then set it `done`. Exit 5 if a check fails. With no ID, the only in-progress item |
 | `its scaffold DIR [--out PARENT] [--github [OWNER/NAME]] [--no-git] [--force [--yes]] [--allow-unready]` | Build the repo from a package or an existing scaffolded repo. `--force` asks before deleting the target. Stacks: `python`, plus `generic` (with a warning) for anything else |

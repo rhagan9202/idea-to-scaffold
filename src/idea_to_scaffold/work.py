@@ -37,6 +37,7 @@ EXIT_ERROR = 1
 EXIT_NOTHING_READY = 3
 EXIT_BLOCKED = 4
 EXIT_CHECK_FAILED = 5
+EXIT_OVERLAP = 6
 
 OUTPUT_TAIL = 40  # lines of a failed check's output to keep
 
@@ -128,10 +129,24 @@ def _closed(items: list[BacklogItem]) -> set[str]:
     return {i.id for i in items if i.status in ("done", "dropped")}
 
 
+def _running(v: View) -> list[tuple[str, list[str]]]:
+    """(ID, Touches) of everything being worked on: active claims and in-progress items."""
+    by_id = {i.id: i for i in v.items}
+    running = [(c.id, by_id[c.id].touches if c.id in by_id else []) for c in v.claims]
+    seen = {ident for ident, _ in running}
+    running += [(i.id, i.touches) for i in v.items if i.status == "in-progress" and i.id not in seen]
+    return running
+
+
+def overlaps_with_running(v: View, item: BacklogItem) -> list[str]:
+    """Running items that `item` might share files with. Only items confirmed apart by their Touches can run
+    together, so an item with no Touches overlaps everything."""
+    return [ident for ident, paths in _running(v) if ident != item.id and cl.touches_overlap(item.touches, paths)]
+
+
 def _parallel(v: View, ready: list[BacklogItem], limit: int) -> tuple[list[BacklogItem], list[dict]]:
     """Ready items that can run alongside the active claims and each other without touching the same files."""
-    by_id = {i.id: i for i in v.items}
-    busy = [(c.id, by_id[c.id].touches if c.id in by_id else []) for c in v.claims]
+    busy = _running(v)
     chosen: list[BacklogItem] = []
     held: list[dict] = []
     for item in ready:
@@ -261,6 +276,7 @@ def start(
     worktree: str | None = None,
     agent: str | None = None,
     base: str | None = None,
+    allow_overlap: bool = False,
 ) -> dict:
     """Start an item.
 
@@ -268,6 +284,9 @@ def start(
     instead: create the claim branch `its/<ID>-<slug>` from the integration branch (checked out here, or in a new
     worktree), and leave the backlog alone, since the branch is the claim. `force` also starts an item whose
     dependencies aren't done, or a `blocked` one.
+
+    Items only run in parallel when their Touches confirm they change different files: starting an item that might
+    overlap an active claim or an in-progress item is refused unless `allow_overlap`.
     """
     claiming = branch or worktree is not None
     v = view(pkg, base) if claiming or cl.in_git(pkg.root) else View(load_backlog(pkg), "working tree")
@@ -294,7 +313,16 @@ def start(
             f"{ident} depends on {', '.join(waiting)}, which {'is' if len(waiting) == 1 else 'are'} not done{where}",
             EXIT_BLOCKED, {"id": ident, "blocked_by": waiting},
         )
-    forced = bool(waiting) or item.status != "todo"
+    clash = overlaps_with_running(v, item)
+    if clash and not allow_overlap:
+        why = "it lists no Touches, so it" if not item.touches else "its Touches show it"
+        raise WorkError(
+            "overlap",
+            f"{ident} can't run alongside {', '.join(clash)}: {why} may change the same files. Finish those first, "
+            "list non-overlapping Touches on both items, or pass --allow-overlap",
+            EXIT_OVERLAP, {"id": ident, "overlaps": clash, "touches_listed": bool(item.touches)},
+        )
+    forced = bool(waiting) or item.status != "todo" or bool(clash)
     if not claiming:
         previous = set_status(pkg, ident, "in-progress")
         _refresh_mirror(pkg)
@@ -336,11 +364,12 @@ def claims_payload(pkg: Package, base: str | None = None) -> dict:
             "claims": [c.to_dict() for c in cl.list_claims(pkg.root, _closed(v.items))]}
 
 
-def release(pkg: Package, ident: str, *, force: bool = False) -> dict:
+def release(pkg: Package, ident: str, *, force: bool = False, remote: bool = False) -> dict:
     if not cl.in_git(pkg.root):
         raise WorkError("not_git", "claims need a git repository")
     try:
-        result = cl.release_claim(pkg.root, ident, force=force)
+        result = cl.release_claim(pkg.root, ident, force=force, remote=remote,
+                                  base_ref=cl.resolve_base(pkg.root, integration_branch(pkg)))
     except cl.GitError as exc:
         raise WorkError("git_error", str(exc), details={"id": ident}) from exc
     return {"schema": SCHEMA, "ok": True, **result}

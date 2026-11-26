@@ -234,3 +234,72 @@ def test_renumber_gives_placeholders_permanent_ids(plan: Path, capsys):
 
     assert run_json(capsys, "renumber", "T-2.4", "--dir", str(plan))[1]["error"]["code"] == "not_placeholder"
     assert run_json(capsys, "renumber", "T-new-nope", "--dir", str(plan))[1]["error"]["code"] == "not_found"
+
+
+# --- only confirmed-apart items run in parallel ---------------------------------------------------------------
+
+def test_start_refuses_an_item_that_may_overlap_running_work(repo: Path, capsys):
+    set_field(repo, "T-1.1", "Status", "done")
+    assert run_json(capsys, "start", "T-2.1", str(repo), "--worktree")[0] == 0
+
+    code, out = run_json(capsys, "start", "T-2.2", str(repo), "--worktree")  # neither lists Touches
+    assert code == 6 and out["error"]["code"] == "overlap"
+    assert out["error"]["overlaps"] == ["T-2.1"] and out["error"]["touches_listed"] is False
+    code, out = run_json(capsys, "start", "T-2.2", str(repo))  # a plain start is held to the same rule
+    assert code == 6 and status_in(repo, "T-2.2") == "todo"
+
+    set_field(repo, "T-2.2", "Touches", "`src/streak/streak.py`")
+    code, out = run_json(capsys, "start", "T-2.2", str(repo), "--worktree")  # T-2.1 still lists none
+    assert code == 6 and out["error"]["touches_listed"] is True
+
+    set_field(repo, "T-2.1", "Touches", "`src/streak/store.py`")
+    code, out = run_json(capsys, "start", "T-2.2", str(repo), "--worktree")
+    assert code == 0 and not out["forced"]
+
+
+def test_in_progress_items_count_as_running(repo: Path, capsys):
+    set_field(repo, "T-1.1", "Status", "done")
+    set_field(repo, "T-2.1", "Status", "in-progress")
+    _, out = run_json(capsys, "next", str(repo), "--parallel")
+    assert out["parallel"] == [] and out["held_back"][0]["overlaps"] == ["T-2.1"]
+    code, out = run_json(capsys, "start", "T-2.2", str(repo), "--allow-overlap")
+    assert code == 0 and out["forced"] and status_in(repo, "T-2.2") == "in-progress"
+
+
+# --- releasing pushed branches --------------------------------------------------------------------------------
+
+def test_release_remote_deletes_pushed_branches(repo: Path, tmp_path: Path, capsys):
+    remote = tmp_path / "remote.git"
+    git(tmp_path, "init", "-q", "--bare", str(remote))
+    git(repo, "remote", "add", "origin", str(remote))
+    git(repo, "push", "-q", "origin", "main")
+    _, out = run_json(capsys, "start", "T-1.1", str(repo), "--worktree")
+    worktree, branch = Path(out["claim"]["worktree"]), out["claim"]["branch"]
+    main(["done", str(worktree), "--no-verify"])
+    git(worktree, "commit", "-qam", "feat: T-1.1")
+    git(worktree, "push", "-q", "origin", branch)
+
+    code, out = run_json(capsys, "release", "T-1.1", str(repo), "--remote")
+    assert code == 1 and "isn't merged" in out["error"]["message"]
+    assert git(remote, "branch", "--list", branch)  # nothing was deleted
+
+    git(repo, "merge", "-q", "--no-edit", branch)
+    code, out = run_json(capsys, "release", "T-1.1", str(repo), "--remote")
+    assert code == 0 and out["deleted_remote_branches"] == [f"origin/{branch}"] and out["remote_branches"] == []
+    assert out["deleted_branches"] == [branch] and not worktree.exists()
+    assert git(remote, "branch", "--list", branch) == ""
+
+
+def test_release_without_remote_leaves_pushed_branches(repo: Path, tmp_path: Path, capsys):
+    remote = tmp_path / "remote.git"
+    git(tmp_path, "init", "-q", "--bare", str(remote))
+    git(repo, "remote", "add", "origin", str(remote))
+    _, out = run_json(capsys, "start", "T-1.1", str(repo), "--branch")
+    branch = out["claim"]["branch"]
+    git(repo, "push", "-q", "origin", branch)
+    git(repo, "switch", "-q", "main")
+    code, out = run_json(capsys, "release", "T-1.1", str(repo))
+    assert code == 0 and out["remote_branches"] == [f"origin/{branch}"]
+    code, out = run_json(capsys, "release", "T-1.1", str(repo))  # only the pushed branch is left
+    assert code == 1 and "add --remote" in out["error"]["message"]
+    assert run_json(capsys, "release", "T-1.1", str(repo), "--remote")[0] == 0  # merged (no new commits): no --force
