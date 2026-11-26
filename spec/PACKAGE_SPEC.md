@@ -117,7 +117,7 @@ artifacts:                         # status of each planning file
   planning/06-project-plan.md: draft
   planning/07-backlog.md: draft
 
-first_task: "T-1.1"                # optional; defaults to the first `todo` backlog item
+first_task: "T-1.1"                # optional; defaults to the first ready item (a `todo` whose dependencies are `done`)
 ```
 
 Only `spec_version`, `project.name`, `project.slug`, `project.summary` and
@@ -159,8 +159,10 @@ validator reports the mismatch.
 | Backlog item     | `T-n.m`     | `07-backlog.md`        | `T-2.4`   |
 | Decision         | `ADR-nnnn`  | `adr/`                 | `ADR-0003`|
 
-IDs are never reused or renumbered. Retired items are marked
-`~~F-07 Bulk import~~ (dropped, see ADR-0004)` rather than deleted.
+IDs are never reused or renumbered (the one exception is a backlog
+placeholder, `T-new-<name>`, which gets a permanent number when scheduled; see
+section 11). Retired items are marked `~~F-07 Bulk import~~ (dropped, see
+ADR-0004)` rather than deleted; a struck-through ID is still a definition.
 
 ### 4.3 Traceability rules
 
@@ -283,7 +285,14 @@ A package is **valid** when:
 - Every `F-` links to a `G-`; every `FR-` names an `F-`; every `T-` names at
   least one `FR-`/`NFR-` (unless `proposed` or `dropped`).
 - Every backlog item has a valid `Status` and a `Milestone` that is defined
-  (or `—`); every `Depends on` item exists. `06-project-plan.md` defines no tasks.
+  (or `—`); every `Depends on` item exists, none is `dropped` while the item
+  is open, and dependencies form no cycle. Placeholder IDs (`T-new-...`) appear
+  only on `proposed` or `dropped` items, and `Touches` paths stay inside the
+  repository. Every `Must` FR is satisfied by an item that isn't dropped.
+- `06-project-plan.md` defines no tasks: no backlog-item headings and no
+  checklists.
+- Doc `status` is `draft`, `review` or `approved`; front matter is valid YAML;
+  no file contains merge conflict markers; no ID is defined twice in one file.
 - Every relative link resolves to a file, and every `#anchor` to a heading.
 - Cross-links are current (`its link --check` would change nothing); this is a
   warning in `its validate` and a failure in `its link --check`.
@@ -336,13 +345,27 @@ list, so there is one place to look and one place to update.
 
 ```markdown
 ### T-2.1 — Store
-- **Milestone:** M2            # a milestone from 06-project-plan.md, or —
-- **Status:** todo             # proposed | todo | in-progress | blocked | done | dropped
+- **Milestone:** M2
+- **Status:** todo
 - **Satisfies:** FR-001, NFR-002
 - **Depends on:** T-1.1
 - **Do:** what to build
 - **Done when:** how a reviewer or test can tell
+- **Verify:** `uv run pytest tests/test_store.py`
+- **Touches:** `src/streak/store.py`, `tests/test_store.py`
 ```
+
+| Field | Required | Value |
+| ----- | -------- | ----- |
+| Milestone | yes (`—` if unscheduled) | a milestone defined in `06-project-plan.md` |
+| Status | yes | `proposed`, `todo`, `in-progress`, `blocked`, `done` or `dropped` |
+| Satisfies | yes, unless `proposed` or `dropped` | `FR-`/`NFR-` IDs |
+| Depends on | no (`—`) | other backlog items (`T-` IDs only) |
+| Do / Done when | Done when expected for open items | prose |
+| Verify | no | a command in backticks, a test ID, or `manual: ...`; how to check the item is done |
+| Touches | no | comma-separated paths or globs relative to the repo root; used to keep parallel items apart |
+
+Each field is one line (`- **Name:** value`). An empty field is empty; it never continues onto the next line.
 
 - Items are in priority order. The next item is the first `todo` whose
   dependencies are `done`.
@@ -353,6 +376,14 @@ list, so there is one place to look and one place to update.
   change goes through the `update-plan` playbook.
 - Item IDs follow `T-<milestone>.<n>` at creation; they are not renumbered if
   an item moves milestone.
+- An agent proposing an item on a branch uses a placeholder ID,
+  `T-new-<short-name>` (lowercase letters, digits and hyphens), instead of
+  picking the next number, so parallel branches never collide. Placeholders are
+  only valid on `proposed` (or `dropped`) items; a human assigns a permanent
+  `T-n.m` when scheduling it.
+- Dependencies must not form a cycle, and an open item must not depend on a
+  `dropped` one. Every `Must` requirement is satisfied by at least one item
+  that isn't dropped.
 
 ## 12. Cross-linking and drift control
 

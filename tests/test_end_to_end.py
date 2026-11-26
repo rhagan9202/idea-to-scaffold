@@ -6,9 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from idea_to_scaffold.backlog import load_backlog
 from idea_to_scaffold.cli import main
 from idea_to_scaffold.importer import parse_export
-from idea_to_scaffold.linker import backlog_items, link_package
+from idea_to_scaffold.linker import link_package
 from idea_to_scaffold.package import Package
 from idea_to_scaffold.scaffold import ScaffoldError, scaffold
 from idea_to_scaffold.validate import validate
@@ -124,9 +125,9 @@ def test_status_change_makes_index_stale(plan: Path):
 
 
 def test_backlog_rules(plan: Path):
-    items = backlog_items(Package.load(plan))
-    assert [i["id"] for i in items] == ["T-1.1", "T-2.1", "T-2.2", "T-2.3", "T-9.1"]
-    assert items[-1]["status"] == "proposed"
+    items = load_backlog(Package.load(plan))
+    assert [i.id for i in items] == ["T-1.1", "T-2.1", "T-2.2", "T-2.3", "T-9.1"]
+    assert items[-1].status == "proposed"
     backlog = plan / "planning/07-backlog.md"
     text = backlog.read_text()
     text = text.replace("- **Status:** todo", "- **Status:** finished", 1)

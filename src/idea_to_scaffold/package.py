@@ -39,6 +39,7 @@ READING_ORDER = [
     "planning/08-glossary.md",
 ]
 
+DOC_STATUSES = ["draft", "review", "approved"]
 BACKLOG_STATUSES = ["proposed", "todo", "in-progress", "blocked", "done", "dropped"]
 
 AGENTS_SECTIONS = [
@@ -86,6 +87,22 @@ def parse_front_matter(text: str) -> tuple[dict[str, Any], str]:
     if not isinstance(data, dict):
         data = {}
     return data, text[match.end():]
+
+
+def front_matter_error(text: str) -> str | None:
+    """Why a document's front matter can't be read, or None if it is fine (or absent)."""
+    match = FRONT_MATTER_RE.match(text)
+    if not match:
+        return None
+    try:
+        data = yaml.safe_load(match.group(1))
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        where = f"line {mark.line + 2}" if mark is not None else "unknown line"
+        return f"{getattr(exc, 'problem', None) or 'parse error'} at {where}"
+    if data is not None and not isinstance(data, dict):
+        return "expected key: value lines"
+    return None
 
 
 @dataclass
@@ -160,12 +177,18 @@ class Package:
     @property
     def agents(self) -> list[str]:
         agents = self.get("agents") or ["codex", "claude", "copilot", "cursor"]
-        return [str(a).lower() for a in agents]
+        if isinstance(agents, str):  # `agents: claude` or `agents: "codex, claude"`
+            agents = re.split(r"[,\s]+", agents)
+        if not isinstance(agents, list):
+            return []
+        return [str(a).strip().lower() for a in agents if str(a).strip()]
 
     @property
     def commands(self) -> dict[str, str]:
         cmds = self.get("commands") or {}
-        return {k: str(v) for k, v in cmds.items() if v}
+        if not isinstance(cmds, dict):  # validate reports it
+            return {}
+        return {str(k): str(v) for k, v in cmds.items() if v}
 
     # --- files ------------------------------------------------------------
     def _md(self, base: Path) -> list[Path]:
@@ -196,5 +219,5 @@ class Package:
             if "status" in fm:
                 return str(fm["status"])
         artifacts = self.get("artifacts") or {}
-        value = artifacts.get(rel_path)
+        value = artifacts.get(rel_path) if isinstance(artifacts, dict) else None
         return str(value) if value is not None else None

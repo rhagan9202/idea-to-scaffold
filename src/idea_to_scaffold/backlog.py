@@ -1,0 +1,275 @@
+"""The backlog (`planning/07-backlog.md`): parsing items, readiness, dependency cycles, and status writes.
+
+Items are parsed with the position of every field, so a status change rewrites only that field's value and leaves
+links, formatting and everything else in the file untouched.
+"""
+from __future__ import annotations
+
+import os
+import re
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath, PureWindowsPath
+
+from .ids import (
+    ID_RE,
+    FieldSpan,
+    id_kind,
+    is_placeholder,
+    line_fields,
+    scan_lines,
+    strip_links,
+    strip_strike,
+)
+from .package import BACKLOG_STATUSES, Package
+
+BACKLOG = "planning/07-backlog.md"
+ITEM_HEADING_RE = re.compile(r"^(T-new-[a-z0-9]+(?:-[a-z0-9]+)*|T-\d+\.\d+)(?![\w-])\s*(?:[—–:-]+\s*)?(.*)$")
+TRAILING_COMMENT_RE = re.compile(r"\s+#\s.*$")
+NO_VALUE = {"", "—", "-", "–", "none", "n/a"}
+
+
+class BacklogError(Exception):
+    """Raised when the backlog can't be changed as asked."""
+
+
+@dataclass
+class BacklogItem:
+    id: str
+    title: str
+    level: int                     # heading level (3 for `### T-1.1`)
+    heading_line: int              # 0-based line number of the heading in the file
+    end_line: int                  # first line after the item's section
+    fields: dict[str, FieldSpan] = field(default_factory=dict)  # lower-cased name -> first occurrence
+
+    def get(self, name: str) -> str:
+        """A field's value with links stripped ("" if absent)."""
+        f = self.fields.get(name.lower())
+        return strip_links(f.raw).strip() if f else ""
+
+    @property
+    def status(self) -> str:
+        value = TRAILING_COMMENT_RE.sub("", self.get("Status")).strip("`* ").lower()
+        return value
+
+    @property
+    def milestone(self) -> str:
+        return TRAILING_COMMENT_RE.sub("", self.get("Milestone")).strip("` ")
+
+    @property
+    def satisfies(self) -> list[str]:
+        return [m.group(1) for m in ID_RE.finditer(self.get("Satisfies"))]
+
+    @property
+    def depends_raw(self) -> str:
+        return self.get("Depends on")
+
+    @property
+    def depends_on(self) -> list[str]:
+        """Backlog items this item depends on (other ID kinds in the field are ignored; validate reports them)."""
+        return [m.group(1) for m in ID_RE.finditer(self.depends_raw) if id_kind(m.group(1)) == "T"]
+
+    @property
+    def other_dependencies(self) -> list[str]:
+        return [m.group(1) for m in ID_RE.finditer(self.depends_raw) if id_kind(m.group(1)) != "T"]
+
+    @property
+    def done_when(self) -> str:
+        return self.get("Done when")
+
+    @property
+    def verify(self) -> str:
+        """How to check the item is done: a command (in backticks), a test ID, or `manual: ...`."""
+        return self.get("Verify")
+
+    @property
+    def verify_command(self) -> str | None:
+        """The command in the Verify field, if it has one in backticks."""
+        m = re.search(r"`([^`]+)`", self.verify)
+        return m.group(1).strip() if m else None
+
+    @property
+    def touches(self) -> list[str]:
+        """Paths or globs the item is expected to change, relative to the repository root."""
+        value = self.get("Touches")
+        if value.strip().lower() in NO_VALUE:
+            return []
+        return [p.strip().strip("`").strip() for p in value.split(",") if p.strip().strip("`").strip()]
+
+    @property
+    def placeholder(self) -> bool:
+        return is_placeholder(self.id)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "status": self.status,
+            "milestone": self.milestone,
+            "satisfies": self.satisfies,
+            "depends_on": self.depends_on,
+            "done_when": self.done_when,
+            "verify": self.verify,
+            "touches": self.touches,
+            "placeholder": self.placeholder,
+        }
+
+
+def _read(path: Path) -> str:
+    with open(path, encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def parse_backlog(text: str) -> list[BacklogItem]:
+    """Parse backlog Markdown (front matter included or not) into items, in file order."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    scanned = scan_lines("\n".join(lines))
+    heads = []
+    for ln in scanned:
+        if ln.heading is None:
+            continue
+        level = len(ln.text) - len(ln.text.lstrip("#"))
+        m = ITEM_HEADING_RE.match(strip_strike(strip_links(ln.heading)).strip())
+        heads.append((ln.number, level, m))
+    items: list[BacklogItem] = []
+    for idx, (number, level, m) in enumerate(heads):
+        if not m:
+            continue
+        end = len(lines)
+        for nxt_number, nxt_level, nxt_m in heads[idx + 1:]:
+            # An item ends at the next heading of the same or higher level, or at the next item at any level, so a
+            # missing field is never read from the item below it.
+            if nxt_level <= level or nxt_m:
+                end = nxt_number
+                break
+        item = BacklogItem(m.group(1), m.group(2).strip().strip("~").strip(), level, number, end)
+        for ln in scanned[number + 1:end]:
+            if ln.in_code or ln.heading is not None:
+                continue
+            for f in line_fields(ln.text, ln.number):
+                item.fields.setdefault(f.name.lower(), f)
+        items.append(item)
+    return items
+
+
+def load_backlog(pkg: Package) -> list[BacklogItem]:
+    path = pkg.path_of(BACKLOG)
+    if not path.is_file():
+        return []
+    return parse_backlog(_read(path))
+
+
+def item_section(pkg: Package, item_id: str) -> str:
+    """The Markdown of one item (heading and body), or "" if it isn't in the backlog."""
+    path = pkg.path_of(BACKLOG)
+    if not path.is_file():
+        return ""
+    text = _read(path).replace("\r\n", "\n")
+    lines = text.split("\n")
+    for item in parse_backlog(text):
+        if item.id == item_id:
+            return "\n".join(lines[item.heading_line:item.end_line]).strip()
+    return ""
+
+
+# --- readiness and dependencies ------------------------------------------------------------------------------
+
+def ready_items(items: list[BacklogItem], claimed: set[str] | frozenset[str] = frozenset()) -> list[BacklogItem]:
+    """Every `todo` item whose dependencies are all `done`, in backlog (priority) order, minus claimed items."""
+    status = {i.id: i.status for i in items}
+    return [
+        i for i in items
+        if i.status == "todo" and i.id not in claimed and all(status.get(d) == "done" for d in i.depends_on)
+    ]
+
+
+def next_ready(items: list[BacklogItem], claimed: set[str] | frozenset[str] = frozenset()) -> BacklogItem | None:
+    ready = ready_items(items, claimed)
+    return ready[0] if ready else None
+
+
+def blocked_by(item: BacklogItem, items: list[BacklogItem]) -> list[str]:
+    """Dependencies of `item` that are not done yet."""
+    status = {i.id: i.status for i in items}
+    return [d for d in item.depends_on if status.get(d) != "done"]
+
+
+def find_cycles(items: list[BacklogItem]) -> list[list[str]]:
+    """Dependency cycles, each as a list of IDs (`[A, B, A]`). A self-dependency is a cycle of one."""
+    graph = {i.id: [d for d in i.depends_on] for i in items}
+    cycles: list[list[str]] = []
+    seen_cycles: set[frozenset[str]] = set()
+    state: dict[str, int] = {}  # 1 = on the stack, 2 = finished
+    stack: list[str] = []
+
+    def visit(node: str) -> None:
+        state[node] = 1
+        stack.append(node)
+        for dep in graph.get(node, []):
+            if dep not in graph:
+                continue
+            if state.get(dep) == 1:
+                cycle = stack[stack.index(dep):] + [dep]
+                key = frozenset(cycle)
+                if key not in seen_cycles:
+                    seen_cycles.add(key)
+                    cycles.append(cycle)
+            elif state.get(dep) is None:
+                visit(dep)
+        stack.pop()
+        state[node] = 2
+
+    for ident in graph:
+        if state.get(ident) is None:
+            visit(ident)
+    return cycles
+
+
+def bad_touches(path: str) -> bool:
+    """A Touches entry must be a relative path or glob inside the repository."""
+    posix = PurePosixPath(path.replace("\\", "/"))
+    return posix.is_absolute() or ".." in posix.parts or bool(PureWindowsPath(path).drive)
+
+
+# --- writing -------------------------------------------------------------------------------------------------
+
+def _atomic_write(path: Path, text: str) -> None:
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def set_field(pkg: Package, item_id: str, name: str, value: str) -> str:
+    """Replace one field's value in place, keeping the rest of the file byte for byte. Returns the old value."""
+    path = pkg.path_of(BACKLOG)
+    if not path.is_file():
+        raise BacklogError(f"{BACKLOG} not found")
+    text = _read(path)
+    items = [i for i in parse_backlog(text) if i.id == item_id]
+    if not items:
+        raise BacklogError(f"{item_id} is not in the backlog")
+    if len(items) > 1:
+        raise BacklogError(f"{item_id} is defined more than once in the backlog; fix that first")
+    span = items[0].fields.get(name.lower())
+    if span is None:
+        raise BacklogError(f"{item_id} has no **{name}:** field")
+    lines = text.split("\n")  # keeps any "\r" at line ends, so line endings are preserved
+    line = lines[span.line]
+    lines[span.line] = line[: span.start] + value + line[span.end:]
+    _atomic_write(path, "\n".join(lines))
+    return span.raw
+
+
+def set_status(pkg: Package, item_id: str, status: str) -> str:
+    """Set an item's Status. Returns the previous status."""
+    status = status.strip().lower()
+    if status not in BACKLOG_STATUSES:
+        raise BacklogError(f"status {status!r} must be one of {', '.join(BACKLOG_STATUSES)}")
+    old = set_field(pkg, item_id, "Status", status)
+    return TRAILING_COMMENT_RE.sub("", strip_links(old)).strip("`* ").lower()

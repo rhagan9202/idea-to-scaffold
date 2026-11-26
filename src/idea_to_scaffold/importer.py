@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import re
-import shutil
-from pathlib import Path, PurePosixPath
+from datetime import date
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .package import blank_package_dir
 
@@ -22,8 +22,15 @@ class ImportErrorBadPath(ValueError):
 
 
 def _safe_path(raw: str) -> str:
-    path = PurePosixPath(raw.strip().replace("\\", "/"))
-    if path.is_absolute() or ".." in path.parts or not path.parts:
+    cleaned = raw.strip().replace("\\", "/")
+    path = PurePosixPath(cleaned)
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or not path.parts
+        or PureWindowsPath(cleaned).drive  # C:/x or C:x would leave the package on Windows
+        or path.parts[0] == ".git"
+    ):
         raise ImportErrorBadPath(f"unsafe path in export: {raw!r}")
     return path.as_posix()
 
@@ -63,7 +70,8 @@ def seed_defaults(dest: Path) -> list[str]:
         target = dest / rel
         if not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(blank / rel, target)
+            text = (blank / rel).read_text(encoding="utf-8")
+            target.write_text(text.replace("updated: YYYY-MM-DD", f"updated: {date.today().isoformat()}"), encoding="utf-8")
             copied.append(rel)
     return copied
 
@@ -105,7 +113,16 @@ def import_export(
     if not files:
         raise ValueError("no <!-- file: ... --> blocks found. Did you export the chat after stage 8?")
     dest = Path(dest)
+    if (dest / "docs/planning/package.yaml").is_file():
+        raise ValueError(
+            f"{dest} is a scaffolded repo (it has docs/planning/package.yaml). Import into a planning package "
+            "folder instead and re-scaffold, or edit docs/planning/ directly"
+        )
     to_write: dict[str, str] = {}
+    root = dest.resolve()
+    for rel in files:
+        if not (dest / rel).resolve().is_relative_to(root):
+            raise ImportErrorBadPath(f"unsafe path in export: {rel!r}")
     conflicts: list[str] = []
     for rel, content in files.items():
         target = dest / rel

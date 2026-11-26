@@ -4,11 +4,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+# Backlog items have a permanent ID (`T-2.4`) or, while proposed on a branch, a placeholder (`T-new-plant-aliases`)
+# that is renumbered when it is merged, so agents on parallel branches never mint the same ID.
+PLACEHOLDER_PATTERN = r"T-new-[a-z0-9]+(?:-[a-z0-9]+)*"
+TASK_PATTERN = rf"{PLACEHOLDER_PATTERN}|T-\d+\.\d+"
 ID_PATTERN = (
-    r"NFR-\d{3,}|FR-\d{3,}|ADR-\d{4}|F-\d{2,}|G-\d+|T-\d+\.\d+|M\d+|"
+    rf"NFR-\d{{3,}}|FR-\d{{3,}}|ADR-\d{{4}}|F-\d{{2,}}|G-\d+|{TASK_PATTERN}|M\d+|"
     r"S-[a-z0-9]+(?:-[a-z0-9]+)*|C-[a-z0-9]+(?:-[a-z0-9]+)*"
 )
 ID_RE = re.compile(rf"(?<![\w/#-])({ID_PATTERN})(?![\w-])")
+PLACEHOLDER_RE = re.compile(PLACEHOLDER_PATTERN)
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$", re.MULTILINE)
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 
@@ -49,6 +54,10 @@ BOLD_LEAD_RE = re.compile(r"^\s*(?:[-*+]\s+)?\*\*\[?([^*\]]+)\]?(?:\([^)]*\))?\*
 META_FILES = {"planning/README.md", "planning/wireframes/README.md"}
 
 
+def is_placeholder(identifier: str) -> bool:
+    return PLACEHOLDER_RE.fullmatch(identifier) is not None
+
+
 def id_kind(identifier: str) -> str:
     for prefix in ("NFR-", "FR-", "ADR-", "F-", "G-", "T-", "S-", "C-"):
         if identifier.startswith(prefix):
@@ -62,12 +71,12 @@ def definition_on_line(line: Line) -> str | None:
     if line.in_code:
         return None
     if line.heading is not None:
-        m = ID_RE.match(strip_links(line.heading).strip())
+        m = ID_RE.match(strip_strike(strip_links(line.heading)).strip())
         return m.group(1) if m else None
     for regex in (TABLE_FIRST_CELL_RE, BOLD_LEAD_RE):
         m = regex.match(line.text)
         if m:
-            cell = next(g for g in m.groups() if g is not None).strip()
+            cell = strip_strike(next(g for g in m.groups() if g is not None)).strip()
             if ID_RE.fullmatch(cell):
                 return cell
     return None
@@ -139,15 +148,50 @@ def sections(body: str) -> list[tuple[str, str]]:
     return out
 
 
+FIELD_RE = re.compile(r"\*\*([A-Za-z][A-Za-z ]*?)(?::\*\*|\*\*:)")
+TRAILING_SEPARATOR_RE = re.compile(r"\s+·\s*$")
+
+
+@dataclass
+class FieldSpan:
+    """A `**Name:** value` field found on one line. `start`/`end` are the column span of the raw value."""
+
+    name: str
+    raw: str
+    line: int
+    start: int
+    end: int
+
+
+def line_fields(text: str, number: int = 0) -> list[FieldSpan]:
+    """Every `**Name:** value` field on one line (also `**Name**: value`). A value runs to the end of the line or
+    to the next field (`**Milestone:** M1 · **Status:** todo`); it never continues onto the next line, so an
+    empty field reads as empty instead of swallowing the line below it."""
+    text = text.rstrip("\r")
+    out: list[FieldSpan] = []
+    matches = list(FIELD_RE.finditer(text))
+    for i, m in enumerate(matches):
+        limit = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        segment = TRAILING_SEPARATOR_RE.sub("", text[m.end():limit])
+        lead = len(segment) - len(segment.lstrip())
+        start = m.end() + lead
+        raw = segment.strip()
+        out.append(FieldSpan(m.group(1).strip(), raw, number, start, start + len(raw)))
+    return out
+
+
 def field_value(section: str, name: str) -> str | None:
-    """Value of a `**Name:** value` field inside a section (first match)."""
-    m = re.search(rf"\*\*{re.escape(name)}:\*\*\s*(.+)", section)
-    if not m:
-        return None
-    value = m.group(1)
-    # Stop at an inline separator like " · **Other:**"
-    value = re.split(r"\s+·\s+\*\*", value)[0]
-    return value.strip()
+    """Value of a `**Name:** value` field inside a section (first match), or None if the field is absent."""
+    for lineno, line in enumerate(section.split("\n")):
+        for f in line_fields(line, lineno):
+            if f.name.lower() == name.lower():
+                return f.raw
+    return None
+
+
+def strip_strike(text: str) -> str:
+    """`~~F-07 Bulk import~~` -> `F-07 Bulk import`: retired items are struck through but still defined."""
+    return text.replace("~~", "")
 
 
 def strip_links(text: str) -> str:

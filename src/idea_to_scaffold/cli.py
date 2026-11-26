@@ -7,9 +7,10 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .backlog import load_backlog
 from .importer import ImportConflict, import_export
-from .linker import backlog_items, link_package
-from .package import Package, PackageError, blank_package_dir
+from .linker import link_package
+from .package import BACKLOG_STATUSES, Package, PackageError, blank_package_dir
 from .scaffold import ScaffoldError, scaffold
 from .validate import validate
 
@@ -43,7 +44,7 @@ def cmd_import(args: argparse.Namespace) -> int:
         print(f"cross-linked {len(changed)} file(s) and wrote planning/README.md")
     except PackageError as exc:
         print(f"warning: could not cross-link: {exc}")
-    return cmd_validate(argparse.Namespace(dir=args.into, quiet=True))
+    return cmd_validate(argparse.Namespace(dir=args.into))
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -57,7 +58,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print(f"ERROR   {e}")
     for w in report.warnings:
         print(f"warning {w}")
-    if report.ready:
+    if report.valid and pkg.repo_layout:
+        print("planning docs are valid")
+    elif report.ready:
         print("package is valid and ready to scaffold")
     elif report.valid:
         print("package is valid, but not ready to scaffold yet")
@@ -66,13 +69,26 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0 if report.valid else 1
 
 
+def _shown(pkg: Package, rel: str) -> str:
+    """A logical path as the user sees it on disk (docs/planning/... in a scaffolded repo)."""
+    try:
+        return pkg.path_of(rel).relative_to(pkg.root).as_posix()
+    except ValueError:
+        return rel
+
+
 def cmd_link(args: argparse.Namespace) -> int:
     try:
         pkg = Package.load(Path(args.dir))
     except PackageError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    changed = link_package(pkg, check=args.check)
+    try:
+        changed = link_package(pkg, check=args.check)
+    except UnicodeDecodeError as exc:
+        print(f"error: a planning file is not valid UTF-8 text ({exc.reason})", file=sys.stderr)
+        return 1
+    changed = [_shown(pkg, rel) for rel in changed]
     if args.check:
         if changed:
             print("cross-links are out of date in:")
@@ -94,16 +110,16 @@ def cmd_backlog(args: argparse.Namespace) -> int:
     except PackageError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    items = backlog_items(pkg)
+    items = load_backlog(pkg)
     if args.status:
-        items = [i for i in items if i["status"] == args.status]
+        items = [i for i in items if i.status == args.status]
     if not items:
-        print("no backlog items")
+        print(f"no backlog items with status {args.status}" if args.status else "no backlog items")
         return 0
-    width = max(len(i["title"]) for i in items)
-    print(f"{'ID':<8} {'STATUS':<12} {'MILESTONE':<10} TITLE")
+    id_width = max(8, *(len(i.id) + 1 for i in items))
+    print(f"{'ID':<{id_width}} {'STATUS':<12} {'MILESTONE':<10} TITLE")
     for i in items:
-        print(f"{i['id']:<8} {i['status']:<12} {i['milestone'] or '—':<10} {i['title'][:width]}")
+        print(f"{i.id:<{id_width}} {i.status:<12} {i.milestone or '—':<10} {i.title}")
     return 0
 
 
@@ -122,6 +138,9 @@ def _confirm_delete(target: Path, assume_yes: bool) -> bool:
 
 
 def cmd_scaffold(args: argparse.Namespace) -> int:
+    if args.no_git and args.github is not None:
+        print("error: --github needs git; drop --no-git or --github", file=sys.stderr)
+        return 2
     github = None
     if args.github is not None:
         github = args.github  # "" means use the slug
@@ -191,7 +210,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("backlog", help="list backlog items")
     s.add_argument("dir", nargs="?", default=".", help="package folder or scaffolded repo (default: .)")
-    s.add_argument("--status", help="only items with this status")
+    s.add_argument("--status", choices=BACKLOG_STATUSES, help="only items with this status")
     s.set_defaults(func=cmd_backlog)
 
     s = sub.add_parser("scaffold", help="create the project repo from a package")
