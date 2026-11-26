@@ -21,7 +21,7 @@ def main() -> None:
     shutil.copy2(SRC / "SKILL.md", OUT / "SKILL.md")
     shutil.copy2(ROOT / "spec" / "PACKAGE_SPEC.md", refs / "PACKAGE_SPEC.md")
     shutil.copytree(ROOT / "prompts" / "stages", refs / "stages")
-    shutil.copytree(ROOT / "templates" / "package", refs / "templates")
+    shutil.copytree(ROOT / "src" / "idea_to_scaffold" / "templates" / "package", refs / "templates")
     archive = shutil.make_archive(str(DIST / "plan-project"), "zip", DIST, "plan-project")
     print(f"built {OUT} and {archive}")
 

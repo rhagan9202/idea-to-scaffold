@@ -1,0 +1,27 @@
+[project]
+name = "idea-to-scaffold"
+version = "0.1.0"
+description = "Turn a planning package into an agent-ready project scaffold for Codex, Claude Code, Copilot and Cursor."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = ["PyYAML>=6"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+its = "idea_to_scaffold.cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+idea_to_scaffold = ["templates/**/*", "templates/**/.*", "templates/**/.*/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
