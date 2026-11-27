@@ -9,9 +9,12 @@ runs, `inspect` compares the branch with the integration branch:
 - **The plan is diffed item by item.** A branch may change its own item's Status, Verified, Blocked and Override
   fields and add proposals. Changing its Verify or Touches, any other field, any other item, or other planning
   docs is flagged.
-- **Test tampering is flagged.** Deleted test files, test files that lose assertions, and new skip or xfail markers.
-  So are changes to agent configuration (`AGENTS.md`, `CLAUDE.md`, `.claude/`, `.codex/`, CI workflows), whatever
-  the item's Touches say.
+- **Test tampering is flagged** (see `tamper.py`). Deleted test files, test files that lose assertions, new skips,
+  assertions that can't fail, tests that do nothing, changes to test collection (`conftest.py`, pytest or Jest
+  settings) and changes to the held-out acceptance tests. So are changes to agent configuration (`AGENTS.md`,
+  `CLAUDE.md`, `.claude/`, `.codex/`, CI workflows), whatever the item's Touches say.
+- **New checks warn first.** The checks in DEFAULT_MODES are reported with `mode: warn` and refuse nothing until
+  the integration branch's package.yaml sets `gate: {checks: {<kind>: enforce}}`.
 - **The diff is checked against Touches.** Files changed outside the item's Touches are flagged, including files
   outside the package in a monorepo.
 
@@ -36,15 +39,24 @@ from pathlib import Path
 import yaml
 
 from . import claims as cl
+from . import tamper
 from .backlog import BACKLOG, BacklogItem, parse_backlog
 from .ids import META_FILES, line_fields
 from .package import Package
 from .touches import covered
 
 TEST_KINDS = ("test_deleted", "assertions_removed", "skip_added", "verify_changed", "policy_changed",
-              "item_changed", "other_item_changed", "agent_config_changed")
+              "item_changed", "other_item_changed", "agent_config_changed", "assertions_weakened", "test_disabled",
+              "test_config_changed", "acceptance_changed", "tests_pass_on_parent")
 SCOPE_KINDS = ("outside_touches", "touches_changed", "no_changes")
 OWN_FIELDS = {"status", "verified", "blocked", "override"}  # what a branch may change on its own item
+MODES = ("enforce", "warn", "off")
+# Checks added in phase 7 start in warn mode: they are reported but don't refuse the item until a person sets
+# `gate: {checks: {<kind>: enforce}}` in package.yaml. Every other check enforces, and none can be turned off
+# except these.
+DEFAULT_MODES = {"assertions_weakened": "warn", "test_disabled": "warn", "test_config_changed": "warn",
+                 "tests_pass_on_parent": "warn"}
+DEFAULT_ACCEPTANCE = "tests/acceptance/"
 
 DEFAULT_TEST_PATHS = re.compile(
     r"(^|/)(tests?|__tests__)/"           # tests/, test/, __tests__/
@@ -58,18 +70,6 @@ AGENT_CONFIG = re.compile(
     r"|(^|/)\.mcp\.json$"
     r"|(^|/)\.github/workflows/"
 )
-SKIP_RE = re.compile(
-    r"@pytest\.mark\.(skip|skipif|xfail)\b|\bpytest\.(skip|xfail|importorskip)\("
-    r"|@unittest\.(skip|skipIf|skipUnless|expectedFailure)\b|\.skipTest\("
-    r"|\b(it|test|describe|context)\.(skip|todo)\(|\b(xit|xdescribe|xtest)\("
-    r"|\bt\.Skip(Now|f)?\(|#\[ignore\]|@(Disabled|Ignore)\b"
-)
-ASSERT_RE = re.compile(
-    r"\bassert\w*\b|\bexpect\(|\.should\b|\bt\.(Error|Errorf|Fatal|Fatalf|Fail|FailNow)\(|\brequire\.\w+\("
-    r"|\bassert_\w+!?\(|\b(EXPECT|ASSERT)_\w+\("
-)
-
-
 class GateError(Exception):
     """The gate couldn't compare the branch with the integration branch, so it refuses instead of passing."""
 
@@ -93,6 +93,8 @@ class Policy:
     commands: dict[str, str] = field(default_factory=dict)
     test_paths: list[str] | None = None
     source: str = "working tree"
+    modes: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MODES))
+    acceptance: str = DEFAULT_ACCEPTANCE   # held-out tests: run by land, hidden from agents' worktrees
 
     @classmethod
     def of(cls, manifest: dict, source: str) -> Policy:
@@ -100,7 +102,20 @@ class Policy:
         cmds = {str(k): str(v) for k, v in cmds.items() if v} if isinstance(cmds, dict) else {}
         globs = manifest.get("test_paths") if isinstance(manifest, dict) else None
         globs = [str(g) for g in globs] if isinstance(globs, list) and globs else None
-        return cls(cmds, globs, source)
+        gate = manifest.get("gate") if isinstance(manifest, dict) else None
+        gate = gate if isinstance(gate, dict) else {}
+        modes = dict(DEFAULT_MODES)
+        checks = gate.get("checks")
+        if isinstance(checks, dict):
+            for kind, mode in checks.items():
+                if kind in DEFAULT_MODES and str(mode) in MODES:  # only the phase 7 checks can be relaxed
+                    modes[str(kind)] = str(mode)
+        acceptance = gate.get("acceptance_path")
+        acceptance = str(acceptance).strip().strip("/") + "/" if acceptance else DEFAULT_ACCEPTANCE
+        return cls(cmds, globs, source, modes, acceptance)
+
+    def mode(self, kind: str) -> str:
+        return self.modes.get(kind, "enforce")
 
 
 @dataclass
@@ -119,7 +134,17 @@ class Inspection:
 
     def blocking(self, *, allow_test_changes: bool = False, allow_outside_touches: bool = False) -> list[dict]:
         allowed = (TEST_KINDS if allow_test_changes else ()) + (SCOPE_KINDS if allow_outside_touches else ())
-        return [f for f in self.findings if f["kind"] not in allowed]
+        return [f for f in self.findings if f["kind"] not in allowed and f.get("mode") != "warn"]
+
+    @property
+    def warnings(self) -> list[dict]:
+        return [f for f in self.findings if f.get("mode") == "warn"]
+
+    def add(self, finding: dict) -> None:
+        """Record a finding in the mode the integration branch's policy sets for its kind (`off` drops it)."""
+        mode = self.policy.mode(finding["kind"])
+        if mode != "off":
+            self.findings.append({**finding, "mode": mode})
 
     def to_dict(self) -> dict:
         return {"base": self.base, "merge_base": self.merge_base, "verify_source": self.verify_source,
@@ -192,23 +217,27 @@ def changed_files(pkg: Package, merge_base: str, head: str | None) -> list[Chang
     return out
 
 
-def _added_removed(pkg: Package, merge_base: str, head: str | None, change: Change) -> tuple[list[str], list[str]]:
-    """Added and removed lines of one changed file."""
+def _before(pkg: Package, merge_base: str, change: Change) -> str | None:
+    """A changed file's content at the fork point, or None if it is new."""
+    if change.status == "A" and change.git_old_path is None:
+        return None
+    path = change.git_old_path or change.git_path
+    proc = subprocess.run(["git", "show", f"{merge_base}:{path}"], cwd=cl.toplevel(pkg.root), capture_output=True)
+    return proc.stdout.decode("utf-8", "replace") if proc.returncode == 0 else None
+
+
+def after_content(pkg: Package, head: str | None, change: Change) -> str | None:
+    """A changed file's content on the branch (the working tree, or `head`), or None if it was deleted."""
+    if change.status == "D":
+        return None
     top = cl.toplevel(pkg.root)
-    if change.untracked:
-        try:  # untracked: every line is new
-            return (top / change.git_path).read_text(encoding="utf-8", errors="replace").splitlines(), []
+    if head is None:
+        try:
+            return (top / change.git_path).read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return [], []
-    paths = [change.git_path] + ([change.git_old_path] if change.git_old_path else [])
-    text = run_git(top, "diff", "-U0", "-M", "--no-color", merge_base, *([head] if head else []), "--", *paths)
-    added, removed = [], []
-    for line in text.splitlines():
-        if line.startswith("+") and not line.startswith("+++"):
-            added.append(line[1:])
-        elif line.startswith("-") and not line.startswith("---"):
-            removed.append(line[1:])
-    return added, removed
+            return None
+    proc = subprocess.run(["git", "show", f"{head}:{change.git_path}"], cwd=top, capture_output=True)
+    return proc.stdout.decode("utf-8", "replace") if proc.returncode == 0 else None
 
 
 # --- the plan --------------------------------------------------------------------------------------------------
@@ -233,7 +262,7 @@ def _planning_prefix(pkg: Package) -> str:
         return ""
 
 
-def _manifest_at(pkg: Package, ref: str) -> dict | None:
+def manifest_at(pkg: Package, ref: str) -> dict | None:
     text = cl.read_at(pkg.root, ref, pkg.manifest_path)
     if text is None:
         return None
@@ -252,20 +281,20 @@ def _plan_findings(pkg: Package, ident: str, texts: dict[str, str | None], resul
     me, was, plan = mine.get(ident), forked.get(ident), planned.get(ident)
     if me is not None and was is not None:
         if me.verify != was.verify and (plan is None or me.verify != plan.verify):
-            result.findings.append({
+            result.add({
                 "kind": "verify_changed", "file": rel,
                 "message": f"the branch changed {ident}'s Verify from {(plan or was).verify or '(none)'!r} to "
                            f"{me.verify or '(none)'!r}; change acceptance tests on {result.base} first",
                 "planned": (plan or was).verify, "branch": me.verify})
         if me.touches != was.touches and (plan is None or me.touches != plan.touches):
-            result.findings.append({
+            result.add({
                 "kind": "touches_changed", "file": rel,
                 "message": f"the branch changed {ident}'s Touches; change the plan on {result.base} first",
                 "planned": (plan or was).touches, "branch": me.touches})
         drop = OWN_FIELDS | {"verify", "touches"}
         if _item_body(mine_text or "", me, drop) != _item_body(fork_text or "", was, drop) and (
                 plan is None or _item_body(mine_text or "", me, drop) != _item_body(plan_text or "", plan, drop)):
-            result.findings.append({
+            result.add({
                 "kind": "item_changed", "file": rel,
                 "message": f"the branch changed {ident}'s plan (only its Status, Verified and Blocked fields are its "
                            f"own); change the plan on {result.base} first"})
@@ -283,7 +312,7 @@ def _plan_findings(pkg: Package, ident: str, texts: dict[str, str | None], resul
             continue  # the integration branch made the same change: merged in, not made here
         changed.append(other)
     if changed:
-        result.findings.append({
+        result.add({
             "kind": "other_item_changed", "file": rel, "items": changed,
             "message": f"the branch changed other backlog items ({', '.join(changed)}); only {ident} is its own"})
 
@@ -321,7 +350,7 @@ def inspect(pkg: Package, ident: str, base_ref: str | None, *, head: str | None 
     if not merge_base:
         raise GateError(f"the branch has no common history with {base_ref}")
     result.merge_base = merge_base
-    manifest = _manifest_at(pkg, policy_ref)
+    manifest = manifest_at(pkg, policy_ref)
     if manifest is not None:
         result.policy = Policy.of(manifest, policy_ref if fork is None else "the item's start")
     plan_text = cl.read_at(root, policy_ref, backlog)
@@ -341,10 +370,11 @@ def inspect(pkg: Package, ident: str, base_ref: str | None, *, head: str | None 
     proposals = pkg.rel(pkg.proposals_dir).rstrip("/") + "/"
     outside: set[str] = set()
     config: set[str] = set()
+    acceptance = result.policy.acceptance
     for change in result.changes:
         path = change.path
         if path == manifest_rel:
-            result.findings.append({"kind": "policy_changed", "file": path,
+            result.add({"kind": "policy_changed", "file": path,
                                     "message": f"the branch changed {path}, which sets the gate's own rules; "
                                                f"change it on {base_ref} first"})
             continue
@@ -359,55 +389,60 @@ def inspect(pkg: Package, ident: str, base_ref: str | None, *, head: str | None 
             continue
         was_test = change.old_path is not None and is_test_path(pkg, change.old_path, globs)
         if change.status == "D" and is_test_path(pkg, path, globs):
-            result.findings.append({"kind": "test_deleted", "file": path, "message": f"test file {path} was deleted"})
+            result.add({"kind": "test_deleted", "file": path, "message": f"test file {path} was deleted"})
             continue
         if was_test and not is_test_path(pkg, path, globs):
-            result.findings.append({"kind": "test_deleted", "file": change.old_path,
+            result.add({"kind": "test_deleted", "file": change.old_path,
                                     "message": f"test file {change.old_path} was moved out of the tests (to {path})"})
+        if covered(path, [acceptance]) or (change.old_path and covered(change.old_path, [acceptance])):
+            result.add({"kind": "acceptance_changed", "file": path,
+                        "message": f"the branch changed {path}, a held-out acceptance test; only a person changes "
+                                   "those, on the integration branch"})
+            continue
+        if tamper.is_test_config(path):
+            for finding in tamper.config_findings(path, _before(pkg, merge_base, change),
+                                                  after_content(pkg, head, change)):
+                result.add(finding)
         if is_test_path(pkg, path, globs):
-            added, removed = _added_removed(pkg, merge_base, head, change)
-            lost = sum(bool(ASSERT_RE.search(x)) for x in removed) - sum(bool(ASSERT_RE.search(x)) for x in added)
-            if lost > 0:
-                result.findings.append({"kind": "assertions_removed", "file": path, "count": lost,
-                                        "message": f"{path} has {lost} fewer assertion line(s)"})
-            skips = [x.strip() for x in added if SKIP_RE.search(x)]
-            skips_removed = sum(bool(SKIP_RE.search(x)) for x in removed)
-            if len(skips) > skips_removed:
-                result.findings.append({"kind": "skip_added", "file": path, "lines": skips[:5],
-                                        "message": f"{path} adds a skip or xfail: {skips[0]}"})
+            for finding in tamper.compare(path, _before(pkg, merge_base, change), after_content(pkg, head, change)):
+                result.add(finding)
         if result.touches and path != ".gitignore" and not in_touches(path, result.touches):
             outside.add(path)
         if change.old_path and result.touches and not in_touches(change.old_path, result.touches):
             outside.add(change.old_path)
     if pkg.repo_layout and not any(not (planning and c.path.startswith(planning)) for c in result.changes):
-        result.findings.append({
+        result.add({
             "kind": "no_changes",
             "message": f"the branch changes no files outside the planning folder since {merge_base[:10]}, so "
                        f"nothing shows {ident} was implemented"})
     if config:
         files = sorted(config)
-        result.findings.append({"kind": "agent_config_changed", "files": files,
+        result.add({"kind": "agent_config_changed", "files": files,
                                 "message": f"the branch changed agent configuration ({', '.join(files)}), which "
                                            "steers every later agent; change it on the integration branch first"})
     if result.touches:
         result.touches_checked = True
         if outside:
             files = sorted(outside)
-            result.findings.append({
+            result.add({
                 "kind": "outside_touches", "files": files,
                 "message": f"changed outside {ident}'s Touches ({', '.join(result.touches)}): {', '.join(files)}"})
     return result
 
 
-def diff_text(pkg: Package, inspection: Inspection, limit: int) -> tuple[str, bool]:
-    """The diff the inspection covered, cut at `limit` characters. Untracked files are shown as new files."""
+def diff_text(pkg: Package, inspection: Inspection, limit: int,
+              exclude: frozenset[str] | set[str] = frozenset()) -> tuple[str, bool]:
+    """The diff the inspection covered, cut at `limit` characters. Untracked files are shown as new files.
+    `exclude` names repository-relative paths to leave out."""
     if inspection.merge_base is None:
         return "", False
     top = cl.toplevel(pkg.root)
-    text = run_git(top, "diff", "-M", "--no-color", inspection.merge_base, *([inspection.head] if inspection.head else []))
+    skip = [f":(exclude,literal){p}" for p in sorted(exclude)]
+    text = run_git(top, "diff", "-M", "--no-color", inspection.merge_base,
+                   *([inspection.head] if inspection.head else []), *(["--", ".", *skip] if skip else []))
     if inspection.head is None:
         for change in inspection.changes:
-            if not change.untracked:
+            if not change.untracked or change.git_path in exclude:
                 continue
             try:
                 body = (top / change.git_path).read_text(encoding="utf-8", errors="replace")

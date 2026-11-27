@@ -213,7 +213,7 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
             here = tree / prefix if prefix else tree
             commands = inspection.policy.commands
             item = inspection.planned or _item_at(pkg, ref, claim.id)
-            plan = checks_for(pkg, item, inspection.verify_command, commands) if item else []
+            plan = checks_for(pkg, item, inspection.verify_command, commands, acceptance=True) if item else []
             if commands.get("setup") and plan:  # a fresh worktree has no installed dependencies yet
                 setup = run_check(Check("setup", commands["setup"]), here)
                 if not setup["passed"]:
@@ -241,7 +241,7 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
                         "message": "the merged result passed, but your checkout couldn't be moved to it: "
                                    f"{ff.stderr.strip() or ff.stdout.strip()}"}
         _refresh_mirror(pkg)
-        return {**result, "landed": True, "commit": commit, "checks": checks,
+        return {**result, "landed": True, "commit": commit, "checks": checks, "warnings": inspection.warnings,
                 "checks_skipped": None if (verify and pkg.repo_layout) else
                 ("--no-verify" if not verify else "this is a planning package, not a scaffolded repo")}
     finally:

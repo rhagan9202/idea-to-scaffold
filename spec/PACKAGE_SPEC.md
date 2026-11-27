@@ -108,6 +108,7 @@ commands:                          # copied into AGENTS.md so agents can verify 
   test: "uv run pytest"
   lint: "uv run ruff check ."
   run: "uv run fastapi dev app/main.py"
+  acceptance: "uv run pytest tests/acceptance"  # optional; held-out tests that only `its land` runs (section 17)
 
 artifacts:                         # status of each planning file
   planning/01-vision.md: approved
@@ -121,6 +122,10 @@ artifacts:                         # status of each planning file
 first_task: "T-1.1"                # optional; HANDOFF.md names it, otherwise it tells agents to run `its next`
 integration_branch: "main"         # optional; where readiness is read from in parallel work (section 17)
 test_paths: ["tests/**"]           # optional; globs for test files the done gate protects (section 17)
+gate:                              # optional; the done gate's settings (section 17)
+  acceptance_path: "tests/acceptance/"  # held-out tests: hidden from agents' worktrees, changes refused
+  checks:                          # the mode of each check that started in warn mode
+    tests_pass_on_parent: enforce  # warn (the default for these), enforce or off
 its_source: "git+https://...@<ref>"  # optional; where scaffolded CI installs `its` from (default: this repo, pinned to the commit that scaffolded it)
 ```
 
@@ -485,7 +490,7 @@ into a full one by adding the missing docs and changing `profile`.
 
 `its backlog`, `next`, `show`, `start`, `done`, `claims`, `release`,
 `renumber`, `land`, `propose`, `promote`, `block`, `unblock`, `drop`,
-`set-status`, `review`, `hooks`, `drift`, `verify`, `status`, `link` and `validate` take `--json`. Output is one
+`set-status`, `review`, `hooks`, `drift`, `verify`, `status`, `gate-audit`, `link` and `validate` take `--json`. Output is one
 JSON object on stdout, so agents never parse text or stderr, even when `its` hits a bug (`internal_error`) or the
 command line is wrong (`usage`, exit 2). The global `-C DIR` runs any command as if from `DIR`: it is put in front
 of the command's relative folder arguments.
@@ -556,13 +561,17 @@ of the command's relative folder arguments.
   passed, `failed` is `[{id, code, message, ...}]`, and every item is tried.
 - `review`: `{id, item, requirements: [{id, text, file}], base, merge_base,
   verify_source, touches_checked, findings, changed_files: [{status, path,
-  old_path}], diff, diff_truncated, prompt, commands}`. `hooks`: `{command,
+  old_path}], diff, diff_truncated, omitted, prompt, reply_schema,
+  commands}`. `review --reply`: `{passed, verdict, min_severity, blocking,
+  unmet, findings, requirements}`. `hooks`: `{command,
   written, unchanged}`.
 - A gate finding is `{kind, message, ...}`, where `kind` is `verify_changed`,
   `test_deleted`, `assertions_removed` or `skip_added` (test changes), or
   `touches_changed` or `outside_touches` (scope changes, with `files`),
   `policy_changed`, `item_changed`, `other_item_changed` or
-  `agent_config_changed` (changes to what the gate reads), or `no_changes`
+  `agent_config_changed` (changes to what the gate reads),
+  `assertions_weakened`, `test_disabled`, `test_config_changed`,
+  `acceptance_changed` or `tests_pass_on_parent` (phase 7), or `no_changes`
   (the branch changes nothing outside the planning folder, so nothing shows
   the item was implemented; it is dropped when re-verifying a done item).
 - `propose`: `{id, file, item}`. `promote`: `{id, status, renumbered_from}`,
@@ -573,7 +582,7 @@ of the command's relative folder arguments.
   plus `deleted_file` when a proposal was dropped.
 - `done`: `{id, previous_status, status, checks: [{name, command, exit_code,
   passed, output}], checks_skipped, manual_verify, verify_source, touches_checked,
-  findings, verified, now_ready, merge_needed}`; `verified` is the value
+  findings, warnings, red_on_parent, verified, now_ready, merge_needed}`; `verified` is the value
   written to the item's Verified field. `verify_source` is where the Verify
   command was read (the integration branch's ref, or `working tree`);
   `findings` are the done gate's findings that were allowed. With `--check`:
@@ -593,7 +602,7 @@ of the command's relative folder arguments.
   `nothing_ready` (with `reason`), `fetch_failed`, `push_failed`, `dirty`,
   `diverged`, `exists`, `bad_name`, `bad_title`, `no_reason`, `usage`,
   `test_changes` and `outside_touches` (with `findings`), `bad_hooks_file`,
-  `bad_agent`, `incomplete` (`promote`: the item has no Done when or Touches; with
+  `bad_agent`, `bad_review`, `incomplete` (`promote`: the item has no Done when or Touches; with
   `missing`), `nothing_to_review` (`review`: the branch only changes the backlog),
   `gate_error` (the gate couldn't compare the branch, so it
   refused), `override_reason` and `override_needs_person` (a waiver without a
@@ -614,6 +623,7 @@ Exit codes, the same with or without `--json`:
 | 7 | `land`: a branch could not land (it conflicted, failed the done gate or its checks, isn't done, has no commits, or the base moved); branches only waiting on dependencies don't count |
 | 8 | `drift --check`: a done item's files changed after it was verified |
 | 9 | `next`, `start --next`: every item is done |
+| 10 | `gate-audit`: the gate missed a seeded cheat |
 
 `its backlog --write` saves the `its backlog --json` object as
 `planning/backlog.json` (`docs/planning/backlog.json` in a repo), and `start`
@@ -702,10 +712,52 @@ or Codex in each; it never launches an agent itself.
     field of its item (`item_changed`), any other item (`other_item_changed`)
     or another planning doc is refused; another planning doc counts as
     outside Touches.
-  - A deleted test file, a test file with fewer assertion lines, or a new
-    skip or xfail marker is refused. Test files match `test_paths`, or by
-    default `tests/`, `test/`, `__tests__/`, `test_*`, `*_test.*`, `*_spec.*`,
-    `*.test.*` and `*.spec.*`.
+  - A deleted test file, a test file with fewer assertions
+    (`assertions_removed`), or a new skip or xfail (`skip_added`) is refused.
+    Python test files are read with `ast`, so a comment or `pass  # assert
+    later` doesn't count as an assertion, and `pytestmark = pytest.mark.skip`,
+    `@mark.skip` and `from unittest import skip; @skip` count as skips. Other
+    languages are read line by line with comments stripped. Test files match
+    `test_paths`, or by default `tests/`, `test/`, `__tests__/`, `test_*`,
+    `*_test.*`, `*_spec.*`, `*.test.*` and `*.spec.*`.
+  - Found, and in warn mode until a person enforces them (below): an
+    assertion that can't fail, such as `assert True`, `assert x or True` or
+    `assert 1 == 1` (`assertions_weakened`); a test that returns at once or
+    only passes (`test_disabled`); a change to which tests are collected or
+    run, such as a `conftest.py` with `collect_ignore` or
+    `pytest_collection_modifyitems`, or changed pytest settings in
+    `pyproject.toml`, `setup.cfg`, `tox.ini` or `pytest.ini`, or a changed
+    Jest, Vitest, Mocha or test-script setting (`test_config_changed`). New
+    test files are checked against nothing, so a weak test the branch added
+    itself is found too.
+  - **Red on parent.** After the checks pass, the branch's new and changed
+    test files are copied onto the fork point in a throwaway worktree, and
+    Verify (or `commands.test` when Verify isn't a command) runs there after
+    `commands.setup`. If it passes, the tests don't show the change does
+    anything (`tests_pass_on_parent`, with `files` and `command`). `done`
+    returns what ran as `red_on_parent: {ran, passed_on_parent, command,
+    files, exit_code}`, or `{ran: false, reason}`. It is skipped when
+    re-verifying a done item.
+  - **Held-out acceptance tests.** Tests under `gate.acceptance_path`
+    (default `tests/acceptance/`) are left out of every worktree `its start
+    --worktree` creates, by a sparse checkout (`start` returns `held_out`),
+    and a branch that changes them is refused (`acceptance_changed`). `its
+    land` runs `commands.acceptance` on each merged result after the other
+    checks; `its done` never does. The folder is out of the agent's view,
+    not secret: it is still in the repository's history.
+  - **Warn mode.** The newer checks
+    (`assertions_weakened`, `test_disabled`, `test_config_changed`,
+    `tests_pass_on_parent`) start in warn mode: they are reported, with
+    `mode: "warn"`, in `findings` and `warnings`, but don't refuse the item.
+    `gate.checks.<kind>` in the integration branch's `package.yaml` sets
+    `enforce` or `off`. Every other check always enforces. Each finding has
+    `mode`.
+  - **Measuring the gate.** `its gate-audit [ID]` applies a fixed set of
+    known cheats, one at a time, to a throwaway checkout of the integration
+    branch and reports which the gate found (`{id, base, test_file, variants:
+    [{name, description, expect, caught, found, mode, message}], caught,
+    total, enforced, missed, skipped}`). It exits 10 if any was missed.
+    Nothing in the checkout changes.
   - Agent configuration (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.claude/`,
     `.codex/`, `.cursor/`, `.gemini/`, `.its/`, `.mcp.json`,
     `.github/workflows/`) is refused whatever the Touches say
@@ -736,8 +788,18 @@ or Codex in each; it never launches an agent itself.
   branch before merging it.
 - **Review and hooks.** `its review <ID>` prints an evidence bundle for a second
   agent: the item, the text of each requirement it satisfies, the gate's
-  findings and the diff, with instructions to answer `VERDICT: approve` or
-  `VERDICT: changes-requested`. The item and requirement text come from the
+  findings and the diff, with instructions to review once, only the diff, and
+  answer with one JSON object (`its review --schema`): `{verdict: approve |
+  changes_requested, requirements: [{id, status: met | not_met | cant_tell,
+  evidence}], findings: [{severity: blocker | major | minor, file, line,
+  message}]}`. The author's own account is left out, since it sways a
+  reviewer: the backlog's diff and notes files (`HANDOFF.md`, `NOTES.md`,
+  `PROGRESS.md`, `SUMMARY.md`, `WORKLOG.md`, `CHANGES.md`, `.its/`) are listed
+  but not shown (`omitted`). `its review --reply FILE` reads the answer (bare,
+  fenced, or inside a `claude -p --output-format json` envelope) and passes
+  it when the verdict is approve, every requirement is met and no finding is
+  at or above `--min-severity` (default `major`); otherwise it exits 5. A
+  reply that doesn't fit the schema is `bad_review`. The item and requirement text come from the
   integration branch (a requirement the branch changed is flagged
   `changed_on_branch`), and the diff sits in a fence longer than any run of
   backticks inside it, so the change can't rewrite what it is judged against
@@ -795,10 +857,17 @@ that guarantee still covers.
   has no hash is reported as unknown (`shallow`), never as clean. `--check` exits 8 on drift.
 - **Traceability.** Acceptance criteria are numbered by position in a
   requirement's **Acceptance criteria** list (`AC1`, `AC2`, ...); a bullet
-  that starts with a label (`AC3:`) keeps that number. A test covers a
-  criterion when a test file names both, in any usual spelling
-  (`test_fr_001_ac2_...`, `FR-001/AC2`, a marker such as
-  `@pytest.mark.req("FR-001 AC2")`). Naming the requirement alone covers all
+  that starts with a label (`AC3:`) keeps that number, and an unlabelled
+  bullet whose position a label already took gets the next free number. The
+  label may be a heading, a bold line or a field-list bullet (`-
+  **Acceptance criteria:**`). Only bullets at the first criterion's
+  indentation count, so a sub-bullet is part of the criterion above it; the
+  list ends at the next heading or bold label, even before its first bullet,
+  so a later list such as **Out of scope** is never read as the criteria. A
+  test covers a criterion when a test file names both, in any usual spelling
+  (`test_fr_001_ac2_...`, `FR-001/AC2`, `FR-001, AC2`, `FR-001 (AC2)`, a
+  marker such as `@pytest.mark.req("FR-001 AC2")`); a reference must end at
+  a word boundary, so `fr0012ab` is not FR-0012. Naming the requirement alone covers all
   of its criteria, reported as `by_requirement`. `its validate --trace` lists
   the Must criteria no test names and exits 1 if there are any; plain
   `its validate` never fails on coverage. A requirement with no criteria list

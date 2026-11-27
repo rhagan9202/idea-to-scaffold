@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import __version__
 from . import claims as cl
+from .audit import gate_audit
 from .backlog import BacklogError
 from .drift import drift
 from .edits import block, drop, promote, propose, set_item_status, unblock
@@ -19,12 +20,13 @@ from .importer import ImportConflict, import_export
 from .landing import land
 from .linker import link_package
 from .package import BACKLOG_STATUSES, PROFILES, Package, PackageError, new_package
-from .review import review
+from .review import REPLY_SCHEMA, read_reply, review
 from .scaffold import ScaffoldError, scaffold
 from .status import STATE_LABELS, render, status_payload
 from .trace import trace
 from .validate import validate
 from .work import (
+    EXIT_AUDIT_MISSED,
     EXIT_CHECK_FAILED,
     EXIT_COMPLETE,
     EXIT_DRIFT,
@@ -153,6 +155,36 @@ def cmd_drift(args: argparse.Namespace) -> int:
         print(f"not tracked (no Touches): {', '.join(payload['no_touches'])}")
     if not payload["drifted"]:
         print(f"no drift: {len(payload['clean'])} done item(s) unchanged since they were verified")
+    return code
+
+
+def cmd_gate_audit(args: argparse.Namespace) -> int:
+    if args.id and args.dir == "." and not TASK_RE.fullmatch(args.id):  # `its gate-audit <dir>`
+        args.dir, args.id = args.id, None
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+    try:
+        payload = gate_audit(pkg, args.id)
+    except WorkError as err:
+        return _fail(args, err)
+    code = 0 if payload["ok"] else EXIT_AUDIT_MISSED
+    if args.json:
+        _emit(payload)
+        return code
+    print(f"gate-audit for {payload['id']} against {payload['base']}"
+          + (f", using {payload['test_file']}" if payload["test_file"] else ""))
+    for v in payload["variants"]:
+        if v["caught"] is None:
+            mark, note = "skip  ", v["skipped"]
+        elif v["caught"]:
+            mark, note = ("caught" if v["mode"] == "enforce" else "warns "), ", ".join(v["found"])
+        else:
+            mark, note = "MISSED", "found " + (", ".join(v["found"]) or "nothing")
+        print(f"  {mark}  {v['name']:<22} {v['description']}  ({note})")
+    print(f"caught {payload['caught']} of {payload['total']} ({payload['enforced']} refused, "
+          f"{payload['caught'] - payload['enforced']} only warned)"
+          + (f"; missed: {', '.join(payload['missed'])}" if payload["missed"] else ""))
     return code
 
 
@@ -554,7 +586,10 @@ def cmd_done(args: argparse.Namespace) -> int:
     if payload["checks_skipped"]:
         print(f"checks skipped: {payload['checks_skipped']}")
     for finding in payload["findings"]:
-        print(f"  allowed: {finding['kind']}: {finding['message']}")
+        if finding.get("mode") == "warn":
+            print(f"  warning: {finding['kind']}: {finding['message']} (warn mode: not refused yet)")
+        else:
+            print(f"  allowed: {finding['kind']}: {finding['message']}")
     if payload.get("checked_only"):
         print(f"{payload['id']} passes its checks (status unchanged: {payload['status']})")
         return 0
@@ -706,6 +741,29 @@ def _confirm_delete(target: Path, assume_yes: bool) -> bool:
 def cmd_review(args: argparse.Namespace) -> int:
     if args.id and args.dir == "." and not TASK_RE.fullmatch(args.id):
         args.dir, args.id = args.id, None
+    if args.schema:
+        print(json.dumps(REPLY_SCHEMA, indent=None if args.json else 2))
+        return 0
+    if args.reply:
+        try:
+            text = sys.stdin.read() if args.reply == "-" else Path(args.reply).read_text(encoding="utf-8")
+            payload = read_reply(text, min_severity=args.min_severity)
+        except OSError as exc:
+            return _fail(args, WorkError("not_found", f"can't read {args.reply}: {exc}"))
+        except WorkError as err:
+            return _fail(args, err)
+        code = 0 if payload["passed"] else EXIT_CHECK_FAILED
+        if args.json:
+            _emit(payload)
+            return code
+        print(f"review: {payload['verdict']}" + ("" if payload["passed"] else " (not passed)"))
+        for ident in payload["unmet"]:
+            print(f"  {ident}: not met")
+        for f in payload["findings"]:
+            mark = "!" if f in payload["blocking"] else " "
+            print(f" {mark}{f['severity']:<8} {f['file']}{':' + str(f['line']) if f.get('line') else ''}  "
+                  f"{f['message']}")
+        return code
     pkg = _load(args)
     if pkg is None:
         return 1
@@ -1024,6 +1082,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_drift)
 
+    s = sub.add_parser("gate-audit", help="feed the done gate known cheats and report which it catches")
+    s.add_argument("id", nargs="?", help="the item to audit as (default: the first item with Touches)")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_gate_audit)
+
     s = sub.add_parser("verify", help="re-run a done item's checks and refresh its Verified mark")
     s.add_argument("id", nargs="?", help="the item (or pass --drifted or --all)")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
@@ -1038,6 +1102,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id", nargs="?", help="the item (default: this claim branch's)")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--base", help="the ref to diff against (default: the integration branch)")
+    s.add_argument("--schema", action="store_true", help="print the JSON schema the reviewer's reply must follow")
+    s.add_argument("--reply", metavar="FILE", help="read a reviewer's JSON reply (- for stdin) and say if it passes "
+                                                   "(exit 5 if not)")
+    s.add_argument("--min-severity", default="major", choices=["blocker", "major", "minor"],
+                   help="with --reply: the lowest severity that fails the review (default: major)")
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_review)
 
