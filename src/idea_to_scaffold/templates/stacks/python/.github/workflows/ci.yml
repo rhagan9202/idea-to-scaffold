@@ -7,8 +7,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # setup-python puts python and pip on PATH, so a setup command that runs pip installs into this Python
+      # rather than the runner's externally managed system Python (PEP 668)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "${runtime}"
       - uses: astral-sh/setup-uv@v5
-      - run: uv python install ${runtime}
       - run: ${cmd_setup}
       - run: ${cmd_lint}
       - run: ${cmd_test}
@@ -16,6 +20,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # its drift compares each done item's files with the commit it was verified at
       - uses: astral-sh/setup-uv@v5
       - run: uvx --from "${its_source}" its validate .
       - run: uvx --from "${its_source}" its link --check .
+      - run: uvx --from "${its_source}" its drift --check .
+      # lists Must acceptance criteria that no test names; delete continue-on-error once every one has a test
+      - run: uvx --from "${its_source}" its validate . --trace
+        continue-on-error: true

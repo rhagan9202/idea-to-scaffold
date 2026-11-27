@@ -96,10 +96,13 @@ def test_propose_writes_one_file_per_item_and_renumber_moves_it_into_the_backlog
 def test_promote_numbers_and_schedules_a_proposal(plan: Path, capsys):
     run_json(capsys, "propose", "Undo", "--dir", str(plan), "--milestone", "M1")
     code, out = run_json(capsys, "promote", "T-new-undo", str(plan))
+    assert code == 1 and out["error"]["code"] == "incomplete"
+    assert set(out["error"]["missing"]) == {"Done when", "Touches"}
+    code, out = run_json(capsys, "promote", "T-new-undo", str(plan), "--allow-incomplete")
     assert code == 0 and out["id"] == "T-1.2" and out["renumbered_from"] == "T-new-undo" and out["status"] == "todo"
-    code, out = run_json(capsys, "promote", "T-9.1", str(plan))  # already in the backlog as proposed
+    code, out = run_json(capsys, "promote", "T-9.1", str(plan), "--allow-incomplete")  # already in the backlog as proposed
     assert code == 0 and out["status"] == "todo" and out["renumbered_from"] is None
-    assert run_json(capsys, "promote", "T-9.1", str(plan))[1]["error"]["code"] == "bad_status"
+    assert run_json(capsys, "promote", "T-9.1", str(plan), "--allow-incomplete")[1]["error"]["code"] == "bad_status"
 
 
 def test_block_unblock_drop_and_set_status(plan: Path, capsys):
@@ -239,7 +242,7 @@ def test_land_waits_for_dependencies_and_needs_done(repo: Path, capsys):
     git(worktree, "add", "-A")
     git(worktree, "commit", "-qm", "wip")
     code, out = run_json(capsys, "land", "T-2.1", "--dir", str(repo))
-    assert code == 0 and out["skipped"][0]["reason"] == "not_done"
+    assert code == 7 and out["skipped"][0]["reason"] == "not_done"  # a named item that didn't land
     assert run_json(capsys, "land", "--dir", str(repo))[0] == 3  # nothing is ready to land
     code, out = run_json(capsys, "land", "T-2.1", "--dir", str(repo), "--dry-run")
     assert out["skipped"][0]["reason"] == "not_done"

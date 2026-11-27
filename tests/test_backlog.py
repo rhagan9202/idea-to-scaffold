@@ -177,7 +177,6 @@ def test_must_requirements_need_a_backlog_item(mini: Path):
 
 
 def test_cli_backlog_rejects_unknown_status(mini: Path, capsys):
-    with pytest.raises(SystemExit):
-        main(["backlog", str(mini), "--status", "bogus"])
+    assert main(["backlog", str(mini), "--status", "bogus"]) == 2
     assert main(["backlog", str(mini), "--status", "done"]) == 0
     assert "no backlog items with status done" in capsys.readouterr().out

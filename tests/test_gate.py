@@ -146,6 +146,38 @@ def test_hooks_are_added_to_both_agents_and_keep_existing_settings(repo: Path, c
     assert out["written"] == [] and len(json.loads(settings.read_text())["hooks"]["Stop"]) == 1
 
 
+@pytest.mark.parametrize("content", [{"hooks": []}, {"hooks": {"Stop": {}}}, {"hooks": {"Stop": ["x"]}}])
+def test_an_odd_settings_file_is_a_clear_error(repo: Path, capsys, content):  # noqa: F811
+    settings = repo / ".claude/settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps(content))
+    code, out = run_json(capsys, "hooks", str(repo), "--agent", "claude")
+    assert code == 1 and out["error"]["code"] == "bad_hooks_file"
+    assert json.loads(settings.read_text()) == content  # left as it was
+
+
+def test_the_stop_hook_finds_the_package_from_the_payload_cwd(claim: Path, repo: Path, capsys, monkeypatch):  # noqa: F811
+    import io
+    (claim / TEST).unlink()
+    monkeypatch.chdir(repo)  # the hook runs from the main checkout, the session works in the worktree
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"cwd": str(claim), "stop_hook_active": False})))
+    assert main(["hook", "stop"]) == 0
+    decision = json.loads(capsys.readouterr().out)
+    assert decision["decision"] == "block" and "test_store.py was deleted" in decision["reason"]
+
+
+def test_a_failing_test_is_reported_once():
+    from idea_to_scaffold.work import failure_report
+    trace = "E   assert 1 == 2\nFAILED tests/test_store.py::test_add"
+    report = failure_report([
+        {"name": "verify", "command": "pytest tests/test_store.py", "exit_code": 1, "passed": False, "output": trace},
+        {"name": "lint", "command": "ruff check .", "exit_code": 0, "passed": True, "output": ""},
+        {"name": "test", "command": "pytest", "exit_code": 1, "passed": False, "output": trace},
+    ])
+    assert report.count("assert 1 == 2") == 1 and "test failed (exit 1): pytest  (output above)" in report
+    assert "lint" not in report
+
+
 def test_the_stop_hook_blocks_until_the_gate_passes(claim: Path, repo: Path, capsys):  # noqa: F811
     pkg = Package.load(claim)
     (claim / TEST).unlink()
@@ -154,6 +186,9 @@ def test_the_stop_hook_blocks_until_the_gate_passes(claim: Path, repo: Path, cap
     assert "its block T-2.1" in decision["reason"]
     assert stop_hook(pkg, json.dumps({"stop_hook_active": True})) is None  # never twice in a row
     git(claim, "checkout", "--", TEST)
+    decision = stop_hook(pkg, "{}")
+    assert decision["decision"] == "block" and "no files outside the planning folder" in decision["reason"]
+    (claim / "src/streak/store.py").write_text("def add(): ...\n")
     decision = stop_hook(pkg, "{}")
     assert decision["decision"] == "block" and "isn't marked done" in decision["reason"]
     assert main(["done", "T-2.1", str(claim)]) == 0
@@ -175,3 +210,15 @@ def test_scaffold_adds_plan_checks_to_ci_and_hooks_on_request(plan: Path, tmp_pa
     assert 'its validate .' in ci and 'its link --check .' in ci and "idea-to-scaffold" in ci
     assert (root / ".claude/settings.json").is_file() and (root / ".codex/hooks.json").is_file()
     assert git(root, "status", "--porcelain") == ""  # committed with the scaffold
+    assert "fetch-depth: 0" in ci and "its drift --check ." in ci and "actions/setup-python" in ci
+    assert "uv python install" not in ci  # a bare pip in the setup command would miss that Python
+
+
+def test_scaffolded_ci_pins_its(plan: Path, tmp_path: Path, monkeypatch):
+    from idea_to_scaffold import scaffold as sc
+    monkeypatch.setattr(sc, "_its_commit", lambda: "0123456789abcdef")
+    ci = (scaffold(plan, tmp_path / "a").path / ".github/workflows/ci.yml").read_text()
+    assert f'"{sc.ITS_SOURCE}@0123456789abcdef"' in ci
+    monkeypatch.setattr(sc, "_its_commit", lambda: None)
+    result = scaffold(plan, tmp_path / "b")
+    assert any("unpinned" in w for w in result.warnings)

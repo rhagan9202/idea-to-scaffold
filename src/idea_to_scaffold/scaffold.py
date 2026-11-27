@@ -12,7 +12,58 @@ from .linker import link_package
 from .package import GENERATED_MARKER, Package, parse_front_matter, templates_dir
 from .validate import Report, validate
 
-ITS_SOURCE = "git+https://github.com/rhagan9202/idea-to-scaffold"  # where scaffolded CI installs `its` from
+ITS_REPO = "https://github.com/rhagan9202/idea-to-scaffold"  # where scaffolded CI installs `its` from
+ITS_SOURCE = f"git+{ITS_REPO}"
+
+
+def _its_commit() -> str | None:
+    """The commit of the `its` running now, when it can be known: from pip's record of a git install, or from the
+    git checkout an editable install runs from (only when that checkout is clean and its origin is ITS_REPO)."""
+    from importlib import metadata
+    try:
+        dist = metadata.distribution("idea-to-scaffold")
+        raw = dist.read_text("direct_url.json")
+    except metadata.PackageNotFoundError:
+        raw = None
+    if raw:
+        try:
+            commit = json.loads(raw).get("vcs_info", {}).get("commit_id")
+        except (ValueError, AttributeError):
+            commit = None
+        if commit:
+            return str(commit)
+    here = Path(__file__).resolve().parent
+
+    def git(*args: str) -> str | None:
+        try:
+            proc = subprocess.run(["git", *args], cwd=here, capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return proc.stdout.strip() if proc.returncode == 0 else None
+
+    origin = (git("remote", "get-url", "origin") or "").removesuffix(".git").rstrip("/")
+    if not origin.replace(":", "/").endswith("/" + ITS_REPO.removeprefix("https://github.com/")):
+        return None
+    if git("status", "--porcelain", "--untracked-files=no") != "":
+        return None
+    head = git("rev-parse", "HEAD")
+    contained = git("branch", "-r", "--contains", head) if head else None
+    return head if contained else None  # only a commit that has been pushed is installable
+
+
+def its_source(pkg: Package, warnings: list[str] | None = None) -> str:
+    """What scaffolded CI installs `its` from: `its_source` in package.yaml, else ITS_SOURCE pinned to the commit
+    of the `its` doing the scaffolding, so CI keeps checking with the same rules until someone moves the pin."""
+    configured = pkg.get("its_source")
+    if configured:
+        return str(configured)
+    commit = _its_commit()
+    if commit:
+        return f"{ITS_SOURCE}@{commit}"
+    if warnings is not None:
+        warnings.append("CI installs its unpinned, from the latest commit: set its_source in package.yaml to "
+                        f"{ITS_SOURCE}@<tag or commit> to pin it")
+    return ITS_SOURCE
 
 
 class ScaffoldError(Exception):
@@ -33,7 +84,7 @@ def _marker(source: str) -> str:
     return GENERATED_MARKER.format(source=source)
 
 
-def _variables(pkg: Package) -> dict[str, str]:
+def _variables(pkg: Package, warnings: list[str] | None = None) -> dict[str, str]:
     runtime = str(pkg.get("stack.runtime", "3.12"))
     cmds = pkg.commands
     return {
@@ -47,7 +98,7 @@ def _variables(pkg: Package) -> dict[str, str]:
         "cmd_test": cmds.get("test", "true"),
         "cmd_lint": cmds.get("lint", "true"),
         "cmd_run": cmds.get("run", ""),
-        "its_source": str(pkg.get("its_source") or ITS_SOURCE),
+        "its_source": its_source(pkg, warnings),
     }
 
 
@@ -82,7 +133,8 @@ def _render_stack(pkg: Package, root: Path, written: list[str], warnings: list[s
             "used the generic skeleton (empty src/ and tests/, no build or CI files)"
         )
         stack = stacks / "generic"
-    variables = _variables(pkg)
+    pin_warnings: list[str] = []
+    variables = _variables(pkg, pin_warnings)
     for path in sorted(stack.rglob("*")):
         if not path.is_file():
             continue
@@ -90,6 +142,8 @@ def _render_stack(pkg: Package, root: Path, written: list[str], warnings: list[s
         if rel.endswith(".tmpl"):
             rel = rel[: -len(".tmpl")]
         text = path.read_text(encoding="utf-8")
+        if "${its_source}" in text:
+            warnings.extend(w for w in pin_warnings if w not in warnings)  # only when CI installs its
         _write(root, rel, Template(text).safe_substitute(variables), written)
 
 

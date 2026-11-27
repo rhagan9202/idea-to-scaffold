@@ -43,7 +43,7 @@ from .touches import covered
 
 TEST_KINDS = ("test_deleted", "assertions_removed", "skip_added", "verify_changed", "policy_changed",
               "item_changed", "other_item_changed", "agent_config_changed")
-SCOPE_KINDS = ("outside_touches", "touches_changed")
+SCOPE_KINDS = ("outside_touches", "touches_changed", "no_changes")
 OWN_FIELDS = {"status", "verified", "blocked", "override"}  # what a branch may change on its own item
 
 DEFAULT_TEST_PATHS = re.compile(
@@ -379,6 +379,11 @@ def inspect(pkg: Package, ident: str, base_ref: str | None, *, head: str | None 
             outside.add(path)
         if change.old_path and result.touches and not in_touches(change.old_path, result.touches):
             outside.add(change.old_path)
+    if pkg.repo_layout and not any(not (planning and c.path.startswith(planning)) for c in result.changes):
+        result.findings.append({
+            "kind": "no_changes",
+            "message": f"the branch changes no files outside the planning folder since {merge_base[:10]}, so "
+                       f"nothing shows {ident} was implemented"})
     if config:
         files = sorted(config)
         result.findings.append({"kind": "agent_config_changed", "files": files,

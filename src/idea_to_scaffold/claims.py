@@ -242,7 +242,7 @@ class Claim:
 
     def to_dict(self) -> dict:
         return {
-            "id": self.id, "branch": self.branch, "remote": self.remote, "worktree": self.worktree,
+            "id": self.id, "branch": self.branch, "remote_only": self.remote, "worktree": self.worktree,
             "agent": self.agent, "started": self.started, "finished": self.finished, "orphaned": self.orphaned,
         }
 

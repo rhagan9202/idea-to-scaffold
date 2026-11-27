@@ -17,7 +17,7 @@ from . import gate
 from .backlog import load_backlog
 from .ids import ID_RE, sections, strip_links
 from .package import Package
-from .work import SCHEMA, WorkError, _find, gate_target, item_here, show_payload
+from .work import SCHEMA, WorkError, _find, _ref, base_ref, gate_target, item_here, show_payload
 
 DIFF_LIMIT = 200_000  # characters of diff to include; the rest is cut and flagged
 
@@ -92,18 +92,39 @@ def _prompt(item: dict, requirements: list[dict], inspection: gate.Inspection, d
     return "\n".join(lines) + "\n"
 
 
+def _claim_elsewhere(pkg: Package, ident: str) -> cl.Claim | None:
+    """The item's active claim branch, when this checkout isn't it (local branch preferred over a remote one)."""
+    if not cl.in_git(pkg.root):
+        return None
+    here = cl.current_branch(pkg.root)
+    if cl.item_of_branch(here) == ident or cl.claim_of_worktree(pkg.root) == ident:
+        return None
+    claims = [c for c in cl.list_claims(pkg.root) if c.id == ident and not c.finished]
+    return claims[0] if claims else None
+
+
 def review(pkg: Package, ident: str | None = None, *, base: str | None = None) -> dict:
     items = load_backlog(pkg)
     ident = ident or item_here(pkg, items)
     if ident is None:
         raise WorkError("which_item", "name the item to review, e.g. `its review T-1.1`")
     item = _find(items, ident)
-    ref, fork = (base, None) if base else gate_target(pkg, ident)
+    head = None
+    claim = _claim_elsewhere(pkg, ident)
+    if claim is not None:  # run from main (or another checkout): review the claim's branch, not this checkout
+        ref, fork, head = base or base_ref(pkg), None, _ref(claim)
+    else:
+        ref, fork = (base, None) if base else gate_target(pkg, ident)
     try:
-        inspection = gate.inspect(pkg, ident, ref, fork=fork)
+        inspection = gate.inspect(pkg, ident, ref, head=head, fork=fork)
         diff, truncated = gate.diff_text(pkg, inspection, DIFF_LIMIT)
     except gate.GateError as exc:
         raise WorkError("gate_error", f"{ident} can't be reviewed: {exc}", details={"id": ident}) from exc
+    if not [c for c in inspection.changes if c.path != pkg.rel(pkg.path_of("planning/07-backlog.md"))]:
+        raise WorkError("nothing_to_review", f"{ident} has no changes to review against {ref}"
+                        + (f" on {claim.branch}" if claim else " in this checkout")
+                        + "; run it in the claim's worktree, or once the claim has commits",
+                        details={"id": ident})
     planned = inspection.planned or item  # judged against the plan as the integration branch has it
     item_dict = {**planned.to_dict(), "do": planned.get("Do")}
     requirements = [_requirement(pkg, r, fork or ref) for r in planned.satisfies]

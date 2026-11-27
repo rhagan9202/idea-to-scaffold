@@ -13,10 +13,11 @@ import os
 import re
 import shlex
 import subprocess
+import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from . import claims as cl
@@ -36,7 +37,7 @@ from .backlog import (
 )
 from .ids import KIND_LABELS, META_FILES, definition_on_line, id_kind, is_placeholder, scan_lines, strip_links
 from .linker import NAV_BLOCK_RE, Doc, Target, _load_docs, link_package, scan_package
-from .locking import LockTimeout, package_lock
+from .locking import LockTimeout, git_store_dir, package_lock
 from .package import Package
 from .touches import covered
 
@@ -51,6 +52,7 @@ EXIT_CHECK_FAILED = 5
 EXIT_OVERLAP = 6
 EXIT_NOT_LANDED = 7
 EXIT_DRIFT = 8
+EXIT_COMPLETE = 9  # `next`: nothing left, every item is done
 
 OUTPUT_TAIL = 40  # lines of a failed check's output to keep
 
@@ -139,6 +141,37 @@ def fetch(pkg: Package, base: str | None = None) -> str | None:
     except cl.GitError as exc:
         raise WorkError("fetch_failed", str(exc), details={"remote": remote}) from exc
     return remote
+
+
+STALE_FETCH_SECONDS = 3600
+
+
+def remote_freshness(pkg: Package) -> dict | None:
+    """When a remote exists and wasn't fetched in the last hour: `{remote, fetched_at}` (an ISO time, or None if
+    never fetched), so `next` and `status` can say that other machines' claims may be missing. None otherwise."""
+    if not cl.in_git(pkg.root):
+        return None
+    remote = remote_of(pkg)
+    if remote is None:
+        return None
+    store = git_store_dir(pkg.root)
+    if store is None:
+        return None
+    fetch_head = store.parent / "FETCH_HEAD"
+    try:
+        mtime = fetch_head.stat().st_mtime
+    except OSError:
+        return {"remote": remote, "fetched_at": None}
+    if time.time() - mtime < STALE_FETCH_SECONDS:
+        return None
+    return {"remote": remote, "fetched_at": datetime.fromtimestamp(mtime, timezone.utc).isoformat(timespec="seconds")}
+
+
+def stale_note(stale: dict | None) -> str | None:
+    if not stale:
+        return None
+    when = f"last fetched {stale['fetched_at'][:16].replace('T', ' ')} UTC" if stale["fetched_at"] else "never fetched"
+    return f"note: {stale['remote']} {when}; claims made on other machines may be missing (use --fetch)"
 
 
 def view(pkg: Package, base: str | None = None) -> View:
@@ -424,7 +457,8 @@ def _pick_next(pkg: Package, base: str | None) -> str:
     """The item `its next` would offer, for `start --next`."""
     out = next_payload(pkg, base=base)
     if out["item"] is None:
-        raise WorkError("nothing_ready", f"nothing can start now ({out['reason']})", EXIT_NOTHING_READY,
+        raise WorkError("nothing_ready", f"nothing can start now ({out['reason']})",
+                        EXIT_COMPLETE if out["reason"] == "complete" else EXIT_NOTHING_READY,
                         {"reason": out["reason"]})
     return out["item"]["id"]
 
@@ -535,7 +569,40 @@ def claims_payload(pkg: Package, base: str | None = None) -> dict:
     out = [c.to_dict() for c in claims]
     if v.base is not None:
         _add_conflicts(pkg, v.base, claims, out)
+        for c, d in zip(claims, out, strict=True):
+            d.update(_tip(pkg, c, d, v))
     return {"schema": SCHEMA, "ok": True, "base": v.base, "claims": out}
+
+
+def _tip(pkg: Package, claim: cl.Claim, entry: dict, v: View) -> dict:
+    """What the claim branch's own tip says: its item's status there, its last commit, and whether `its land` would
+    take it now (and if not, why). This is what the lead needs and can't see from the integration branch."""
+    ref = _ref(claim)
+    text = cl.read_at(pkg.root, ref, pkg.path_of(BACKLOG))
+    item = next((i for i in parse_backlog(text) if i.id == claim.id), None) if text else None
+    status = item.status if item else None
+    log = cl.git(pkg.root, "log", "-1", "--format=%h%x00%cI%x00%s", ref, check=False).split("\0")
+    last = {"commit": log[0], "date": log[1], "subject": log[2]} if len(log) == 3 else None
+    planned = next((i for i in v.items if i.id == claim.id), None)
+    waiting = blocked_by(planned, v.items) if planned else []
+    if claim.orphaned:
+        state = "orphaned"
+    elif claim.finished:
+        state = "finished"
+    elif status == "blocked":
+        state = "blocked"
+    elif status != "done":
+        state = "working"
+    elif not entry.get("ahead"):
+        state = "no_commits"
+    elif entry.get("conflicts_with_base"):
+        state = "conflicts"
+    elif waiting:
+        state = "waiting"
+    else:
+        state = "ready_to_land"
+    return {"tip_status": status, "blocked_reason": (item.get("Blocked") or None) if item else None,
+            "last_commit": last, "state": state, "waiting_on": waiting}
 
 
 def _ref(claim: cl.Claim) -> str:
@@ -606,6 +673,22 @@ def run_check(check: Check, cwd: Path) -> dict:
         "passed": proc.returncode == 0,
         "output": "\n".join(output[-OUTPUT_TAIL:]) if proc.returncode else "",
     }
+
+
+def failure_report(checks: list[dict]) -> str:
+    """The failed checks for a person or an agent to read. Only the first failure's output is shown in full: the
+    Verify command and the test command usually fail on the same test, and one copy of a traceback is enough."""
+    parts, shown_output = [], False
+    for c in checks:
+        if c["passed"]:
+            continue
+        head = f"{c['name']} failed (exit {c['exit_code']}): {c['command']}"
+        if c["output"] and not shown_output:
+            parts.append(f"{head}\n{c['output']}")
+            shown_output = True
+        else:
+            parts.append(head + ("  (output above)" if c["output"] and shown_output else ""))
+    return "\n\n".join(parts)
 
 
 def base_ref(pkg: Package) -> str | None:
@@ -742,6 +825,8 @@ def done(
     if allow_outside_touches is not None:
         waivers["changes outside Touches"] = check_override("--allow-outside-touches", allow_outside_touches)
     inspection = inspect_item(pkg, ident)
+    if item.status == "done":  # re-checking finished work (its verify, the Stop hook): it needn't change anything
+        inspection.findings = [f for f in inspection.findings if f["kind"] != "no_changes"]
     blocking = inspection.blocking(allow_test_changes=allow_test_changes is not None,
                                    allow_outside_touches=allow_outside_touches is not None)
     if blocking:

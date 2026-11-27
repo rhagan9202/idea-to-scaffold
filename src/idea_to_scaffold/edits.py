@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 from .backlog import (
+    NO_VALUE,
     BacklogError,
     BacklogItem,
     load_backlog,
@@ -168,11 +169,20 @@ def drop(pkg: Package, ident: str, reason: str | None = None) -> dict:
     return set_item_status(pkg, ident, "dropped", reason=reason)
 
 
-def promote(pkg: Package, ident: str, *, force: bool = False) -> dict:
-    """Schedule a proposed item: set it `todo`. A placeholder is renumbered first (on the integration branch)."""
+def promote(pkg: Package, ident: str, *, force: bool = False, allow_incomplete: bool = False) -> dict:
+    """Schedule a proposed item: set it `todo`. A placeholder is renumbered first (on the integration branch).
+
+    An item with no `Done when` or no `Touches` is refused unless `allow_incomplete`: an agent would have nothing to
+    finish against, and an item without Touches can't run alongside anything."""
     item, _, _ = _locate(pkg, ident)
     if item.status != "proposed":
         raise WorkError("bad_status", f"{ident} is {item.status}, not proposed", details={"id": ident})
+    missing = [name for name, empty in (("Done when", item.done_when.strip().lower() in NO_VALUE),
+                                        ("Touches", not item.touches)) if empty]
+    if missing and not allow_incomplete:
+        raise WorkError("incomplete", f"{ident} has no {' or '.join(missing)}; fill "
+                        f"{'them' if len(missing) > 1 else 'it'} in before scheduling it, or pass --allow-incomplete",
+                        details={"id": ident, "missing": missing})
     renumbered = None
     if item.placeholder:
         out = renumber(pkg, [ident], force=force)
