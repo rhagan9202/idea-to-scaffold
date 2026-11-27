@@ -16,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import claims as cl
+from . import gate
 from .backlog import BacklogItem, blocked_by, load_backlog, load_proposals, parse_backlog
 from .ids import META_FILES
 from .linker import link_package
@@ -92,6 +93,8 @@ def land(
     push: bool = False,
     release: bool = False,
     dry_run: bool = False,
+    allow_test_changes: bool = False,
+    allow_outside_touches: bool = False,
     on_check: Callable[[str, Check], None] | None = None,
 ) -> dict:
     """Land finished claim branches on the integration branch, one at a time, testing each merged result."""
@@ -130,7 +133,8 @@ def land(
                 continue
             pending.remove((claim, ref))
             progress = True
-            outcome = _land_one(pkg, claim, ref, verify=verify, dry_run=dry_run, on_check=on_check)
+            outcome = _land_one(pkg, claim, ref, verify=verify, dry_run=dry_run, on_check=on_check,
+                                allow=(allow_test_changes, allow_outside_touches))
             (landed if outcome["landed"] else skipped).append(outcome)
     for claim, _ in pending:
         items = load_backlog(pkg)
@@ -161,9 +165,15 @@ def land(
 
 
 def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run: bool,
-              on_check: Callable[[str, Check], None] | None) -> dict:
+              on_check: Callable[[str, Check], None] | None, allow: tuple[bool, bool] = (False, False)) -> dict:
     root = pkg.root
     result = {"id": claim.id, "branch": claim.branch, "landed": False}
+    inspection = gate.inspect(pkg, claim.id, "HEAD", head=ref)  # the done gate again, on what would merge
+    blocking = inspection.blocking(allow_test_changes=allow[0], allow_outside_touches=allow[1])
+    if blocking:
+        tests = [f for f in blocking if f["kind"] in gate.TEST_KINDS]
+        return {**result, "reason": "test_changes" if tests else "outside_touches", "findings": blocking,
+                "message": (tests or blocking)[0]["message"]}
     conflicts = cl.conflicting_files(root, "HEAD", ref)
     generated = _generated(pkg)
     real = [f for f in conflicts or [] if f not in generated]

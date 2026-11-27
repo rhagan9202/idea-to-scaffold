@@ -54,14 +54,15 @@ def remote(repo: Path, tmp_path: Path) -> Path:
     return bare
 
 
-def work_on(worktree: Path, ident: str, path: str, content: str, propose: str | None = None) -> None:
+def work_on(worktree: Path, ident: str, path: str, content: str, propose: str | None = None,
+            *flags: str) -> None:
     """What an agent does in its worktree: change a file, maybe propose follow-up work, finish with its done."""
     target = worktree / path
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content)
     if propose:
         assert main(["propose", propose, "--dir", str(worktree), "--satisfies", "FR-001"]) == 0
-    assert main(["done", ident, str(worktree), "--no-verify"]) == 0
+    assert main(["done", ident, str(worktree), "--no-verify", *flags]) == 0
     git(worktree, "add", "-A")
     git(worktree, "commit", "-qm", f"feat: {ident}")
 
@@ -170,8 +171,9 @@ def test_start_next_picks_and_claims_in_one_step(repo: Path, capsys):
 def test_claims_report_conflicts_before_anyone_merges(repo: Path, capsys):
     _, a = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
     _, b = run_json(capsys, "start", "T-2.2", str(repo), "--worktree")
-    work_on(Path(a["claim"]["worktree"]), "T-2.1", "src/streak/shared.py", "a = 1\n")
-    work_on(Path(b["claim"]["worktree"]), "T-2.2", "src/streak/shared.py", "b = 2\n")  # Touches lied
+    work_on(Path(a["claim"]["worktree"]), "T-2.1", "src/streak/shared.py", "a = 1\n", None, "--allow-outside-touches")
+    work_on(Path(b["claim"]["worktree"]), "T-2.2", "src/streak/shared.py", "b = 2\n", None,
+            "--allow-outside-touches")  # Touches lied
     _, out = run_json(capsys, "claims", str(repo))
     by_id = {c["id"]: c for c in out["claims"]}
     assert by_id["T-2.1"]["conflicts_with"] == [{"id": "T-2.2", "files": ["src/streak/shared.py"]}]
@@ -208,8 +210,8 @@ def test_two_branches_that_both_propose_items_land_without_conflicts(repo: Path,
 def test_land_undoes_a_merge_whose_checks_fail(repo: Path, capsys):
     _, a = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
     worktree = Path(a["claim"]["worktree"])
-    set_field(worktree, "T-2.1", "Verify", f"`{py('import sys; sys.exit(4)')}`")
-    work_on(worktree, "T-2.1", "src/streak/store.py", "x\n")
+    set_field(repo, "T-2.1", "Verify", f"`{py('import sys; sys.exit(4)')}`")  # main's Verify fails once merged
+    work_on(worktree, "T-2.1", "src/streak/store.py", "x\n", None, "--allow-test-changes")
     before = git(repo, "rev-parse", "HEAD")
     code, out = run_json(capsys, "land", "--dir", str(repo))
     assert code == 7 and out["landed"] == []
@@ -220,9 +222,9 @@ def test_land_undoes_a_merge_whose_checks_fail(repo: Path, capsys):
 def test_land_refuses_real_conflicts_and_lands_the_rest(repo: Path, capsys):
     _, a = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
     _, b = run_json(capsys, "start", "T-2.2", str(repo), "--worktree")
-    work_on(Path(a["claim"]["worktree"]), "T-2.1", "src/streak/shared.py", "a = 1\n")
-    work_on(Path(b["claim"]["worktree"]), "T-2.2", "src/streak/shared.py", "b = 2\n")
-    code, out = run_json(capsys, "land", "--dir", str(repo))
+    work_on(Path(a["claim"]["worktree"]), "T-2.1", "src/streak/shared.py", "a = 1\n", None, "--allow-outside-touches")
+    work_on(Path(b["claim"]["worktree"]), "T-2.2", "src/streak/shared.py", "b = 2\n", None, "--allow-outside-touches")
+    code, out = run_json(capsys, "land", "--dir", str(repo), "--allow-outside-touches")
     assert code == 7 and [x["id"] for x in out["landed"]] == ["T-2.1"]
     skipped = out["skipped"][0]
     assert skipped["id"] == "T-2.2" and skipped["reason"] == "conflict" and skipped["files"] == ["src/streak/shared.py"]
@@ -258,7 +260,7 @@ def test_land_regenerates_the_planning_index_when_only_it_conflicts(repo: Path, 
         block = f"### {fr} — {title}\n**Feature:** F-01 · **Priority:** Could\n\n"
         req.write_text(text + "\n" + block if where == "end" else text.replace(where, block + where, 1))
         assert main(["link", str(worktree)]) == 0
-        work_on(worktree, ident, f"src/streak/{ident}.py", "x = 1\n")
+        work_on(worktree, ident, {"T-2.1": "src/streak/store.py", "T-2.2": "src/streak/streak.py"}[ident], "x = 1\n")
     _, claims = run_json(capsys, "claims", str(repo))
     files = {f for c in claims["claims"] for other in c["conflicts_with"] for f in other["files"]}
     assert files == {"docs/planning/README.md"}  # only the generated index collides

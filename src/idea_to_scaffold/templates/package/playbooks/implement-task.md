@@ -18,7 +18,7 @@ depends_on: []
 4. Write or update tests that express the acceptance criteria. Confirm they fail.
 5. Implement the smallest change that makes them pass, following `AGENTS.md` conventions.
 6. Run the test and lint commands from `AGENTS.md`. Fix until both pass.
-7. Run `its done <ID>`. It runs the item's **Verify** command and the test and lint commands, and sets **Status** to `done` only if they all pass. Without `its`, run them yourself and set the status by hand. If you discovered follow-up work, run `its propose "Title"` for each item (without `its`, add a backlog item with a placeholder ID, `T-new-<short-name>`, and `Status: proposed`). If you can't finish, run `its block <ID> --reason "..."` and stop; never weaken a test to pass. Run `its link .` if available.
+7. Run `its done <ID>`. It runs the item's **Verify** command (read from the integration branch) and the test and lint commands, and sets **Status** to `done` only if they all pass and the change keeps every test, adds no skips, leaves the item's Verify alone and stays inside its **Touches**. Without `its`, run them yourself and set the status by hand. If you discovered follow-up work, run `its propose "Title"` for each item (without `its`, add a backlog item with a placeholder ID, `T-new-<short-name>`, and `Status: proposed`). If you can't finish, run `its block <ID> --reason "..."` and stop; never weaken a test to pass. Run `its link .` if available.
 8. Commit: `<type>(<scope>): <summary> [T-n.m]` with `Refs: <requirement IDs>`. If you clarified a planning doc on the way (see `update-plan`), add a `Plan: <doc> — <what changed>` line.
 
 **Done check:** tests and lint pass, every listed requirement has a test, the backlog status is `done`, the commit references the item.

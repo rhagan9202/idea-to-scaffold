@@ -12,6 +12,8 @@ from .linker import link_package
 from .package import GENERATED_MARKER, Package, parse_front_matter, templates_dir
 from .validate import Report, validate
 
+ITS_SOURCE = "git+https://github.com/rhagan9202/idea-to-scaffold"  # where scaffolded CI installs `its` from
+
 
 class ScaffoldError(Exception):
     pass
@@ -45,6 +47,7 @@ def _variables(pkg: Package) -> dict[str, str]:
         "cmd_test": cmds.get("test", "true"),
         "cmd_lint": cmds.get("lint", "true"),
         "cmd_run": cmds.get("run", ""),
+        "its_source": str(pkg.get("its_source") or ITS_SOURCE),
     }
 
 
@@ -240,6 +243,7 @@ def scaffold(
     git: bool = True,
     github: str | None = None,
     allow_unready: bool = False,
+    hooks: bool = False,
 ) -> Result:
     pkg = Package.load(Path(package_dir))
     report = validate(pkg)
@@ -285,6 +289,9 @@ def scaffold(
     _write(root, "HANDOFF.md", _handoff(repo_pkg, report), written)
     if not (root / "README.md").exists():
         _write(root, "README.md", _readme(pkg), written)
+    if hooks:
+        from .hooks import hook_agents, install_hooks
+        written += install_hooks(root, hook_agents(pkg))["written"]
 
     if git:
         _git_commit(

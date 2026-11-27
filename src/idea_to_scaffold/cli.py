@@ -1,4 +1,5 @@
-"""Command line interface: `its new | import | validate | link | backlog | next | show | start | done | scaffold`."""
+"""Command line interface for `its`: planning (new, import, validate, link), work (next, start, done, land, review)
+and the backlog commands."""
 from __future__ import annotations
 
 import argparse
@@ -10,11 +11,13 @@ from pathlib import Path
 from . import __version__
 from .backlog import BacklogError
 from .edits import block, drop, promote, propose, set_item_status, unblock
+from .hooks import hook_agents, install_hooks, stop_hook
 from .ids import TASK_PATTERN
 from .importer import ImportConflict, import_export
 from .landing import land
 from .linker import link_package
 from .package import BACKLOG_STATUSES, PROFILES, Package, PackageError, new_package
+from .review import review
 from .scaffold import ScaffoldError, scaffold
 from .validate import validate
 from .work import (
@@ -383,8 +386,13 @@ def cmd_done(args: argparse.Namespace) -> int:
             print(f"running {check.name}: {check.command}", flush=True)
 
     try:
-        payload = done(pkg, args.id, verify=not args.no_verify, on_check=announce)
+        payload = done(pkg, args.id, verify=not args.no_verify, check_only=args.check,
+                       allow_test_changes=args.allow_test_changes, allow_outside_touches=args.allow_outside_touches,
+                       on_check=announce)
     except WorkError as err:
+        if err.code in ("test_changes", "outside_touches") and not args.json:
+            for finding in err.details["findings"]:
+                print(f"  {finding['kind']}: {finding['message']}")
         if err.code == "check_failed" and not args.json:
             for check in err.details["checks"]:
                 if not check["passed"]:
@@ -397,6 +405,11 @@ def cmd_done(args: argparse.Namespace) -> int:
         return 0
     if payload["checks_skipped"]:
         print(f"checks skipped: {payload['checks_skipped']}")
+    for finding in payload["findings"]:
+        print(f"  allowed: {finding['kind']}: {finding['message']}")
+    if payload.get("checked_only"):
+        print(f"{payload['id']} passes its checks (status unchanged: {payload['status']})")
+        return 0
     print(f"{payload['id']} is now done (was {payload['previous_status']})")
     if payload["manual_verify"]:
         print(f"  check by hand: {payload['manual_verify']}")
@@ -418,8 +431,10 @@ def cmd_land(args: argparse.Namespace) -> int:
             print(f"{ident}: running {check.name}: {check.command}", flush=True)
 
     payload = land(pkg, args.ids or None, verify=not args.no_verify, fetch=args.fetch, push=args.push,
-                   release=args.release, dry_run=args.dry_run, on_check=announce)
-    stuck = [s for s in payload["skipped"] if s["reason"] in ("conflict", "check_failed")]
+                   release=args.release, dry_run=args.dry_run, allow_test_changes=args.allow_test_changes,
+                   allow_outside_touches=args.allow_outside_touches, on_check=announce)
+    stuck = [s for s in payload["skipped"]
+             if s["reason"] in ("conflict", "check_failed", "test_changes", "outside_touches")]
     if not payload["landed"] and not payload["skipped"]:
         code = EXIT_NOTHING_READY
     elif stuck:
@@ -522,6 +537,54 @@ def _confirm_delete(target: Path, assume_yes: bool) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
+def cmd_review(args: argparse.Namespace) -> int:
+    if args.id and args.dir == "." and not TASK_RE.fullmatch(args.id):
+        args.dir, args.id = args.id, None
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+    try:
+        payload = review(pkg, args.id, base=args.base)
+    except WorkError as err:
+        return _fail(args, err)
+    if args.json:
+        _emit(payload)
+    else:
+        sys.stdout.write(payload["prompt"])
+    return 0
+
+
+def cmd_hooks(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+    try:
+        payload = install_hooks(pkg.root, [args.agent] if args.agent else hook_agents(pkg))
+    except WorkError as err:
+        return _fail(args, err)
+    if args.json:
+        _emit(payload)
+        return 0
+    for rel in payload["written"]:
+        print(f"added a Stop hook ({payload['command']}) to {rel}")
+    for rel in payload["unchanged"]:
+        print(f"{rel} already has the Stop hook")
+    print("commit them to share; Codex runs project hooks only once you trust them (/hooks)")
+    return 0
+
+
+def cmd_hook(args: argparse.Namespace) -> int:
+    """`its hook stop`: the Stop hook itself. It never fails the agent's tooling: any problem lets the agent stop."""
+    try:
+        pkg = Package.find(Path(args.dir))
+        decision = stop_hook(pkg, "" if sys.stdin.isatty() else sys.stdin.read())
+    except Exception:  # noqa: BLE001 - a broken hook must not trap the agent
+        return 0
+    if decision:
+        print(json.dumps(decision))
+    return 0
+
+
 def cmd_scaffold(args: argparse.Namespace) -> int:
     if args.no_git and args.github is not None:
         print("error: --github needs git; drop --no-git or --github", file=sys.stderr)
@@ -547,6 +610,7 @@ def cmd_scaffold(args: argparse.Namespace) -> int:
             git=not args.no_git,
             github=github,
             allow_unready=args.allow_unready,
+            hooks=args.hooks,
         )
     except (ScaffoldError, PackageError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -600,6 +664,9 @@ def build_parser() -> argparse.ArgumentParser:
     dir_help = "package folder or scaffolded repo (default: .)"
     json_help = f"print JSON (schema {SCHEMA}) instead of text"
     fetch_help = "fetch the integration branch and claim branches from the remote first"
+    allow_tests_help = ("accept deleted tests, removed assertions, new skips and a changed Verify "
+                        "(they refuse the item by default)")
+    allow_touches_help = "accept changes to files outside the item's Touches, or to its Touches"
     base_help = "integration branch to read readiness from (default: integration_branch in package.yaml, or main)"
 
     s = sub.add_parser("backlog", help="list backlog items")
@@ -667,6 +734,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--release", action="store_true",
                    help="release each landed claim (with --push, its pushed branch too)")
     s.add_argument("--dry-run", action="store_true", help="show what would land, changing nothing")
+    s.add_argument("--allow-test-changes", action="store_true", help=allow_tests_help)
+    s.add_argument("--allow-outside-touches", action="store_true", help=allow_touches_help)
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_land)
 
@@ -739,8 +808,29 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id", nargs="?", help="the item (default: the only in-progress item)")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--no-verify", action="store_true", help="don't run Verify, test and lint first")
+    s.add_argument("--check", action="store_true", help="run every check but leave the status alone (exit 5 if any fails)")
+    s.add_argument("--allow-test-changes", action="store_true", help=allow_tests_help)
+    s.add_argument("--allow-outside-touches", action="store_true", help=allow_touches_help)
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_done)
+
+    s = sub.add_parser("review", help="print a review prompt with the item, its requirements and the diff")
+    s.add_argument("id", nargs="?", help="the item (default: this claim branch's)")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--base", help="the ref to diff against (default: the integration branch)")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_review)
+
+    s = sub.add_parser("hooks", help="add an opt-in Stop hook for Claude Code and Codex that runs the done gate")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--agent", choices=["claude", "codex"], help="only this agent (default: the package's agents)")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_hooks)
+
+    s = sub.add_parser("hook", help="run a hook (what the files written by its hooks call)")
+    s.add_argument("event", choices=["stop"])
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.set_defaults(func=cmd_hook)
 
     s = sub.add_parser("scaffold", help="create the project repo from a package")
     s.add_argument("package", help="planning package folder")
@@ -753,6 +843,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="also create a private GitHub repo with gh and push (default name: the slug)",
     )
     s.add_argument("--allow-unready", action="store_true", help="scaffold even if key docs aren't approved")
+    s.add_argument("--hooks", action="store_true", help="also add the Stop hooks (see its hooks)")
     s.set_defaults(func=cmd_scaffold)
     return p
 
