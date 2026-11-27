@@ -6,6 +6,7 @@ which carries a stable error code and the exit code the CLI should use.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -24,11 +25,12 @@ from .backlog import (
     blocked_by,
     find_cycles,
     load_backlog,
+    load_proposals,
     parse_backlog,
     ready_items,
     set_status,
 )
-from .ids import KIND_LABELS, META_FILES, definition_on_line, id_kind, scan_lines, strip_links
+from .ids import KIND_LABELS, META_FILES, definition_on_line, id_kind, is_placeholder, scan_lines, strip_links
 from .linker import NAV_BLOCK_RE, Doc, Target, _load_docs, link_package, scan_package
 from .locking import LockTimeout, package_lock
 from .package import Package
@@ -42,6 +44,7 @@ EXIT_NOTHING_READY = 3
 EXIT_BLOCKED = 4
 EXIT_CHECK_FAILED = 5
 EXIT_OVERLAP = 6
+EXIT_NOT_LANDED = 7
 
 OUTPUT_TAIL = 40  # lines of a failed check's output to keep
 
@@ -90,6 +93,7 @@ def backlog_payload(pkg: Package) -> dict:
         "backlog": shown(pkg, BACKLOG),
         "items": [item_payload(pkg, i, items) for i in items],
         "cycles": find_cycles(items),
+        "proposals": [{**i.to_dict(), "file": shown(pkg, pkg.rel(p))} for p, i in load_proposals(pkg)],
     }
 
 
@@ -111,6 +115,26 @@ def integration_branch(pkg: Package) -> str:
     return str(pkg.get("integration_branch") or "main")
 
 
+def remote_of(pkg: Package) -> str | None:
+    """The remote that claims are shared through, or None if there is none."""
+    if not cl.in_git(pkg.root):
+        return None
+    return cl.default_remote(pkg.root, pkg.get("remote"))
+
+
+def fetch(pkg: Package, base: str | None = None) -> str | None:
+    """`--fetch`: bring the integration branch and every claim branch up to date from the remote. Returns the
+    remote fetched from, or None if there is none."""
+    remote = remote_of(pkg)
+    if remote is None:
+        return None
+    try:
+        cl.fetch(pkg.root, remote, base or integration_branch(pkg))
+    except cl.GitError as exc:
+        raise WorkError("fetch_failed", str(exc), details={"remote": remote}) from exc
+    return remote
+
+
 def view(pkg: Package, base: str | None = None) -> View:
     """Read the backlog for readiness. On the integration branch, or outside git, that is the working tree. On any
     other branch it is the integration branch's copy, so a dependency counts as done only once it is merged."""
@@ -118,7 +142,7 @@ def view(pkg: Package, base: str | None = None) -> View:
     if not cl.in_git(pkg.root):
         return View(items, "working tree")
     name = base or integration_branch(pkg)
-    base_ref = cl.resolve_base(pkg.root, name)
+    base_ref = cl.resolve_base(pkg.root, name, remote_of(pkg) or "origin")
     branch = cl.current_branch(pkg.root)
     source = "working tree"
     if base_ref is not None and branch not in (name, base_ref):
@@ -200,6 +224,8 @@ def next_payload(pkg: Package, *, base: str | None = None, parallel: int | None 
         "in_progress": [i.id for i in items if i.status == "in-progress"],
         "claimed": [c.to_dict() for c in v.claims],
         "waiting": waiting,
+        "blocked": [{"id": i.id, "title": i.title, "reason": i.get("Blocked") or None}
+                    for i in items if i.status == "blocked"],
         "cycles": find_cycles(items),
     }
     if parallel is not None:
@@ -241,6 +267,13 @@ def show_payload(pkg: Package, ident: str) -> dict:
     docs = _load_docs(pkg)
     scan = scan_package(pkg, docs)
     target = scan.index.get(ident)
+    proposal = next(((p, i) for p, i in load_proposals(pkg) if i.id == ident), None) if target is None else None
+    if proposal is not None:
+        path, item = proposal
+        text = read_raw(path).replace("\r\n", "\n").strip()
+        return {"schema": SCHEMA, "ok": True, "id": ident, "kind": KIND_LABELS[id_kind(ident)],
+                "file": shown(pkg, pkg.rel(path)), "anchor": None, "line": 1, "text": strip_links(text),
+                "referenced_by": [], "proposal": True, "item": item.to_dict()}
     if target is None:
         mentioned = sorted(scan.references.get(ident, set()))
         hint = f"; it is mentioned in {', '.join(shown(pkg, r) for r in mentioned)}" if mentioned else ""
@@ -324,7 +357,7 @@ def launch_commands(ident: str, worktree: str | None) -> dict:
 
 def start(
     pkg: Package,
-    ident: str,
+    ident: str | None,
     *,
     force: bool = False,
     branch: bool = False,
@@ -332,8 +365,10 @@ def start(
     agent: str | None = None,
     base: str | None = None,
     allow_overlap: bool = False,
+    push: bool | None = None,
 ) -> dict:
-    """Start an item.
+    """Start an item. With no `ident`, start the next item that can start now (`start --next`): picking and claiming
+    happen under one lock, so two agents asking at the same moment get different items.
 
     Without `branch` or `worktree`, set a ready `todo` item to `in-progress` in the backlog. With either, claim it
     instead: create the claim branch `its/<ID>-<slug>` from the integration branch (checked out here, or in a new
@@ -342,10 +377,50 @@ def start(
 
     Items only run in parallel when their Touches confirm they change different files: starting an item that might
     overlap an active claim or an in-progress item is refused unless `allow_overlap`.
+
+    A claim is pushed to the remote (`origin`, or `remote` in package.yaml) when there is one, so other machines see
+    it; the push only succeeds if nobody claimed the item there first. `push=False` (`--no-push`), or
+    `push_claims: false` in package.yaml, keeps it local.
     """
+    previous_branch = cl.current_branch(pkg.root) if cl.in_git(pkg.root) else None
     with _locked(pkg):
-        return _start(pkg, ident, force=force, branch=branch, worktree=worktree, agent=agent, base=base,
-                      allow_overlap=allow_overlap)
+        if ident is None:
+            ident = _pick_next(pkg, base)
+        payload = _start(pkg, ident, force=force, branch=branch, worktree=worktree, agent=agent, base=base,
+                         allow_overlap=allow_overlap)
+    claim = payload.get("claim")
+    if push is None:
+        push = pkg.get("push_claims") is not False
+    payload["pushed"] = False
+    if not claim or payload.get("claim_held_here") or not push:
+        return payload
+    remote = remote_of(pkg)
+    if remote is None:
+        return payload
+    try:  # outside the lock: a slow network never holds up other agents on this machine
+        cl.push_claim(pkg.root, remote, ident, claim["branch"])
+    except cl.PushRejected as exc:
+        with contextlib.suppress(cl.GitError):
+            if claim["worktree"] is None and previous_branch:  # --branch checked it out here: go back first
+                cl.git(pkg.root, "switch", "--quiet", previous_branch)
+            cl.release_claim(pkg.root, ident, force=True)
+        raise WorkError("claimed", f"{exc}; your local claim was undone", details={"id": ident, "remote": remote}) \
+            from exc
+    except cl.GitError as exc:
+        payload["push_error"] = str(exc)
+        return payload
+    payload["pushed"] = True
+    payload["remote"] = remote
+    return payload
+
+
+def _pick_next(pkg: Package, base: str | None) -> str:
+    """The item `its next` would offer, for `start --next`."""
+    out = next_payload(pkg, base=base)
+    if out["item"] is None:
+        raise WorkError("nothing_ready", f"nothing can start now ({out['reason']})", EXIT_NOTHING_READY,
+                        {"reason": out["reason"]})
+    return out["item"]["id"]
 
 
 def _start(
@@ -446,8 +521,34 @@ def claims_payload(pkg: Package, base: str | None = None) -> dict:
     if not cl.in_git(pkg.root):
         raise WorkError("not_git", "claims need a git repository")
     v = view(pkg, base)
-    return {"schema": SCHEMA, "ok": True, "base": v.base,
-            "claims": [c.to_dict() for c in cl.list_claims(pkg.root, _closed(v.items), {i.id for i in v.items})]}
+    claims = cl.list_claims(pkg.root, _closed(v.items), {i.id for i in v.items})
+    out = [c.to_dict() for c in claims]
+    if v.base is not None:
+        _add_conflicts(pkg, v.base, claims, out)
+    return {"schema": SCHEMA, "ok": True, "base": v.base, "claims": out}
+
+
+def _ref(claim: cl.Claim) -> str:
+    return f"refs/remotes/{claim.branch}" if claim.remote else f"refs/heads/{claim.branch}"
+
+
+def _add_conflicts(pkg: Package, base: str, claims: list[cl.Claim], out: list[dict]) -> None:
+    """Dry-run merges (nothing changes): which active claims would conflict with the integration branch, or with
+    each other, if merged. Only claims with commits of their own can conflict."""
+    pairs = list(zip(claims, out, strict=True))
+    for c, d in pairs:
+        d["ahead"] = cl.ahead(pkg.root, _ref(c), base)
+        d["conflicts_with_base"] = []
+        d["conflicts_with"] = []
+    active = [(c, d) for c, d in pairs if not c.finished and d["ahead"]]
+    for c, d in active:
+        d["conflicts_with_base"] = cl.conflicting_files(pkg.root, base, _ref(c)) or []
+    for i, (a, da) in enumerate(active):
+        for b, db in active[i + 1:]:
+            files = cl.conflicting_files(pkg.root, _ref(a), _ref(b))
+            if files:
+                da["conflicts_with"].append({"id": b.id, "files": files})
+                db["conflicts_with"].append({"id": a.id, "files": files})
 
 
 def release(pkg: Package, ident: str, *, force: bool = False, remote: bool = False) -> dict:
@@ -604,22 +705,24 @@ def renumber(pkg: Package, ids: list[str] | None = None, *, dry_run: bool = Fals
 
 def _renumber(pkg: Package, ids: list[str] | None, *, dry_run: bool) -> dict:
     items = load_backlog(pkg)
-    known = {i.id for i in items}
-    placeholders = [i.id for i in items if i.placeholder]
+    proposals = load_proposals(pkg)
+    proposal_of = {item.id: path for path, item in proposals}
+    known = {i.id for i in items} | set(proposal_of)
+    placeholders = [i.id for i in items if i.placeholder] + [i.id for _, i in proposals]
     dupes = sorted({x for x in placeholders if placeholders.count(x) > 1})
     if dupes:
         raise WorkError("duplicate_id", f"{', '.join(dupes)} {'is' if len(dupes) == 1 else 'are'} proposed more than "
                         "once; merge or rename the duplicates, then renumber", details={"ids": dupes})
     for ident in ids or []:
         if ident not in known:
-            raise WorkError("not_found", f"{ident} is not in the backlog", details={"id": ident})
-        if not next(i for i in items if i.id == ident).placeholder:
+            raise WorkError("not_found", f"{ident} is not in the backlog or the proposals", details={"id": ident})
+        if not is_placeholder(ident):
             raise WorkError("not_placeholder", f"{ident} already has a permanent ID", details={"id": ident})
     highest: dict[int, int] = {}
     # Numbers already used anywhere count, not only those in the backlog: a deleted item's ID may still be mentioned
     # in other docs, and reusing it would make those mentions point at the wrong item.
     used = [(m.group(1), m.group(2)) for m in (TASK_NUM_RE.match(i.id) for i in items) if m]
-    for path in pkg.planning_files():
+    for path in pkg.planning_files() + pkg.proposal_files():
         try:
             used += TASK_MENTION_RE.findall(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError):
@@ -628,37 +731,67 @@ def _renumber(pkg: Package, ids: list[str] | None, *, dry_run: bool) -> dict:
         highest[int(major)] = max(highest.get(int(major), 0), int(minor))
     pairs: list[tuple[str, str]] = []
     last_major = 1
-    for item in items:
-        m = TASK_NUM_RE.match(item.id)
-        if m:
-            last_major = int(m.group(1))
-            continue
+
+    def assign(item: BacklogItem) -> None:
         if ids is not None and item.id not in ids:
-            continue
+            return
         if ids is None and item.status == "dropped":
-            continue
+            return
         ms = re.fullmatch(r"M(\d+)", item.milestone.strip())
         major = int(ms.group(1)) if ms else last_major
         highest[major] = highest.get(major, 0) + 1
         pairs.append((item.id, f"T-{major}.{highest[major]}"))
+
+    for item in items:
+        m = TASK_NUM_RE.match(item.id)
+        if m:
+            last_major = int(m.group(1))
+        else:
+            assign(item)
+    for _, item in proposals:  # proposals without a milestone go under the backlog's last milestone
+        assign(item)
     changed: list[str] = []
+    moved: list[str] = []
     if pairs and not dry_run:
+        backlog_path = pkg.path_of(BACKLOG)
+        renumbering = {old for old, _ in pairs}
+        appended = [path for path, item in proposals if item.id in renumbering]
+        if appended:  # move each renumbered proposal to the end of the backlog, then delete its file
+            text = read_raw(backlog_path)
+            eol = "\r\n" if "\r\n" in text else "\n"
+            for path in appended:
+                section = read_raw(path).replace("\r\n", "\n").strip("\n")
+                text = text.rstrip("\r\n") + eol + eol + section.replace("\n", eol) + eol
+            write_raw(backlog_path, text)
+            for path in appended:
+                path.unlink()
+                moved.append(shown(pkg, pkg.rel(path)))
         patterns = [(re.compile(rf"(?<![\w/#-]){re.escape(old)}(?![\w-])"), new) for old, new in pairs]
-        for path in pkg.planning_files():
+        for path in pkg.planning_files() + pkg.proposal_files():
             if pkg.rel(path) in META_FILES:  # generated; `its link` rewrites it below
                 continue
-            with open(path, encoding="utf-8", newline="") as fh:
-                text = fh.read()
+            text = read_raw(path)
             new_text = text
             for pattern, new in patterns:
                 new_text = pattern.sub(new, new_text)
-            if new_text != text:
-                with open(path, "w", encoding="utf-8", newline="") as fh:
-                    fh.write(new_text)
+            if new_text != text or path == backlog_path and appended:
+                if new_text != text:
+                    write_raw(path, new_text)
                 changed.append(shown(pkg, pkg.rel(path)))
         link_package(pkg)
         _refresh_mirror(pkg)
     return {
         "schema": SCHEMA, "ok": True, "dry_run": dry_run,
         "renumbered": [{"from": old, "to": new} for old, new in pairs], "files": changed,
+        "proposals_moved": moved,
     }
+
+
+def read_raw(path: Path) -> str:
+    with open(path, encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def write_raw(path: Path, text: str) -> None:
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)

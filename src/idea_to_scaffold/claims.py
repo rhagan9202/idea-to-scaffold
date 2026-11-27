@@ -61,12 +61,86 @@ def ref_exists(cwd: Path, ref: str) -> bool:
     return bool(git(cwd, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False))
 
 
-def resolve_base(cwd: Path, base: str) -> str | None:
-    """The ref to read the integration branch from: the local branch, else its remote-tracking copy."""
-    for ref in (base, f"origin/{base}"):
-        if ref_exists(cwd, ref):
-            return ref
+def resolve_base(cwd: Path, base: str, remote: str | None = "origin") -> str | None:
+    """The ref to read the integration branch from: the local branch, else its remote-tracking copy. When the local
+    branch is only behind the remote copy (others merged and you fetched, but haven't pulled), the remote copy is
+    newer and is used, so merged work counts as soon as it is fetched."""
+    local = base if ref_exists(cwd, base) else None
+    tracking = f"{remote}/{base}" if remote and ref_exists(cwd, f"{remote}/{base}") else None
+    if local and tracking:
+        a, b = git(cwd, "rev-parse", local), git(cwd, "rev-parse", tracking)
+        if a != b and subprocess.run(["git", "merge-base", "--is-ancestor", a, b], cwd=cwd,
+                                     capture_output=True).returncode == 0:
+            return tracking
+    return local or tracking
+
+
+def remotes(cwd: Path) -> list[str]:
+    return git(cwd, "remote", check=False).split()
+
+
+def default_remote(cwd: Path, configured: str | None = None) -> str | None:
+    """The remote claims are shared through: `remote` in package.yaml, else `origin` if it exists."""
+    names = remotes(cwd)
+    if configured:
+        return configured if configured in names else None
+    return "origin" if "origin" in names else None
+
+
+def fetch(cwd: Path, remote: str, base: str) -> None:
+    """Fetch the integration branch and every claim branch, pruning claim branches deleted on the remote."""
+    proc = subprocess.run(
+        ["git", "fetch", "--quiet", "--prune", remote, f"+refs/heads/{base}:refs/remotes/{remote}/{base}",
+         f"+refs/heads/its/*:refs/remotes/{remote}/its/*"],
+        cwd=cwd, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise GitError(f"couldn't fetch from {remote}: {proc.stderr.strip()}")
+
+
+class PushRejected(GitError):
+    """The claim branch already exists on the remote: someone else claimed the item first."""
+
+
+def push_claim(cwd: Path, remote: str, ident: str, branch: str) -> None:
+    """Publish a claim. It only succeeds if no claim branch for the item exists on the remote yet, so the remote
+    settles a race between machines: the first push wins."""
+    proc = subprocess.run(["git", "ls-remote", "--heads", remote, f"refs/heads/its/{ident}",
+                           f"refs/heads/its/{ident}-*"], cwd=cwd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise GitError(f"couldn't reach {remote}: {proc.stderr.strip()}")
+    taken = [line.split("refs/heads/", 1)[1] for line in proc.stdout.splitlines() if "refs/heads/" in line]
+    taken = [b for b in taken if item_of_branch(b) == ident]
+    if taken:
+        raise PushRejected(f"{ident} is already claimed on {remote} by branch {taken[0]}")
+    proc = subprocess.run(
+        ["git", "push", "--quiet", "--set-upstream", f"--force-with-lease=refs/heads/{branch}:", remote,
+         f"refs/heads/{branch}:refs/heads/{branch}"],
+        cwd=cwd, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        err = proc.stderr.strip()
+        if "stale info" in err or "rejected" in err or "already exists" in err:
+            raise PushRejected(f"{ident} was claimed on {remote} first ({err.splitlines()[-1] if err else 'rejected'})")
+        raise GitError(f"couldn't push {branch} to {remote}: {err}")
+
+
+def conflicting_files(cwd: Path, ours: str, theirs: str) -> list[str] | None:
+    """Files that would conflict if `theirs` were merged into `ours` (a dry run with `git merge-tree`, which
+    changes nothing). [] means it merges cleanly; None means git can't tell (git older than 2.38)."""
+    proc = subprocess.run(["git", "merge-tree", "--write-tree", "--name-only", "--no-messages", ours, theirs],
+                          cwd=cwd, capture_output=True, text=True)
+    if proc.returncode == 0:
+        return []
+    if proc.returncode == 1:
+        return sorted(set(proc.stdout.splitlines()[1:]) - {""})
     return None
+
+
+def ahead(cwd: Path, ref: str, base: str) -> int:
+    """Commits on `ref` that aren't on `base`."""
+    out = git(cwd, "rev-list", "--count", f"{base}..{ref}", check=False)
+    return int(out) if out.isdigit() else 0
 
 
 def read_at(cwd: Path, ref: str, path: Path) -> str | None:

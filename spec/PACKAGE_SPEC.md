@@ -390,6 +390,14 @@ Each field is one line (`- **Name:** value`). An empty field is empty; it never 
   picking the next number, so parallel branches never collide. Placeholders are
   only valid on `proposed` (or `dropped`) items; a human assigns a permanent
   `T-n.m` when scheduling it.
+- A proposed item may instead live in its own file,
+  `planning/proposals/T-new-<name>.md`, holding just its section
+  (`its propose` writes one). Two branches that each propose items then touch
+  different files and never conflict. `its renumber` appends each proposal to
+  the end of the backlog, deletes its file and gives it a permanent ID.
+  Proposal files are not linked or validated as planning docs.
+- A `blocked` item has a `Blocked:` field saying why, and a `dropped` one may
+  have a `Dropped:` field; `its block` and `its drop` write them.
 - Dependencies must not form a cycle, and an open item must not depend on a
   `dropped` one. Every `Must` requirement is satisfied by at least one item
   that isn't dropped.
@@ -470,8 +478,9 @@ into a full one by adding the missing docs and changing `profile`.
 
 ## 16. JSON output
 
-`its backlog`, `next`, `show`, `start`, `done`, `claims`, `release` and
-`renumber` take `--json`. Output is one JSON object on stdout, so agents never
+`its backlog`, `next`, `show`, `start`, `done`, `claims`, `release`,
+`renumber`, `land`, `propose`, `promote`, `block`, `unblock`, `drop` and
+`set-status` take `--json`. Output is one JSON object on stdout, so agents never
 parse text or stderr, even when `its` hits a bug (`internal_error`).
 
 - Every object has `"schema": 1` and `"ok"`. A new field is not a schema
@@ -486,19 +495,34 @@ parse text or stderr, even when `its` hits a bug (`internal_error`).
   but may touch running work's files), `waiting` (on dependencies),
   `in_progress` (everything left is running, claimed or blocked) or `complete`.
   `source` is where statuses were read: `working tree`, or the integration
-  branch's ref (section 17).
+  branch's ref (section 17). `blocked: [{id, title, reason}]` lists `blocked`
+  items.
+- `backlog` adds `proposals`: the items in `planning/proposals/`.
 - `show`: `{id, kind, file, anchor, line, text, referenced_by}`, plus `item`
   for a backlog ID. `referenced_by` lists the docs that mention the ID: the
   ones to revisit when it changes.
 - `start`: `{id, previous_status, status, forced, claim, item}`, plus
   `commands: {claude, codex, cwd, argv}` for a claim (`claude` and `codex` are
   shell lines quoted for the platform; `argv` runs without a shell), and
-  `claim_held_here: true` when the claim is already this checkout's. A claim is
+  `claim_held_here: true` when the claim is already this checkout's.
+  `pushed` and `remote` say whether the claim branch was pushed, and
+  `push_error` why a push failed for a reason other than losing the race. A claim is
   `{id, branch, remote, worktree, agent, started, finished, orphaned}`;
   `orphaned` means its ID isn't in the integration branch's backlog.
-- `claims`: `{base, claims}`. `release`: `{id, released, deleted_branches,
+- `claims`: `{base, claims}`, where each claim adds `ahead` (commits not on
+  the integration branch), `conflicts_with_base` (files a merge would
+  conflict in, or `null` if this git can't tell) and `conflicts_with: [{id,
+  files}]` for other claims. `release`: `{id, released, deleted_branches,
   removed_worktree, deleted_remote_branches, remote_branches}`. `renumber`: `{dry_run, renumbered:
-  [{from, to}], files}`.
+  [{from, to}], files, proposals_moved}`.
+- `land`: `{base, dry_run, landed, skipped, released, pushed, proposals}`.
+  Each entry is `{id, branch, landed, ...}`: a landed one has `commit` and
+  `checks`; a skipped one has `reason` (`conflict` with `files`,
+  `check_failed` with `checks`, `waiting` with `blocked_by`, `no_claim`,
+  `no_commits`, `not_done` or `dry_run`) and `message`.
+- `propose`: `{id, file, item}`. `promote`: `{id, status, renumbered_from}`.
+  `block`, `unblock`, `drop`, `set-status`: `{id, previous_status, status}`,
+  plus `deleted_file` when a proposal was dropped.
 - `done`: `{id, previous_status, status, checks: [{name, command, exit_code,
   passed, output}], checks_skipped, manual_verify, now_ready, merge_needed}`. Checks are the
   item's `Verify` command, then `commands.test` and `commands.lint`, run from
@@ -513,6 +537,8 @@ parse text or stderr, even when `its` hits a bug (`internal_error`).
   `overlapping_touches`), `which_item`, `check_failed` (with `checks`),
   `no_status`, `duplicate_id`, `bad_backlog`, `no_package`, `no_base`,
   `not_git`, `not_integration_branch`, `worktree_exists`, `locked`,
+  `nothing_ready` (with `reason`), `fetch_failed`, `push_failed`, `dirty`,
+  `diverged`, `exists`, `bad_name`, `bad_title`, `no_reason`, `usage`,
   `git_error`, `internal_error`.
 
 Exit codes, the same with or without `--json`:
@@ -522,10 +548,11 @@ Exit codes, the same with or without `--json`:
 | 0 | ok |
 | 1 | error |
 | 2 | bad command-line usage |
-| 3 | `next`: nothing is ready (with `--parallel`: nothing can start alongside the claims) |
+| 3 | `next`, `start --next`, `land`: nothing is ready (with `--parallel`: nothing can start alongside the claims) |
 | 4 | `start`: a dependency isn't done |
 | 5 | `done`: a check failed; the status is unchanged |
 | 6 | `start`: the item may change the same files as one already running |
+| 7 | `land`: a branch conflicted or failed its checks and was not landed |
 
 `its backlog --write` saves the `its backlog --json` object as
 `planning/backlog.json` (`docs/planning/backlog.json` in a repo), and `start`
@@ -544,9 +571,17 @@ or Codex in each; it never launches an agent itself.
   (default `../<repo>-<ID>`); `--branch` creates it and checks it out here. An
   item is claimed while any local or remote branch `its/<ID>` or
   `its/<ID>-...` exists and the item isn't `done` or `dropped` on the
-  integration branch. Push the branch to make the claim visible to other
-  machines and cloud agents. `its next` never offers a claimed item, and
-  `its start` refuses one.
+  integration branch. `its next` never offers a claimed item, and
+  `its start` refuses one. `its start --next` picks and claims the next ready
+  item in one locked step.
+- **Claims are pushed.** When the package has a remote (`remote` in
+  `package.yaml`, default `origin`), `its start` pushes the new claim branch
+  with a lease that requires the branch not to exist yet, so when two machines
+  claim the same item the first push wins and the other's local claim is
+  undone (`claimed`). `--no-push`, or `push_claims: false` in `package.yaml`,
+  keeps claims local. `next`, `start` and `claims` take `--fetch` to read the
+  remote first; when the local integration branch is strictly behind its
+  remote-tracking branch, readiness is read from the remote one.
 - **A lock makes claiming atomic on one machine.** While it checks
   readiness, claims and overlap and creates the branch, `its start` holds an
   OS file lock on `claims.lock` in `$(git rev-parse --git-common-dir)/its/`,
@@ -589,6 +624,20 @@ or Codex in each; it never launches an agent itself.
   the docs are re-linked. `--dry-run` shows the new IDs first. It refuses to
   run off the integration branch (unless `--force`) or when a placeholder is
   proposed twice, and never reuses a number still mentioned in any doc.
-- **Test the merged result.** A clean merge of two branches can still break the
-  build; run the test command on the integration branch after each merge.
+- **Landing.** A clean merge of two branches can still break the build, so
+  `its land` merges finished claims into the integration branch one at a
+  time, in backlog order, and runs the item's Verify plus the test and lint
+  commands on each merged result. It runs in the main checkout on a clean
+  integration branch. A claim is finished when its item is `done` at the
+  branch tip, and lands only once its dependencies are done on the
+  integration branch (an item whose dependency lands earlier in the same run
+  gets its turn). Before merging, `git merge-tree` checks for conflicts; a
+  conflict in a generated file (`planning/README.md`, wireframe index,
+  `backlog.json`) is resolved by regenerating it, any other conflict skips the
+  branch. A branch whose checks fail on the merged tree is reset away, so the
+  integration branch only moves to states that were tested whole. `--fetch`
+  fast-forwards from the remote first, `--push` pushes the result, `--release`
+  releases each landed claim, `--dry-run` reports what would land. `its claims`
+  shows each claim's conflicts with the base and with other claims ahead of
+  time.
 

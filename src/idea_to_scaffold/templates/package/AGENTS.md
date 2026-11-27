@@ -48,21 +48,25 @@ docs/playbooks/ repeatable procedures for agents
 2. Follow its links to the requirements it satisfies and their acceptance criteria, and on to the components and screens that serve them. `its show <ID>` prints any ID's definition and the docs that mention it.
 3. Implement in small steps with tests that prove each acceptance criterion.
 4. Run `its done <ID>`: it runs the item's **Verify** command and the test and lint commands, and sets the item `done` only if they pass. Commit in the same change, using `<type>(<scope>): <summary> [T-n.m]` with `Refs: FR-xxx` in the body.
-5. Found more work? Add it to the end of the backlog as a new item with a placeholder ID (`### T-new-<short-name> — Title`) and `Status: proposed`. Don't pick the next number yourself, and don't keep TODO lists anywhere else.
-6. If you edited anything in `docs/planning/`, refresh the links (see *Keeping docs in sync*).
+5. Found more work? Run `its propose "Title" --satisfies FR-xxx` (it writes `docs/planning/proposals/T-new-<name>.md`). Without `its`, add a new item with a placeholder ID (`### T-new-<short-name> — Title`) and `Status: proposed`. Don't pick the next number yourself, and don't keep TODO lists anywhere else.
+6. Stuck, or the item can't be done as written? Run `its block <ID> --reason "..."` and stop. Never weaken or delete a test to get past a check.
+7. If you edited anything in `docs/planning/`, refresh the links (see *Keeping docs in sync*).
 
 ### Working in parallel
 When several agents work at once, each item gets its own branch and worktree, and the branch is the claim:
-- `its start <ID> --worktree` creates the branch `its/<ID>-<slug>` from `main` in a new worktree and prints the
-  command to start Claude Code or Codex there. `its next` never offers an item someone has claimed.
+- `its start <ID> --worktree` (or `its start --next --worktree`) creates the branch `its/<ID>-<slug>` from `main`
+  in a new worktree, pushes it so other machines see the claim, and prints the command to start Claude Code or
+  Codex there. `its next` never offers an item someone has claimed; `--fetch` refreshes claims from the remote.
 - On a claim branch, don't set the item `in-progress`: the branch says that. Commit `done` with the work
   (`its done` with no ID finds the item from the branch name).
 - An item's dependencies count as done only once they are merged to `main`.
 - Items run side by side only when their **Touches** confirm they change different files. `its start` refuses
   an item that might overlap one already running, and an item with no **Touches** never runs alongside another.
   `its next --parallel` lists the ready items that can start now.
-- After merging, release the claim with `its release <ID>` (`--remote` also deletes the pushed branch), and run `its renumber` on `main` to give proposed
-  `T-new-...` items their permanent IDs.
+- Land finished branches with `its land` on `main`: it merges them one at a time, runs the checks on each merged
+  result, and undoes a merge that fails (`--push --release` also pushes `main` and removes the landed claims).
+  `its claims` shows which claim branches would conflict before anyone merges.
+- Then `its promote <ID>` (or `its renumber`) on `main` gives proposed `T-new-...` items their permanent IDs.
 
 ### Keeping docs in sync
 - Each ID is defined in one place; elsewhere refer to it by ID only. Don't copy requirement text into code comments or other docs: link or cite the ID.

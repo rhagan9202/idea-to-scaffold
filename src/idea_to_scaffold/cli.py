@@ -9,19 +9,23 @@ from pathlib import Path
 
 from . import __version__
 from .backlog import BacklogError
+from .edits import block, drop, promote, propose, set_item_status, unblock
 from .ids import TASK_PATTERN
 from .importer import ImportConflict, import_export
+from .landing import land
 from .linker import link_package
 from .package import BACKLOG_STATUSES, PROFILES, Package, PackageError, new_package
 from .scaffold import ScaffoldError, scaffold
 from .validate import validate
 from .work import (
+    EXIT_NOT_LANDED,
     EXIT_NOTHING_READY,
     SCHEMA,
     WorkError,
     backlog_payload,
     claims_payload,
     done,
+    fetch,
     next_payload,
     release,
     renumber,
@@ -173,6 +177,8 @@ def cmd_next(args: argparse.Namespace) -> int:
     pkg = _load(args)
     if pkg is None:
         return 1
+    if args.fetch:
+        fetch(pkg, args.base)
     payload = next_payload(pkg, base=args.base, parallel=args.parallel)
     if not args.all:
         payload.pop("ready")
@@ -245,12 +251,19 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 
 def cmd_start(args: argparse.Namespace) -> int:
+    if args.next and args.id and args.dir == ".":  # `its start --next <dir>`
+        args.dir, args.id = args.id, None
+    if not args.next and not args.id:
+        return _fail(args, WorkError("usage", "name the item to start, or pass --next", 2))
     pkg = _load(args)
     if pkg is None:
         return 1
+    if args.fetch:
+        fetch(pkg, args.base)
     try:
-        payload = start(pkg, args.id, force=args.force, branch=args.branch, worktree=args.worktree,
-                        agent=args.agent, base=args.base, allow_overlap=args.allow_overlap)
+        payload = start(pkg, None if args.next else args.id, force=args.force, branch=args.branch,
+                        worktree=args.worktree, agent=args.agent, base=args.base, allow_overlap=args.allow_overlap,
+                        push=False if args.no_push else None)
     except WorkError as err:
         if err.code == "blocked" and not args.json:
             print(f"error: {err.message} (use --force to start it anyway)", file=sys.stderr)
@@ -268,6 +281,10 @@ def cmd_start(args: argparse.Namespace) -> int:
     if claim:
         where = f" in the new worktree {claim['worktree']}" if claim["worktree"] else ", checked out here"
         print(f"{_item_line(item)} is claimed by branch {claim['branch']}{where}")
+        if payload.get("pushed"):
+            print(f"  pushed to {payload['remote']}, so other machines see the claim")
+        elif payload.get("push_error"):
+            print(f"  warning: the claim is only local; pushing it failed: {payload['push_error']}")
         print("start an agent on it:")
         print(f"  {payload['commands']['claude']}")
         print(f"  {payload['commands']['codex']}")
@@ -283,6 +300,8 @@ def cmd_claims(args: argparse.Namespace) -> int:
     pkg = _load(args)
     if pkg is None:
         return 1
+    if args.fetch:
+        fetch(pkg, args.base)
     try:
         payload = claims_payload(pkg, base=args.base)
     except WorkError as err:
@@ -301,6 +320,10 @@ def cmd_claims(args: argparse.Namespace) -> int:
             state = "remote" if c["remote"] else "active"
         extra = f"  worktree {c['worktree']}" if c["worktree"] else ""
         print(f"{c['id']:<10} {c['branch']}  [{state}]{extra}")
+        if c.get("conflicts_with_base"):
+            print(f"           would conflict with {payload['base']} in {', '.join(c['conflicts_with_base'])}")
+        for other in c.get("conflicts_with", []):
+            print(f"           would conflict with {other['id']} in {', '.join(other['files'])}")
     return 0
 
 
@@ -383,6 +406,106 @@ def cmd_done(args: argparse.Namespace) -> int:
     elif payload["merge_needed"]:
         print("  commit, then merge this branch; dependent items become ready once it is merged")
     return 0
+
+
+def cmd_land(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+
+    def announce(ident, check) -> None:
+        if not args.json:
+            print(f"{ident}: running {check.name}: {check.command}", flush=True)
+
+    payload = land(pkg, args.ids or None, verify=not args.no_verify, fetch=args.fetch, push=args.push,
+                   release=args.release, dry_run=args.dry_run, on_check=announce)
+    stuck = [s for s in payload["skipped"] if s["reason"] in ("conflict", "check_failed")]
+    if not payload["landed"] and not payload["skipped"]:
+        code = EXIT_NOTHING_READY
+    elif stuck:
+        code = EXIT_NOT_LANDED
+    else:
+        code = 0
+    if args.json:
+        _emit(payload)
+        return code
+    for done_ in payload["landed"]:
+        print(f"landed {done_['id']} ({done_['branch']})")
+    for skip in payload["skipped"]:
+        if skip["reason"] == "dry_run":
+            print(f"would land {skip['id']} ({skip['branch']})")
+            continue
+        print(f"not landed: {skip['id']}: {skip['message']}")
+        for check in skip.get("checks", []):
+            if not check["passed"]:
+                print(f"  {check['name']} failed (exit {check['exit_code']}): {check['command']}")
+                if check["output"]:
+                    print(check["output"])
+    if not payload["landed"] and not payload["skipped"]:
+        print("nothing to land: no claim branch has a done item that isn't merged yet")
+    if payload["pushed"]:
+        print(f"pushed {payload['base']}")
+    for ident in payload["released"]:
+        print(f"released the claim on {ident}")
+    if payload["proposals"]:
+        print(f"{len(payload['proposals'])} proposal(s) are waiting: its promote <ID>, or its renumber to number them")
+    return code
+
+
+def _edited(args: argparse.Namespace, payload: dict) -> int:
+    if args.json:
+        _emit(payload)
+        return 0
+    what = payload.get("renumbered_from")
+    if what:
+        print(f"{what} is now {payload['id']}")
+    if payload.get("deleted_file"):
+        print(f"{payload['id']} dropped: deleted {payload['deleted_file']}")
+    else:
+        print(f"{payload['id']} is now {payload['status']} (was {payload['previous_status']})")
+    if payload.get("reason"):
+        print(f"  reason: {payload['reason']}")
+    return 0
+
+
+def cmd_propose(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+    payload = propose(pkg, args.title, name=args.name, satisfies=args.satisfies, depends_on=args.depends_on,
+                      milestone=args.milestone, do=args.do, done_when=args.done_when, verify=args.verify,
+                      touches=args.touches)
+    if args.json:
+        _emit(payload)
+        return 0
+    print(f"proposed {payload['id']} in {payload['file']}")
+    print("  it gets a permanent ID when someone runs its promote or its renumber on the integration branch")
+    return 0
+
+
+def cmd_promote(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    return 1 if pkg is None else _edited(args, promote(pkg, args.id, force=args.force))
+
+
+def cmd_block(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    return 1 if pkg is None else _edited(args, block(pkg, args.id, args.reason))
+
+
+def cmd_unblock(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    return 1 if pkg is None else _edited(args, unblock(pkg, args.id))
+
+
+def cmd_drop(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    return 1 if pkg is None else _edited(args, drop(pkg, args.id, args.reason))
+
+
+def cmd_set_status(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    return 1 if pkg is None else _edited(args, set_item_status(pkg, args.id, args.status, reason=args.reason))
 
 
 def _confirm_delete(target: Path, assume_yes: bool) -> bool:
@@ -476,6 +599,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     dir_help = "package folder or scaffolded repo (default: .)"
     json_help = f"print JSON (schema {SCHEMA}) instead of text"
+    fetch_help = "fetch the integration branch and claim branches from the remote first"
     base_help = "integration branch to read readiness from (default: integration_branch in package.yaml, or main)"
 
     s = sub.add_parser("backlog", help="list backlog items")
@@ -494,6 +618,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="up to N ready items (default 3) whose Touches don't overlap each other or active claims",
     )
     s.add_argument("--base", help=base_help)
+    s.add_argument("--fetch", action="store_true", help=fetch_help)
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_next)
 
@@ -504,7 +629,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_show)
 
     s = sub.add_parser("start", help="set a ready item in-progress (exit 4 if a dependency isn't done)")
-    s.add_argument("id")
+    s.add_argument("id", nargs="?", help="the item (or --next)")
+    s.add_argument("--next", action="store_true",
+                   help="start the item its next would offer, picked and claimed in one step (exit 3 if none)")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--force", action="store_true", help="start it even if dependencies aren't done, or it is blocked")
     s.add_argument("--branch", action="store_true", help="claim it with a branch its/<ID>-<slug>, checked out here")
@@ -517,15 +644,80 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-overlap", action="store_true",
         help="start it even though its Touches don't confirm it is apart from the items already running",
     )
+    s.add_argument("--no-push", action="store_true",
+                   help="keep a claim local (by default it is pushed to the remote, if there is one)")
     s.add_argument("--base", help=base_help)
+    s.add_argument("--fetch", action="store_true", help=fetch_help)
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_start)
 
-    s = sub.add_parser("claims", help="list claim branches (its/<ID>-...), local and remote")
+    s = sub.add_parser("claims", help="list claim branches (its/<ID>-...), local and remote, and which would conflict")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--base", help=base_help)
+    s.add_argument("--fetch", action="store_true", help=fetch_help)
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_claims)
+
+    s = sub.add_parser("land", help="merge finished claim branches one at a time, testing each merged result")
+    s.add_argument("ids", nargs="*", metavar="ID", help="only these items (default: every claim that is done)")
+    s.add_argument("--dir", default=".", help=dir_help)
+    s.add_argument("--no-verify", action="store_true", help="merge without running the checks")
+    s.add_argument("--fetch", action="store_true", help=fetch_help + "; fast-forward the integration branch first")
+    s.add_argument("--push", action="store_true", help="push the integration branch after landing")
+    s.add_argument("--release", action="store_true",
+                   help="release each landed claim (with --push, its pushed branch too)")
+    s.add_argument("--dry-run", action="store_true", help="show what would land, changing nothing")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_land)
+
+    s = sub.add_parser("propose", help="propose a new backlog item, in its own file under planning/proposals/")
+    s.add_argument("title")
+    s.add_argument("--dir", default=".", help=dir_help)
+    s.add_argument("--name", help="the placeholder name, T-new-<name> (default: from the title)")
+    s.add_argument("--satisfies", help="requirements it delivers, e.g. FR-003")
+    s.add_argument("--depends-on", help="items it needs first, e.g. T-2.1")
+    s.add_argument("--milestone", help="e.g. M2 (default: unscheduled)")
+    s.add_argument("--do", help="what to do")
+    s.add_argument("--done-when", help="how to tell it is finished")
+    s.add_argument("--verify", help="a command in backticks, a test ID, or manual: ...")
+    s.add_argument("--touches", help="paths or globs it will change, comma-separated")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_propose)
+
+    s = sub.add_parser("promote", help="schedule a proposed item: give a placeholder its ID and set it todo")
+    s.add_argument("id")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--force", action="store_true", help="renumber even when not on the integration branch")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_promote)
+
+    s = sub.add_parser("block", help="mark an item blocked and say why (also how an agent stops honestly)")
+    s.add_argument("id")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--reason", required=True, help="what it is waiting for")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_block)
+
+    s = sub.add_parser("unblock", help="set a blocked item back to todo")
+    s.add_argument("id")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_unblock)
+
+    s = sub.add_parser("drop", help="drop an item (a proposal's file is deleted)")
+    s.add_argument("id")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--reason", help="why it was dropped")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_drop)
+
+    s = sub.add_parser("set-status", help="set any item's status by hand")
+    s.add_argument("id")
+    s.add_argument("status", choices=BACKLOG_STATUSES)
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--reason", help="recorded for blocked and dropped")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_set_status)
 
     s = sub.add_parser("release", help="drop a claim: remove its worktree and delete its local branch")
     s.add_argument("id")
