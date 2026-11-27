@@ -184,6 +184,19 @@ class Package:
         return cls(root=root, manifest=manifest, planning_dir=planning, playbooks_dir=playbooks,
                    manifest_path=manifest_path, repo_layout=repo)
 
+    @classmethod
+    def find(cls, start: Path) -> Package:
+        """Load the package or repo that `start` is in: `start` itself or the nearest folder above it, so commands
+        work from any subfolder (`docs/`, `src/...`)."""
+        start = Path(start).resolve()
+        for folder in (start, *start.parents):
+            if (folder / "docs/planning/package.yaml").is_file():
+                return cls.load(folder)
+            in_repo_docs = folder.name == "planning" and folder.parent.name == "docs"
+            if (folder / "package.yaml").is_file() and not in_repo_docs:
+                return cls.load(folder)
+        raise PackageError(f"no package.yaml (or docs/planning/package.yaml) in {start} or any folder above it")
+
     def path_of(self, logical: str) -> Path:
         """Turn a logical path into a real path on disk."""
         if logical == "package.yaml":

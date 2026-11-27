@@ -61,7 +61,7 @@ def test_scaffold_creates_agent_files_and_commits(plan: Path, tmp_path: Path):
         assert (repo / rel).is_file(), rel
     agents = (repo / "AGENTS.md").read_text()
     assert "`uv run pytest`" in agents and "<test>" not in agents
-    assert "run `its next`" in (repo / "HANDOFF.md").read_text()
+    assert "run its next to pick" in (repo / "HANDOFF.md").read_text()
     log = subprocess.run(["git", "log", "--oneline"], cwd=repo, capture_output=True, text=True)
     assert "scaffold streak" in log.stdout
     status = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True)

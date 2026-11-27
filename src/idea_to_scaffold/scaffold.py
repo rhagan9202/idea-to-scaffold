@@ -160,7 +160,7 @@ def _handoff(pkg: Package, report: Report) -> str:
     else:
         pick = "Work the backlog in order:"
         prompt = (
-            "Read HANDOFF.md and AGENTS.md, run `its next` to pick the next ready backlog item, "
+            "Read HANDOFF.md and AGENTS.md, run its next to pick the next ready backlog item, "
             "then follow docs/playbooks/implement-task.md for it."
         )
     return f"""# Handoff: {pkg.name}
