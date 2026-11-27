@@ -72,7 +72,7 @@ def stop_hook(pkg: Package, stdin: str) -> dict | None:
     try:
         result = done(pkg, ident, check_only=True)
     except WorkError as err:
-        if err.code not in ("check_failed", "test_changes", "outside_touches"):
+        if err.code not in ("check_failed", "test_changes", "outside_touches", "gate_error"):
             return None
         failed = [c for c in err.details.get("checks", []) if not c["passed"]]
         detail = "".join(f"\n\n{c['name']} failed (exit {c['exit_code']}): {c['command']}\n{c['output']}"

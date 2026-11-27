@@ -30,7 +30,7 @@ def done_on_main(repo: Path, ident: str, path: str, content: str) -> None:  # no
 
 def test_drift_names_the_items_and_requirements_whose_code_changed_after_verification(repo: Path, capsys):  # noqa: F811
     done_on_main(repo, "T-2.1", STORE, "def add(): ...\n")
-    assert re.fullmatch(r"\d{4}-\d\d-\d\d, base [0-9a-f]{10}", verified(repo, "T-2.1"))
+    assert re.fullmatch(r"\d{4}-\d\d-\d\d, base [0-9a-f]{10}, tree [0-9a-f]{12}", verified(repo, "T-2.1"))
     code, out = run_json(capsys, "drift", str(repo), "--check")
     assert code == 0 and out["drifted"] == [] and out["clean"] == ["T-2.1"]
     assert out["no_touches"] == ["T-1.1"]
@@ -47,7 +47,7 @@ def test_drift_names_the_items_and_requirements_whose_code_changed_after_verific
     code, out = run_json(capsys, "verify", "T-2.1", str(repo))
     assert code == 0 and out["status"] == "done" and out["verified"] != out["previous_verified"]
     _, out = run_json(capsys, "drift", str(repo))
-    assert out["unknown"] == [{"id": "T-2.1", "reason": "uncommitted", "message": "its verification isn't committed yet"}]
+    assert out["clean"] == ["T-2.1"]  # the files match the hash the re-verify recorded, committed or not
     git(repo, "commit", "-qam", "chore: re-verify T-2.1")
     code, out = run_json(capsys, "drift", str(repo), "--check")
     assert code == 0 and out["clean"] == ["T-2.1"]

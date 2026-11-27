@@ -11,7 +11,9 @@ backlog order, and an item lands only once its dependencies are done on the inte
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -29,6 +31,7 @@ from .work import (
     WorkError,
     _locked,
     _refresh_mirror,
+    check_override,
     checks_for,
     integration_branch,
     remote_of,
@@ -93,14 +96,18 @@ def land(
     push: bool = False,
     release: bool = False,
     dry_run: bool = False,
-    allow_test_changes: bool = False,
-    allow_outside_touches: bool = False,
+    allow_test_changes: str | None = None,
+    allow_outside_touches: str | None = None,
     on_check: Callable[[str, Check], None] | None = None,
 ) -> dict:
     """Land finished claim branches on the integration branch, one at a time, testing each merged result."""
     if not cl.in_git(pkg.root):
         raise WorkError("not_git", "landing needs a git repository")
     root = pkg.root
+    if allow_test_changes is not None:
+        check_override("--allow-test-changes", allow_test_changes)
+    if allow_outside_touches is not None:
+        check_override("--allow-outside-touches", allow_outside_touches)
     base = integration_branch(pkg)
     if cl.current_branch(root) != base:
         raise WorkError("not_integration_branch", f"run its land on {base}, in the main checkout",
@@ -134,7 +141,7 @@ def land(
             pending.remove((claim, ref))
             progress = True
             outcome = _land_one(pkg, claim, ref, verify=verify, dry_run=dry_run, on_check=on_check,
-                                allow=(allow_test_changes, allow_outside_touches))
+                                allow=(allow_test_changes is not None, allow_outside_touches is not None))
             (landed if outcome["landed"] else skipped).append(outcome)
     for claim, _ in pending:
         items = load_backlog(pkg)
@@ -166,9 +173,15 @@ def land(
 
 def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run: bool,
               on_check: Callable[[str, Check], None] | None, allow: tuple[bool, bool] = (False, False)) -> dict:
+    """Merge one claim in a throwaway worktree, check the merged result there, and only then fast-forward the
+    integration branch to it. The user's checkout is never merged into, reset or cleaned, so nothing in it (untracked
+    notes included) can be lost, and a status written there while the checks run survives."""
     root = pkg.root
     result = {"id": claim.id, "branch": claim.branch, "landed": False}
-    inspection = gate.inspect(pkg, claim.id, "HEAD", head=ref)  # the done gate again, on what would merge
+    try:  # the done gate again, on what would merge
+        inspection = gate.inspect(pkg, claim.id, "HEAD", head=ref)
+    except gate.GateError as exc:
+        return {**result, "reason": "gate_error", "message": f"{claim.id} can't be checked: {exc}"}
     blocking = inspection.blocking(allow_test_changes=allow[0], allow_outside_touches=allow[1])
     if blocking:
         tests = [f for f in blocking if f["kind"] in gate.TEST_KINDS]
@@ -184,42 +197,74 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
     if dry_run:
         return {**result, "reason": "dry_run", "message": "would land"}
     before = _git(root, "rev-parse", "HEAD").stdout.strip()
+    prefix = _git(root, "rev-parse", "--show-prefix").stdout.strip()
     item_title = (_item_at(pkg, ref, claim.id) or BacklogItem(claim.id, "", 3, 0, 0)).title
-    with _locked(pkg):
-        merge = _git(root, "merge", "--no-ff", "--no-edit", "-m", f"Land {claim.id}: {item_title}".rstrip(": "), ref)
-        if merge.returncode != 0:
-            unresolved = _git(root, "diff", "--name-only", "--diff-filter=U").stdout.split()
-            if not unresolved or any(f not in generated for f in unresolved):
-                _git(root, "merge", "--abort")
-                return {**result, "reason": "conflict", "files": unresolved or [],
-                        "message": merge.stderr.strip() or merge.stdout.strip()}
-            for f in unresolved:  # generated files: take ours, regenerate below
-                _git(root, "checkout", "--ours", "--", f)
-                _git(root, "add", "--", f)
-            if _git(root, "commit", "--no-edit", "--quiet").returncode != 0:
-                _git(root, "merge", "--abort")
-                return {**result, "reason": "conflict", "files": unresolved}
-        if link_package(pkg):  # the merged docs may need fresh links and index
-            _git(root, "add", "--all", "--", str(pkg.planning_dir))
-            _git(root, "commit", "--quiet", "--amend", "--no-edit")
-    _refresh_mirror(pkg)
-
-    checks: list[dict] = []
-    if verify and pkg.repo_layout:
-        item = next((i for i in load_backlog(pkg) if i.id == claim.id), None)
-        for check in checks_for(pkg, item) if item else []:
-            if on_check:
-                on_check(claim.id, check)
-            checks.append(run_check(check, root))
-            if not checks[-1]["passed"]:
-                break
-    failed = [c["name"] for c in checks if not c["passed"]]
-    if failed:
+    scratch = Path(tempfile.mkdtemp(prefix="its-land-"))
+    tree = scratch / "merge"
+    if _git(root, "worktree", "add", "--detach", "--quiet", str(tree), before).returncode != 0:
+        shutil.rmtree(scratch, ignore_errors=True)
+        return {**result, "reason": "git_error", "message": "couldn't create a worktree to test the merge in"}
+    try:
+        merged = _merge_in(tree, prefix, ref, f"Land {claim.id}: {item_title}".rstrip(": "), generated)
+        if "reason" in merged:
+            return {**result, **merged}
+        checks: list[dict] = []
+        if verify and pkg.repo_layout:
+            here = tree / prefix if prefix else tree
+            commands = inspection.policy.commands
+            item = inspection.planned or _item_at(pkg, ref, claim.id)
+            plan = checks_for(pkg, item, inspection.verify_command, commands) if item else []
+            if commands.get("setup") and plan:  # a fresh worktree has no installed dependencies yet
+                setup = run_check(Check("setup", commands["setup"]), here)
+                if not setup["passed"]:
+                    return {**result, "reason": "check_failed", "checks": [setup],
+                            "message": f"setup ({commands['setup']}) failed in the merge worktree; "
+                                       f"{claim.id} was not landed"}
+            for check in plan:
+                if on_check:
+                    on_check(claim.id, check)
+                checks.append(run_check(check, here))
+                if not checks[-1]["passed"]:
+                    break
+        failed = [c["name"] for c in checks if not c["passed"]]
+        if failed:
+            return {**result, "reason": "check_failed", "checks": checks,
+                    "message": f"{', '.join(failed)} failed on the merged result; {claim.id} was not landed"}
+        commit = _git(tree, "rev-parse", "HEAD").stdout.strip()
         with _locked(pkg):
-            _git(root, "reset", "--hard", "--quiet", before)
+            if _git(root, "rev-parse", "HEAD").stdout.strip() != before:
+                return {**result, "reason": "base_moved", "checks": checks,
+                        "message": "the integration branch moved while the checks ran; run its land again"}
+            ff = _git(root, "merge", "--ff-only", "--quiet", commit)
+            if ff.returncode != 0:
+                return {**result, "reason": "checkout_blocked", "checks": checks,
+                        "message": "the merged result passed, but your checkout couldn't be moved to it: "
+                                   f"{ff.stderr.strip() or ff.stdout.strip()}"}
         _refresh_mirror(pkg)
-        return {**result, "reason": "check_failed", "checks": checks,
-                "message": f"{', '.join(failed)} failed on the merged result; the merge was undone"}
-    return {**result, "landed": True, "commit": _git(root, "rev-parse", "HEAD").stdout.strip(), "checks": checks,
-            "checks_skipped": None if (verify and pkg.repo_layout) else
-            ("--no-verify" if not verify else "this is a planning package, not a scaffolded repo")}
+        return {**result, "landed": True, "commit": commit, "checks": checks,
+                "checks_skipped": None if (verify and pkg.repo_layout) else
+                ("--no-verify" if not verify else "this is a planning package, not a scaffolded repo")}
+    finally:
+        _git(root, "worktree", "remove", "--force", str(tree))
+        shutil.rmtree(scratch, ignore_errors=True)
+        _git(root, "worktree", "prune")
+
+
+def _merge_in(tree: Path, prefix: str, ref: str, message: str, generated: set[str]) -> dict:
+    """Merge `ref` into the throwaway worktree, regenerating its generated files. {} on success, else why not."""
+    merge = _git(tree, "merge", "--no-ff", "--no-edit", "-m", message, ref)
+    if merge.returncode != 0:
+        unresolved = _git(tree, "diff", "--name-only", "--diff-filter=U").stdout.split()
+        mine = [f[len(prefix):] if prefix and f.startswith(prefix) else f for f in unresolved]
+        if not unresolved or any(f not in generated for f in mine):
+            return {"reason": "conflict", "files": mine, "message": merge.stderr.strip() or merge.stdout.strip()}
+        for f in unresolved:  # generated files: take ours, regenerate below
+            _git(tree, "checkout", "--ours", "--", f)
+            _git(tree, "add", "--", f)
+        if _git(tree, "commit", "--no-edit", "--quiet").returncode != 0:
+            return {"reason": "conflict", "files": mine}
+    merged = Package.load(tree / prefix if prefix else tree)
+    if link_package(merged):  # the merged docs may need fresh links and index
+        _git(tree, "add", "--all", "--", str(merged.planning_dir))
+        _git(tree, "commit", "--quiet", "--amend", "--no-edit")
+    return {}
