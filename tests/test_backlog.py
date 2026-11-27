@@ -100,7 +100,8 @@ def test_set_status_changes_only_the_value(mini: Path):
 
 def test_set_status_keeps_crlf_and_rejects_bad_input(mini: Path):
     path = mini / "planning/07-backlog.md"
-    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+    lf = path.read_bytes().replace(b"\r\n", b"\n")  # the fixture's own endings follow the platform
+    path.write_bytes(lf.replace(b"\n", b"\r\n"))
     pkg = Package.load(mini)
     set_status(pkg, "T-1.2", "done")
     raw = path.read_bytes()
