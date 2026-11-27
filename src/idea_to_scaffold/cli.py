@@ -175,10 +175,11 @@ def cmd_gate_audit(args: argparse.Namespace) -> int:
     if pkg is None:
         return 1
     try:
-        payload = gate_audit(pkg, args.id)
+        payload = gate_audit(pkg, args.id, run=not args.no_run)
     except WorkError as err:
         return _fail(args, err)
-    code = 0 if payload["ok"] else EXIT_AUDIT_MISSED
+    ok = payload["ok"] or (args.allow_warn and not payload["missed"])
+    code = 0 if ok else EXIT_AUDIT_MISSED
     if args.json:
         _emit(payload)
         return code
@@ -186,15 +187,19 @@ def cmd_gate_audit(args: argparse.Namespace) -> int:
           + (f", using {payload['test_file']}" if payload["test_file"] else ""))
     for v in payload["variants"]:
         if v["caught"] is None:
-            mark, note = "skip  ", v["skipped"]
+            mark, note = "skip   ", v["skipped"]
         elif v["caught"]:
-            mark, note = ("caught" if v["mode"] == "enforce" else "warns "), ", ".join(v["found"])
+            mark, note = ("refused" if v["mode"] == "enforce" else "warns  "), ", ".join(v["found"])
         else:
-            mark, note = "MISSED", "found " + (", ".join(v["found"]) or "nothing")
-        print(f"  {mark}  {v['name']:<22} {v['description']}  ({note})")
-    print(f"caught {payload['caught']} of {payload['total']} ({payload['enforced']} refused, "
-          f"{payload['caught'] - payload['enforced']} only warned)"
+            mark, note = "MISSED ", "found " + (", ".join(v["found"]) or "nothing")
+        print(f"  {mark}  {v['name']:<24} {v['description']}  ({note})")
+    print(f"refused {payload['refused']} of {payload['total']}"
+          + (f"; only warned: {', '.join(payload['warned'])}" if payload["warned"] else "")
           + (f"; missed: {', '.join(payload['missed'])}" if payload["missed"] else ""))
+    if payload["warned_kinds"]:
+        checks = "".join(f"\n    {kind}: enforce" for kind in payload["warned_kinds"])
+        print(f"to refuse the warned ones, set this in package.yaml on the integration branch:\n  gate:\n  "
+              f"  checks:{checks.replace(chr(10), chr(10) + '  ')}")
     return code
 
 
@@ -1146,6 +1151,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("gate-audit", help="feed the done gate known cheats and report which it catches")
     s.add_argument("id", nargs="?", help="the item to audit as (default: the first item with Touches)")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--no-run", action="store_true",
+                   help="leave out the cheats that need the tests to run (os._exit in the item's source)")
+    s.add_argument("--allow-warn", action="store_true",
+                   help="exit 0 when every cheat is at least warned about, not only when every one is refused")
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_gate_audit)
 

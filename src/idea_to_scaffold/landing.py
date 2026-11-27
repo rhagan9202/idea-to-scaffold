@@ -20,6 +20,7 @@ from pathlib import Path
 from . import claims as cl
 from . import gate, ledger
 from .backlog import BacklogItem, blocked_by, load_backlog, load_proposals, parse_backlog
+from .checks import RESULT_KINDS, Check, checks_for, result_findings, run_check
 from .ids import META_FILES
 from .linker import link_package
 from .package import Package
@@ -27,15 +28,13 @@ from .work import (
     BACKLOG,
     BACKLOG_JSON,
     SCHEMA,
-    Check,
     WorkError,
     _locked,
     _refresh_mirror,
+    changed_tests,
     check_override,
-    checks_for,
     integration_branch,
     remote_of,
-    run_check,
     shown,
 )
 
@@ -234,6 +233,12 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
         if failed:
             return {**result, "reason": "check_failed", "checks": checks,
                     "message": f"{', '.join(failed)} failed on the merged result; {claim.id} was not landed"}
+        for finding in result_findings(checks, changed_tests(pkg, inspection)):
+            inspection.add(finding)
+        refused = [f for f in inspection.blocking(allow_test_changes=allow[0]) if f["kind"] in RESULT_KINDS]
+        if refused:
+            return {**result, "reason": "test_changes", "findings": refused, "checks": checks,
+                    "message": f"{refused[0]['message']}; {claim.id} was not landed"}
         commit = _git(tree, "rev-parse", "HEAD").stdout.strip()
         with _locked(pkg):
             if _git(root, "rev-parse", "HEAD").stdout.strip() != before:

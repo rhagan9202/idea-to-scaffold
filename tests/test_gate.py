@@ -26,13 +26,21 @@ TEST = "tests/test_store.py"
 @pytest.fixture
 def claim(repo: Path, capsys) -> Path:  # noqa: F811
     """T-2.1 claimed in a worktree, with a test file on main and Touches covering the store and its test."""
-    (repo / TEST).write_text("def test_add():\n    assert 1 + 1 == 2\n    assert True\n")
+    (repo / TEST).write_text("def test_add():\n    assert len('ab') == 2\n    assert True\n")
     git(repo, "add", TEST)
     git(repo, "commit", "-qm", "store test")
     set_field(repo, "T-2.1", "Touches", f"`src/streak/store.py`, `{TEST}`")
     set_field(repo, "T-2.1", "Verify", f"`{py('print(3)')}`")
     _, out = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
     return Path(out["claim"]["worktree"])
+
+
+def older_project(repo: Path) -> None:  # noqa: F811
+    """Make main look like a project scaffolded before phase 9: no gate block, so the newer checks only warn."""
+    manifest = repo / "docs/planning/package.yaml"
+    text = manifest.read_text()
+    manifest.write_text(text[:text.index("\n# The done gate.")] + "\n")
+    git(repo, "commit", "-qam", "an older project")
 
 
 def finish(worktree: Path, *flags: str, capsys) -> tuple[int, dict]:
@@ -70,23 +78,23 @@ def test_removed_assertions_and_new_skips_are_refused(claim: Path, capsys):
     code, out = finish(claim, capsys=capsys)
     assert code == 5
     assert {f["kind"] for f in out["error"]["findings"]} == {"assertions_removed", "skip_added", "test_disabled"}
-    (claim / TEST).write_text("def test_add():\n    assert 1 + 1 == 2\n    assert True\n\n"
-                              "def test_remove():\n    assert 2 - 1 == 1\n")
+    (claim / TEST).write_text("def test_add():\n    assert len('ab') == 2\n    assert True\n\n"
+                              "def test_remove():\n    assert len('a') == 1\n")
     code, out = finish(claim, capsys=capsys)
-    assert code == 0  # adding tests is always fine, but this Verify passes whatever the code does:
-    assert [(f["kind"], f["mode"]) for f in out["findings"]] == [("tests_pass_on_parent", "warn")]
+    assert code == 5  # adding tests is fine, but this Verify passes whatever the code does, and a new scaffold
+    assert [(f["kind"], f["mode"]) for f in out["error"]["findings"]] == [("tests_pass_on_parent", "enforce")]
 
 
 # --- phase 7: tamper checks that comments, module marks, config and new files can't get past -----------------
 
 CHEATS = {
-    "comment out the assertions": ("def test_add():\n    pass  # assert later\n    # assert 1 + 1 == 2\n",
+    "comment out the assertions": ("def test_add():\n    pass  # assert later\n    # assert len('ab') == 2\n",
                                    {"assertions_removed"}),
     "pytestmark skips the module": ("import pytest\npytestmark = pytest.mark.skip(reason='x')\n\n"
-                                    "def test_add():\n    assert 1 + 1 == 2\n    assert True\n", {"skip_added"}),
-    "from unittest import skip": ("from unittest import skip\n\n@skip\ndef test_add():\n    assert 1 + 1 == 2\n"
+                                    "def test_add():\n    assert len('ab') == 2\n    assert True\n", {"skip_added"}),
+    "from unittest import skip": ("from unittest import skip\n\n@skip\ndef test_add():\n    assert len('ab') == 2\n"
                                   "    assert True\n", {"skip_added"}),
-    "return before asserting": ("def test_add():\n    return\n    assert 1 + 1 == 2\n    assert True\n",
+    "return before asserting": ("def test_add():\n    return\n    assert len('ab') == 2\n    assert True\n",
                                 {"test_disabled"}),
     "assert True keeps the count": ("def test_add():\n    assert True\n    assert True\n",
                                     {"assertions_weakened"}),
@@ -105,6 +113,7 @@ def test_tampering_that_line_patterns_missed_is_found(claim: Path, capsys, cheat
 
 def test_a_weakened_test_the_branch_added_is_found(claim: Path, repo: Path, capsys):  # noqa: F811
     set_field(repo, "T-2.1", "Touches", "`src/streak/store.py`, `tests/`")
+    older_project(repo)
     git(claim, "merge", "-q", "main")
     (claim / "tests/test_new.py").write_text("def test_new():\n    assert add() == 3 or True\n")
     (claim / "src/streak/store.py").write_text("def add(): ...\n")
@@ -172,6 +181,7 @@ def test_a_test_that_fails_before_the_change_is_red_on_parent(real_verify: Path,
 
 
 def test_a_test_that_passes_without_the_change_is_found(real_verify: Path, repo: Path, capsys):  # noqa: F811
+    older_project(repo)
     (real_verify / TEST).write_text("def test_add():\n    assert isinstance(3, int)\n")
     (real_verify / "src/streak/store.py").write_text("def add(a, b):\n    return a + b\n")
     code, out = run_json(capsys, "done", "T-2.1", str(real_verify), "--check")
@@ -315,7 +325,7 @@ def test_a_failing_test_is_reported_once():
         {"name": "lint", "command": "ruff check .", "exit_code": 0, "passed": True, "output": ""},
         {"name": "test", "command": "pytest", "exit_code": 1, "passed": False, "output": trace},
     ])
-    assert report.count("assert 1 == 2") == 1 and "test failed (exit 1): pytest  (output above)" in report
+    assert report.count("assert 1 == 2") == 1 and "test failed (exit 1): pytest  (same output as above)" in report
     assert "lint" not in report
 
 
@@ -376,7 +386,7 @@ def test_gate_audit_catches_every_seeded_cheat(claim: Path, repo: Path, capsys):
     assert git(repo, "status", "--porcelain") == ""  # the user's checkout is untouched
     capsys.readouterr()
     assert main(["gate-audit", str(repo)]) == 0
-    assert "caught" in capsys.readouterr().out
+    assert "refused" in capsys.readouterr().out
 
 
 def test_gate_audit_reports_a_miss(claim: Path, repo: Path, capsys, monkeypatch):  # noqa: F811

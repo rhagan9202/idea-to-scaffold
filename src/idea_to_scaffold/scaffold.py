@@ -8,9 +8,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
 
+from .gate import DEFAULT_MODES
 from .linker import link_package
 from .package import GENERATED_MARKER, Package, parse_front_matter, templates_dir
 from .validate import Report, validate
+
+GATE_BLOCK = (
+    "\n# The done gate. A new scaffold enforces every check, including the ones that start in warn mode for older\n"
+    "# projects. Set one to warn (reported, never refusing) if it misfires on honest work here.\n"
+    "gate:\n  checks:\n" + "".join(f"    {kind}: enforce\n" for kind in sorted(DEFAULT_MODES))
+)
 
 ITS_REPO = "https://github.com/rhagan9202/idea-to-scaffold"  # where scaffolded CI installs `its` from
 ITS_SOURCE = f"git+{ITS_REPO}"
@@ -331,6 +338,10 @@ def scaffold(
     if "docs/planning/package.yaml" not in written:
         shutil.copy2(pkg.manifest_path, root / "docs/planning/package.yaml")
         written.append("docs/planning/package.yaml")
+    if "gate" not in pkg.manifest:
+        manifest = root / "docs/planning/package.yaml"
+        text = manifest.read_text(encoding="utf-8")
+        manifest.write_text(text + ("" if text.endswith("\n") else "\n") + GATE_BLOCK, encoding="utf-8")
     if pkg.playbooks_dir.is_dir():
         _copy_tree(pkg.playbooks_dir, root, "docs/playbooks", written)
     agents_md = pkg.path_of("AGENTS.md").read_text(encoding="utf-8")

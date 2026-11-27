@@ -15,6 +15,7 @@ jobs:
       - run: ruff check src tests
   test:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -33,4 +34,5 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e '.[dev]'
-      - run: pytest -q
+      # a test stuck for two minutes prints every thread's stack, so a hang shows where it is
+      - run: pytest -q -o faulthandler_timeout=120 ${{ runner.os == 'Windows' && '-v' || '' }}

@@ -13,8 +13,10 @@ runs, `inspect` compares the branch with the integration branch:
   assertions that can't fail, tests that do nothing, changes to test collection (`conftest.py`, pytest or Jest
   settings) and changes to the held-out acceptance tests. So are changes to agent configuration (`AGENTS.md`,
   `CLAUDE.md`, `.claude/`, `.codex/`, CI workflows), whatever the item's Touches say.
-- **New checks warn first.** The checks in DEFAULT_MODES are reported with `mode: warn` and refuse nothing until
-  the integration branch's package.yaml sets `gate: {checks: {<kind>: enforce}}`.
+- **Tests that vanish are flagged.** A test that was on the fork point and is gone from the branch, deleted or
+  renamed so the runner skips it, is `test_removed`, unless it turns up in another test file the branch changed.
+- **Some checks warn first.** The checks in DEFAULT_MODES are reported with `mode: warn` and refuse nothing until
+  the integration branch's package.yaml sets `gate: {checks: {<kind>: enforce}}`. A new scaffold enforces them all.
 - **The diff is checked against Touches.** Files changed outside the item's Touches are flagged, including files
   outside the package in a monorepo.
 
@@ -47,15 +49,17 @@ from .touches import covered
 
 TEST_KINDS = ("test_deleted", "assertions_removed", "skip_added", "verify_changed", "policy_changed",
               "item_changed", "other_item_changed", "agent_config_changed", "assertions_weakened", "test_disabled",
-              "test_config_changed", "acceptance_changed", "tests_pass_on_parent")
+              "test_config_changed", "acceptance_changed", "tests_pass_on_parent", "test_removed",
+              "no_test_report", "failures_hidden", "no_tests_ran", "tests_skipped")
 SCOPE_KINDS = ("outside_touches", "touches_changed", "no_changes")
 OWN_FIELDS = {"status", "verified", "blocked", "override"}  # what a branch may change on its own item
 MODES = ("enforce", "warn", "off")
-# Checks added in phase 7 start in warn mode: they are reported but don't refuse the item until a person sets
-# `gate: {checks: {<kind>: enforce}}` in package.yaml. Every other check enforces, and none can be turned off
-# except these.
+# Checks that can misfire on honest work start in warn mode: they are reported but don't refuse the item until a
+# person sets `gate: {checks: {<kind>: enforce}}` in package.yaml (a new scaffold sets that for all of them). Every
+# other check enforces. Only the RELAXABLE checks can be set to warn or off; the rest always enforce.
 DEFAULT_MODES = {"assertions_weakened": "warn", "test_disabled": "warn", "test_config_changed": "warn",
-                 "tests_pass_on_parent": "warn"}
+                 "tests_pass_on_parent": "warn", "no_test_report": "warn", "tests_skipped": "warn"}
+RELAXABLE = set(DEFAULT_MODES) | {"test_removed", "failures_hidden", "no_tests_ran"}
 DEFAULT_ACCEPTANCE = "tests/acceptance/"
 
 DEFAULT_TEST_PATHS = re.compile(
@@ -108,7 +112,7 @@ class Policy:
         checks = gate.get("checks")
         if isinstance(checks, dict):
             for kind, mode in checks.items():
-                if kind in DEFAULT_MODES and str(mode) in MODES:  # only the phase 7 checks can be relaxed
+                if kind in RELAXABLE and str(mode) in MODES:
                     modes[str(kind)] = str(mode)
         acceptance = gate.get("acceptance_path")
         acceptance = str(acceptance).strip().strip("/") + "/" if acceptance else DEFAULT_ACCEPTANCE
@@ -371,6 +375,8 @@ def inspect(pkg: Package, ident: str, base_ref: str | None, *, head: str | None 
     outside: set[str] = set()
     config: set[str] = set()
     acceptance = result.policy.acceptance
+    removed: list[dict] = []   # tests gone from a file, kept until every changed test file has been read
+    present: set[str] = set()  # the tests every changed test file has on the branch
     for change in result.changes:
         path = change.path
         if path == manifest_rel:
@@ -404,12 +410,24 @@ def inspect(pkg: Package, ident: str, base_ref: str | None, *, head: str | None 
                                                   after_content(pkg, head, change)):
                 result.add(finding)
         if is_test_path(pkg, path, globs):
-            for finding in tamper.compare(path, _before(pkg, merge_base, change), after_content(pkg, head, change)):
-                result.add(finding)
+            after = after_content(pkg, head, change)
+            present |= tamper.test_names(after, path)
+            for finding in tamper.compare(path, _before(pkg, merge_base, change), after):
+                if finding["kind"] == "test_removed":
+                    removed.append(finding)
+                else:
+                    result.add(finding)
         if result.touches and path != ".gitignore" and not in_touches(path, result.touches):
             outside.add(path)
         if change.old_path and result.touches and not in_touches(change.old_path, result.touches):
             outside.add(change.old_path)
+    for finding in removed:  # a test moved to another file the branch changed hasn't gone
+        gone = [name for name in finding["tests"] if name.rsplit("::", 1)[-1] not in present]
+        if gone:
+            result.add({**finding, "tests": gone,
+                        "message": f"{finding['file']} no longer has {', '.join(gone[:5])}, and no other test file "
+                                   "the branch changed has it, so it no longer runs (deleted, or renamed so the "
+                                   "runner doesn't collect it)"})
     if pkg.repo_layout and not any(not (planning and c.path.startswith(planning)) for c in result.changes):
         result.add({
             "kind": "no_changes",

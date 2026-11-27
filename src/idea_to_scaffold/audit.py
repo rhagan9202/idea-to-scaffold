@@ -5,13 +5,18 @@ assertion, skip a module, deselect a test in a conftest.py, edit its own Verify,
 one to a throwaway checkout of the integration branch, runs the gate's inspection for an item as if the change were
 that item's branch, and reports whether the gate found it. Nothing in the user's checkout changes.
 
-A variant counts as caught when the gate reports the finding it targets, in either mode: a check still in warn mode
-is reported as caught, with `mode: warn`, so the audit shows what enforcing it would stop. Red on parent isn't
-audited here, since it needs the tests to run; `its done` exercises it.
+Most variants only need the gate's inspection. A few need the tests to run (`os._exit(0)` in the item's own source
+is invisible until the test run stops early), so the audit runs `commands.setup` and the item's checks for those,
+in the same throwaway checkout; `--no-run` leaves them out.
+
+A variant is refused when the gate reports the finding it targets in enforce mode, and only warned when that check
+is still in warn mode. The audit is `ok` only when every variant is refused. Red on parent isn't audited here;
+`its done` exercises it.
 """
 from __future__ import annotations
 
 import ast
+import re
 import shutil
 import subprocess
 import tempfile
@@ -20,10 +25,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import claims as cl
-from . import gate
+from . import gate, tamper
 from .backlog import BACKLOG, BacklogItem, parse_backlog, set_field
+from .checks import Check, checks_for, result_findings, run_check, runs_pytest
 from .package import Package
-from .work import SCHEMA, WorkError, base_ref
+from .work import SCHEMA, WorkError, base_ref, changed_tests
 
 
 @dataclass
@@ -35,9 +41,12 @@ class Target:
     test: str | None             # package-relative path of a Python test file with an assertion in a test
     test_dir: str                # where new test files go
     assert_line: int = 0         # 1-based line of the first assertion inside the first test function
-    test_line: int = 0           # 1-based line of that test function's `def`
+    test_line: int = 0           # 1-based line of that test function's first decorator, else its `def`
     body_line: int = 0           # 1-based line of its first statement
     acceptance: str = gate.DEFAULT_ACCEPTANCE
+    def_line: int = 0            # 1-based line of the test function's `def`
+    sources: tuple[str, ...] = ()  # package-relative Python source files the item touches (not tests)
+    marker: Path | None = None   # written by code a runtime variant plants, to show the tests reached it
 
 
 @dataclass
@@ -47,6 +56,7 @@ class Variant:
     expect: tuple[str, ...]
     apply: Callable[[Target], None]
     needs_test: bool = False
+    runs: bool = False           # needs the item's checks to run, not just the inspection
 
 
 def _edit(t: Target, rel: str, change: Callable[[list[str]], list[str]]) -> None:
@@ -94,6 +104,43 @@ def _pytest_settings(t: Target) -> None:
         pyproject.write_text(text, encoding="utf-8")
     else:
         _write(t, "pytest.ini", "[pytest]\naddopts = --deselect tests/test_x.py::test_x\n")
+
+
+def _rename_test(t: Target) -> None:
+    """`def test_add(` becomes `def check_add(`: the same code, never collected."""
+    def change(lines: list[str]) -> list[str]:
+        i = t.def_line - 1
+        lines[i] = lines[i].replace("def test", "def check", 1)
+        return lines
+    _edit(t, t.test, change)
+
+
+def _empty_parametrize(t: Target) -> None:
+    """Give the test an empty parameter set, which pytest reports as a skip."""
+    def change(lines: list[str]) -> list[str]:
+        i = t.def_line - 1
+        lines[i] = re.sub(r"\((\s*self\s*,?)?", lambda m: f"({m.group(1) or ''}{' ' if m.group(1) else ''}its_audit, ",
+                          lines[i], count=1).replace("its_audit, )", "its_audit)").replace("self its_audit", "self, its_audit")
+        lines.insert(t.test_line - 1, _indent(lines[i]) + "@__import__('pytest').mark.parametrize('its_audit', [])")
+        return lines
+    _edit(t, t.test, change)
+
+
+def _comment_and_add(t: Target) -> None:
+    """Comment out the assertion and add two that can't fail, so the file keeps its assertion count."""
+    def change(lines: list[str]) -> list[str]:
+        i = t.assert_line - 1
+        pad = _indent(lines[i])
+        lines[i:i + 1] = [f"{pad}# {lines[i].strip()}", f"{pad}assert True", f"{pad}assert 1 == 1"]
+        return lines
+    _edit(t, t.test, change)
+
+
+def _os_exit(t: Target) -> None:
+    """End the process with status 0 when the tests import the item's own source, before any test runs."""
+    for rel in t.sources:
+        _write(t, rel, f"open({str(t.marker)!r}, 'w').close()  # its gate-audit\n__import__('os')._exit(0)\n",
+               append=True)
 
 
 def _policy_edit(t: Target) -> None:
@@ -144,11 +191,33 @@ VARIANTS: list[Variant] = [
             lambda t: _write(t, "its_audit_outside.txt", "x\n")),
     Variant("acceptance_edit", "edit a held-out acceptance test", ("acceptance_changed",),
             lambda t: _write(t, f"{t.acceptance}test_its_audit.py", "def test_x():\n    assert True\n")),
+    Variant("rename_test", "rename a test so pytest stops collecting it", ("test_removed",), _rename_test,
+            needs_test=True),
+    Variant("empty_parametrize", "give a test an empty parameter list", ("skip_added",), _empty_parametrize,
+            needs_test=True),
+    Variant("assert_list", "wrap an assertion in a list, which is always true",
+            ("assertions_removed", "assertions_weakened"),
+            lambda t: _replace_assert(t, lambda line: _indent(line) + f"assert [{line.strip()[len('assert'):].strip()}]"),
+            needs_test=True),
+    Variant("comment_and_add", "comment out an assertion and add two that can't fail", ("assertions_removed",),
+            _comment_and_add, needs_test=True),
+    Variant("sessionfinish_exitstatus", "reset the exit status to 0 from a conftest.py", ("test_config_changed",),
+            lambda t: _write(t, f"{t.test_dir}conftest.py", "def pytest_sessionfinish(session, exitstatus):\n"
+                                                            "    session.exitstatus = 0\n", append=True)),
+    Variant("makereport_rewrite", "rewrite failed results as passed from a conftest.py", ("test_config_changed",),
+            lambda t: _write(t, f"{t.test_dir}conftest.py",
+                             "import pytest\n\n\n@pytest.hookimpl(hookwrapper=True)\n"
+                             "def pytest_runtest_makereport(item, call):\n    report = (yield).get_result()\n"
+                             "    report.outcome = 'passed'\n", append=True)),
+    Variant("sitecustomize", "add a sitecustomize.py, which runs before any test", ("test_config_changed",),
+            lambda t: _write(t, "sitecustomize.py", "import os  # its gate-audit\n")),
+    Variant("os_exit", "call os._exit(0) in the item's own source", ("no_test_report",), _os_exit, runs=True),
 ]
 
 
-def _first_assert(text: str) -> tuple[int, int, int] | None:
-    """(assert line, def line, first body line) of the first test function that contains an `assert`."""
+def _first_assert(text: str) -> tuple[int, int, int, int] | None:
+    """(assert line, first decorator or def line, first body line, def line) of the first test function that has a
+    one-line `assert` that can fail."""
     try:
         tree = ast.parse(text)
     except (SyntaxError, ValueError):
@@ -159,9 +228,9 @@ def _first_assert(text: str) -> tuple[int, int, int] | None:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or not node.name.startswith("test"):
                 continue
             for stmt in node.body:
-                if isinstance(stmt, ast.Assert) and stmt.lineno == stmt.end_lineno:
+                if isinstance(stmt, ast.Assert) and stmt.lineno == stmt.end_lineno and not tamper._is_trivial(stmt.test):
                     first = node.decorator_list[0].lineno if node.decorator_list else node.lineno
-                    return stmt.lineno, first, node.body[0].lineno
+                    return stmt.lineno, first, node.body[0].lineno, node.lineno
     return None
 
 
@@ -190,18 +259,46 @@ def _target(pkg: Package, ident: str | None, base: str) -> Target:
              and not gate.covered(f, [policy.acceptance]) and not f.endswith("conftest.py")]
     tests.sort(key=lambda f: (not gate.covered(f, item.touches), f))  # the item's own tests first
     target = Target(pkg, item, other, None, "tests/")
+    target.sources = tuple(f for f in local if f.endswith(".py") and gate.covered(f, item.touches)
+                           and not gate.is_test_path(pkg, f, globs) and not tamper.is_test_config(f)
+                           and not gate.covered(f, [policy.acceptance]))
     for rel in tests:
         found = _first_assert(cl.read_at(pkg.root, base, pkg.root / rel) or "")
         if found:
             target.test = rel
             target.test_dir = rel.rsplit("/", 1)[0] + "/" if "/" in rel else ""
-            target.assert_line, target.test_line, target.body_line = found
+            target.assert_line, target.test_line, target.body_line, target.def_line = found
             break
     return target
 
 
-def gate_audit(pkg: Package, ident: str | None = None) -> dict:
-    """Apply each variant to a throwaway checkout of the integration branch and report what the gate found."""
+def _run(t: Target, inspection: gate.Inspection, here: Path) -> dict:
+    """Run setup and the item's checks for a runtime variant, and fold what the test reports say into the
+    inspection. Returns how the run went: `skipped` when the variant can't be judged."""
+    commands = inspection.policy.commands
+    plan = checks_for(t.pkg, inspection.planned or t.item, inspection.verify_command, commands)
+    if not any(runs_pytest(c.command) for c in plan):
+        return {"skipped": "none of the item's checks runs pytest"}
+    if commands.get("setup") and commands["setup"].strip() != "true":
+        if not run_check(Check("setup", commands["setup"]), here)["passed"]:
+            return {"skipped": f"setup ({commands['setup']}) failed in the audit checkout"}
+    results = []
+    for check in plan:
+        results.append(run_check(check, here))
+        if not results[-1]["passed"]:
+            break
+    if t.marker is not None and not t.marker.exists():
+        return {"skipped": f"the checks never imported {', '.join(t.sources)}, so the change had no effect"}
+    if any(not r["passed"] for r in results):
+        return {"refused_by": "check_failed"}
+    for finding in result_findings(results, changed_tests(t.pkg, inspection)):
+        inspection.add(finding)
+    return {}
+
+
+def gate_audit(pkg: Package, ident: str | None = None, *, run: bool = True) -> dict:
+    """Apply each variant to a throwaway checkout of the integration branch and report what the gate found.
+    `run` false leaves out the variants that need the tests to run."""
     if not cl.in_git(pkg.root):
         raise WorkError("not_git", "gate-audit needs a git repository")
     base = base_ref(pkg)
@@ -232,10 +329,21 @@ def gate_audit(pkg: Package, ident: str | None = None) -> dict:
                 results.append({**entry, "caught": None,
                                 "skipped": f"{template.item.id} lists no Touches, so the gate can't check its scope"})
                 continue
+            if variant.runs and not run:
+                results.append({**entry, "caught": None, "skipped": "--no-run: it needs the tests to run"})
+                continue
+            if variant.runs and not (wpkg.repo_layout and template.sources):
+                why = ("this is a planning package, with no code to run" if not wpkg.repo_layout
+                       else f"{template.item.id}'s Touches name no Python source file")
+                results.append({**entry, "caught": None, "skipped": why})
+                continue
             _git(tree, "checkout", "--quiet", "--force", sha)
             _git(tree, "clean", "-qfdx")
             t = Target(wpkg, template.item, template.other, template.test, template.test_dir,
-                       template.assert_line, template.test_line, template.body_line, policy.acceptance)
+                       template.assert_line, template.test_line, template.body_line, policy.acceptance,
+                       template.def_line, template.sources, scratch / "reached" if variant.runs else None)
+            if t.marker is not None:
+                t.marker.unlink(missing_ok=True)
             variant.apply(t)
             try:
                 inspection = gate.inspect(Package.load(wpkg.root), template.item.id, sha)
@@ -243,19 +351,33 @@ def gate_audit(pkg: Package, ident: str | None = None) -> dict:
                 results.append({**entry, "caught": True, "found": ["gate_error"], "mode": "enforce",
                                 "message": str(exc)})
                 continue
+            if variant.runs:
+                ran = _run(t, inspection, wpkg.root)
+                if "skipped" in ran:
+                    results.append({**entry, "caught": None, "skipped": ran["skipped"]})
+                    continue
+                if "refused_by" in ran:
+                    results.append({**entry, "caught": True, "found": [ran["refused_by"]], "mode": "enforce",
+                                    "message": "the checks failed"})
+                    continue
             hits = [f for f in inspection.findings if f["kind"] in variant.expect]
+            mode = None if not hits else ("enforce" if any(h.get("mode", "enforce") == "enforce" for h in hits)
+                                          else "warn")
             results.append({**entry, "caught": bool(hits), "found": sorted({f["kind"] for f in inspection.findings}),
-                            "mode": (hits[0].get("mode", "enforce") if hits else None),
-                            "message": hits[0]["message"] if hits else None})
+                            "mode": mode, "message": hits[0]["message"] if hits else None})
     finally:
         _git(top, "worktree", "remove", "--force", str(tree))
         shutil.rmtree(scratch, ignore_errors=True)
-    run = [r for r in results if r["caught"] is not None]
-    caught = [r for r in run if r["caught"]]
+    judged = [r for r in results if r["caught"] is not None]
+    caught = [r for r in judged if r["caught"]]
+    refused = [r for r in caught if r["mode"] == "enforce"]
+    warned = [r for r in caught if r["mode"] != "enforce"]
     return {
-        "schema": SCHEMA, "ok": len(caught) == len(run), "id": template.item.id, "base": base,
-        "test_file": template.test, "variants": results, "caught": len(caught), "total": len(run),
-        "enforced": sum(1 for r in caught if r["mode"] == "enforce"),
-        "missed": [r["name"] for r in run if not r["caught"]],
+        "schema": SCHEMA, "ok": len(refused) == len(judged), "id": template.item.id, "base": base,
+        "test_file": template.test, "variants": results, "caught": len(caught), "total": len(judged),
+        "refused": len(refused), "enforced": len(refused),
+        "warned": [r["name"] for r in warned],
+        "warned_kinds": sorted({k for r in warned for k in r["expect"] if k in r["found"]}),
+        "missed": [r["name"] for r in judged if not r["caught"]],
         "skipped": [r["name"] for r in results if r["caught"] is None],
     }

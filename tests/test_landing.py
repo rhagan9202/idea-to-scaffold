@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -26,6 +28,8 @@ def git_identity(monkeypatch):
 
 
 def py(code: str) -> str:
+    if os.name == "nt":  # cmd.exe: double quotes, and no single-quote quoting
+        return subprocess.list2cmdline([sys.executable, "-c", code])
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
 
 

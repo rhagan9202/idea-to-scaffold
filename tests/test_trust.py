@@ -275,7 +275,7 @@ def test_overrides_need_a_reason_and_a_person(claim: Path, capsys, monkeypatch):
 def test_g13_waived_test_changes_still_run_the_integration_branchs_verify(claim: Path, repo: Path,
                                                                           capsys):
     set_field(repo, "T-2.1", "Verify", f"`{py('import sys; sys.exit(9)')}`")
-    (claim / TEST).write_text("def test_add():\n    assert 1 + 1 == 2\n")
+    (claim / TEST).write_text("def test_add():\n    assert len('ab') == 2\n")
     code, out = finish(claim, "--allow-test-changes=simplified the test", capsys=capsys)
     assert code == 5 and out["error"]["checks"][0]["exit_code"] == 9
 
