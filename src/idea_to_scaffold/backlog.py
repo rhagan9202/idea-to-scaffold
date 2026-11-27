@@ -118,6 +118,7 @@ class BacklogItem:
             "done_when": self.done_when,
             "verify": self.verify,
             "touches": self.touches,
+            "verified": self.get("Verified") or None,
             "placeholder": self.placeholder,
         }
 

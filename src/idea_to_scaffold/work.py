@@ -15,6 +15,7 @@ import subprocess
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 from . import claims as cl
@@ -29,6 +30,7 @@ from .backlog import (
     load_proposals,
     parse_backlog,
     ready_items,
+    set_field,
     set_status,
 )
 from .ids import KIND_LABELS, META_FILES, definition_on_line, id_kind, is_placeholder, scan_lines, strip_links
@@ -46,6 +48,7 @@ EXIT_BLOCKED = 4
 EXIT_CHECK_FAILED = 5
 EXIT_OVERLAP = 6
 EXIT_NOT_LANDED = 7
+EXIT_DRIFT = 8
 
 OUTPUT_TAIL = 40  # lines of a failed check's output to keep
 
@@ -704,9 +707,12 @@ def done(
     if check_only:
         return {**common, "checked_only": True, "status": item.status, "previous_status": item.status}
     try:
-        previous = set_status(pkg, ident, "done")
+        with _locked(pkg):
+            previous = set_status(pkg, ident, "done")
+            verified = mark_verified(pkg, ident, inspection.merge_base)
     except BacklogError as exc:
         raise WorkError("bad_backlog", str(exc), details={"id": ident}) from exc
+    common["verified"] = verified
     _refresh_mirror(pkg)
     items = load_backlog(pkg)
     return {
@@ -716,6 +722,35 @@ def done(
         "now_ready": [i.id for i in ready_items(items) if ident in i.depends_on],
         "merge_needed": _off_integration_branch(pkg),
     }
+
+
+def mark_verified(pkg: Package, ident: str, base: str | None) -> str:
+    """Write the item's `Verified` field: the date its checks passed and the integration-branch commit the work was
+    built on. `its drift` finds the commit that wrote this value and compares the item's files with it."""
+    value = date.today().isoformat() + (f", base {base[:10]}" if base else "")
+    set_field(pkg, ident, "Verified", value, add=True)
+    return value
+
+
+def verify(pkg: Package, ident: str, *, on_check: Callable[[Check], None] | None = None) -> dict:
+    """`its verify`: re-run a done item's checks on the current code and, if they pass, refresh its Verified mark, so
+    `its drift` stops reporting changes that have now been checked."""
+    items = load_backlog(pkg)
+    item = _find(items, ident)
+    if item.status != "done":
+        raise WorkError("bad_status", f"{ident} is {item.status}; only a done item can be re-verified (use its done)",
+                        details={"id": ident, "status": item.status})
+    result = done(pkg, ident, check_only=True, on_check=on_check)
+    try:
+        with _locked(pkg):
+            previous = item.get("Verified") or None
+            result["verified"] = mark_verified(pkg, ident, gate.inspect(pkg, ident, base_ref(pkg)).merge_base)
+    except BacklogError as exc:
+        raise WorkError("bad_backlog", str(exc), details={"id": ident}) from exc
+    _refresh_mirror(pkg)
+    result.pop("checked_only", None)
+    result["previous_verified"] = previous
+    return result
 
 
 def _off_integration_branch(pkg: Package) -> bool:

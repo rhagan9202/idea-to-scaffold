@@ -17,6 +17,7 @@ depends_on: [features]
 <!-- The system shall ... (one testable behaviour per requirement) -->
 
 **Acceptance criteria**
+<!-- Numbered by position: the first bullet is AC1. Tests name them, e.g. test_fr_001_ac1_... -->
 - **Given** <context> **when** <action> **then** <observable result>.
 - 
 
