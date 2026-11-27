@@ -371,6 +371,8 @@ list, so there is one place to look and one place to update.
 | Do / Done when | Done when expected for open items | prose |
 | Verify | no | a command in backticks, a test ID, or `manual: ...`; how to check the item is done |
 | Touches | no | comma-separated paths or globs relative to the repo root; used to keep parallel items apart |
+| Verified | written by `its done` and `its verify` | the date the checks passed and the integration-branch commit the work was built on (`2026-11-27, base 1a2b3c4d5e`) |
+| Blocked / Dropped | written by `its block` and `its drop` | why |
 
 Each field is one line (`- **Name:** value`). An empty field is empty; it never continues onto the next line.
 
@@ -482,7 +484,7 @@ into a full one by adding the missing docs and changing `profile`.
 
 `its backlog`, `next`, `show`, `start`, `done`, `claims`, `release`,
 `renumber`, `land`, `propose`, `promote`, `block`, `unblock`, `drop`,
-`set-status`, `review` and `hooks` take `--json`. Output is one JSON object on stdout, so agents never
+`set-status`, `review`, `hooks`, `drift`, `verify` and `validate` take `--json`. Output is one JSON object on stdout, so agents never
 parse text or stderr, even when `its` hits a bug (`internal_error`).
 
 - Every object has `"schema": 1` and `"ok"`. A new field is not a schema
@@ -523,6 +525,14 @@ parse text or stderr, even when `its` hits a bug (`internal_error`).
   `check_failed` with `checks`, `test_changes` or `outside_touches` with
   `findings`, `waiting` with `blocked_by`, `no_claim`,
   `no_commits`, `not_done` or `dry_run`) and `message`.
+- `validate`: `{valid, ready, errors, warnings}`, plus `trace` with
+  `--trace`: `{checked, criteria, requirements: [{id, title, file, criteria:
+  [{ac, text, tests: [{file, line}], by_requirement}]}], uncovered: [{id, ac,
+  text}], by_requirement}`.
+- `drift`: `{drifted: [{id, title, satisfies, verified, verified_commit, files,
+  commits, uncommitted}], requirements: [{id, items, files}], clean, unknown:
+  [{id, reason, message}], no_touches}`. `verify`: the `done --check` object
+  plus `verified` and `previous_verified`.
 - `review`: `{id, item, requirements: [{id, text, file}], base, merge_base,
   verify_source, touches_checked, findings, changed_files: [{status, path,
   old_path}], diff, diff_truncated, prompt, commands}`. `hooks`: `{command,
@@ -535,7 +545,8 @@ parse text or stderr, even when `its` hits a bug (`internal_error`).
   plus `deleted_file` when a proposal was dropped.
 - `done`: `{id, previous_status, status, checks: [{name, command, exit_code,
   passed, output}], checks_skipped, manual_verify, verify_source, touches_checked,
-  findings, now_ready, merge_needed}`. `verify_source` is where the Verify
+  findings, verified, now_ready, merge_needed}`; `verified` is the value
+  written to the item's Verified field. `verify_source` is where the Verify
   command was read (the integration branch's ref, or `working tree`);
   `findings` are the done gate's findings that were allowed. With `--check`:
   `{id, status, checks, ..., checked_only: true}`, and nothing is written. Checks are the
@@ -569,6 +580,7 @@ Exit codes, the same with or without `--json`:
 | 5 | `done`: a check or the done gate failed; the status is unchanged |
 | 6 | `start`: the item may change the same files as one already running |
 | 7 | `land`: a branch conflicted, failed the done gate or failed its checks, and was not landed |
+| 8 | `drift --check`: a done item's files changed after it was verified |
 
 `its backlog --write` saves the `its backlog --json` object as
 `planning/backlog.json` (`docs/planning/backlog.json` in a repo), and `start`
@@ -682,3 +694,28 @@ or Codex in each; it never launches an agent itself.
   shows each claim's conflicts with the base and with other claims ahead of
   time.
 
+## 18. Drift and traceability
+
+A done item was checked against the code as it was then. Two commands say what
+that guarantee still covers.
+
+- **Drift.** `its done` and `its verify` write the item's `Verified` field.
+  The commit that brought the current value into the branch (found on its
+  first-parent history; for a landed item, the merge `its land` tested) is the
+  item's verified commit. `its drift` lists each done item whose Touches differ
+  between that commit and the working tree, with the commits that changed them,
+  and the requirements those items satisfy. An item done before `Verified`
+  existed uses the commit where it became done; one without Touches isn't
+  tracked. `its verify <ID>` re-runs a done item's checks and refreshes its
+  `Verified` value; commit it to clear the drift. Drift reads git history, so
+  CI needs full history (`fetch-depth: 0`). `--check` exits 8 on drift.
+- **Traceability.** Acceptance criteria are numbered by position in a
+  requirement's **Acceptance criteria** list (`AC1`, `AC2`, ...); a bullet
+  that starts with a label (`AC3:`) keeps that number. A test covers a
+  criterion when a test file names both, in any usual spelling
+  (`test_fr_001_ac2_...`, `FR-001/AC2`, a marker such as
+  `@pytest.mark.req("FR-001 AC2")`). Naming the requirement alone covers all
+  of its criteria, reported as `by_requirement`. `its validate --trace` lists
+  the Must criteria no test names and exits 1 if there are any; plain
+  `its validate` never fails on coverage. A requirement with no criteria list
+  counts as one criterion.

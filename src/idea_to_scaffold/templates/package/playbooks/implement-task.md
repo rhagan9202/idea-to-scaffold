@@ -15,7 +15,7 @@ depends_on: []
 1. Open the item in `docs/planning/07-backlog.md`. Read its `Satisfies`, `Depends on`, `Done when` and `Verify`. Run `its start <ID>` to set **Status** to `in-progress` (it refuses if a dependency isn't done), or set it by hand. If you are on a claim branch (`its/<ID>-...`, made by `its start --worktree`), skip this: the branch is the claim.
 2. Follow each requirement link to its acceptance criteria in `03-requirements.md`; from there, follow the nav block's backlinks to the components and screens that serve it in `04-architecture.md` and `05-design.md`.
 3. Check `docs/planning/adr/` (listed in `docs/planning/README.md`) for decisions that constrain the work.
-4. Write or update tests that express the acceptance criteria. Confirm they fail.
+4. Write or update tests that express the acceptance criteria, named after the criterion they prove (`test_fr_001_ac2_...` for the second criterion of FR-001). Confirm they fail.
 5. Implement the smallest change that makes them pass, following `AGENTS.md` conventions.
 6. Run the test and lint commands from `AGENTS.md`. Fix until both pass.
 7. Run `its done <ID>`. It runs the item's **Verify** command (read from the integration branch) and the test and lint commands, and sets **Status** to `done` only if they all pass and the change keeps every test, adds no skips, leaves the item's Verify alone and stays inside its **Touches**. Without `its`, run them yourself and set the status by hand. If you discovered follow-up work, run `its propose "Title"` for each item (without `its`, add a backlog item with a placeholder ID, `T-new-<short-name>`, and `Status: proposed`). If you can't finish, run `its block <ID> --reason "..."` and stop; never weaken a test to pass. Run `its link .` if available.

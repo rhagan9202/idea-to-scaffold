@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import __version__
 from .backlog import BacklogError
+from .drift import drift
 from .edits import block, drop, promote, propose, set_item_status, unblock
 from .hooks import hook_agents, install_hooks, stop_hook
 from .ids import TASK_PATTERN
@@ -19,8 +20,10 @@ from .linker import link_package
 from .package import BACKLOG_STATUSES, PROFILES, Package, PackageError, new_package
 from .review import review
 from .scaffold import ScaffoldError, scaffold
+from .trace import trace
 from .validate import validate
 from .work import (
+    EXIT_DRIFT,
     EXIT_NOT_LANDED,
     EXIT_NOTHING_READY,
     SCHEMA,
@@ -35,6 +38,7 @@ from .work import (
     show_payload,
     shown,
     start,
+    verify,
     write_backlog_json,
 )
 
@@ -70,7 +74,7 @@ def cmd_import(args: argparse.Namespace) -> int:
         print(f"cross-linked {len(changed)} file(s) and wrote planning/README.md")
     except PackageError as exc:
         print(f"warning: could not cross-link: {exc}")
-    return cmd_validate(argparse.Namespace(dir=args.into))
+    return cmd_validate(argparse.Namespace(dir=args.into, trace=False, json=False))
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -80,10 +84,21 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     report = validate(pkg)
+    traced = trace(pkg) if args.trace else None
+    code = 0 if report.valid and not (traced and traced["uncovered"]) else 1
+    if args.json:
+        payload = {"schema": SCHEMA, "ok": True, "valid": report.valid, "ready": report.ready,
+                   "errors": report.errors, "warnings": report.warnings}
+        if traced is not None:
+            payload["trace"] = traced
+        _emit(payload)
+        return code
     for e in report.errors:
         print(f"ERROR   {e}")
     for w in report.warnings:
         print(f"warning {w}")
+    if traced is not None:
+        _print_trace(traced)
     if report.valid and pkg.repo_layout:
         print("planning docs are valid")
     elif report.ready:
@@ -92,7 +107,74 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print("package is valid, but not ready to scaffold yet")
     else:
         print(f"package has {len(report.errors)} error(s)")
-    return 0 if report.valid else 1
+    return code
+
+
+def _print_trace(traced: dict) -> None:
+    if not traced["checked"]:
+        print(f"trace: skipped ({traced['reason']})")
+        return
+    for c in traced["uncovered"]:
+        print(f"UNTESTED {c['id']} AC{c['ac']}: {c['text']}")
+    for c in traced["by_requirement"]:
+        print(f"coarse   {c['id']} AC{c['ac']}: only tests naming {c['id']} as a whole")
+    covered = traced["criteria"] - len(traced["uncovered"])
+    print(f"trace: {covered} of {traced['criteria']} Must acceptance criteria are named by a test")
+
+
+def cmd_drift(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+    try:
+        payload = drift(pkg)
+    except WorkError as err:
+        return _fail(args, err)
+    code = EXIT_DRIFT if args.check and payload["drifted"] else 0
+    if args.json:
+        _emit(payload)
+        return code
+    for entry in payload["drifted"]:
+        print(f"{entry['id']} {entry['title']}: changed since it was verified ({entry['verified'] or 'when done'})")
+        for f in entry["files"]:
+            print(f"  {f}")
+        for c in entry["commits"]:
+            print(f"    {c}")
+    for req in payload["requirements"]:
+        print(f"{req['id']} may no longer hold: re-verify {', '.join(req['items'])} (its verify <ID>)")
+    for entry in payload["unknown"]:
+        print(f"{entry['id']}: can't tell ({entry['message']})")
+    if payload["no_touches"]:
+        print(f"not tracked (no Touches): {', '.join(payload['no_touches'])}")
+    if not payload["drifted"]:
+        print(f"no drift: {len(payload['clean'])} done item(s) unchanged since they were verified")
+    return code
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+
+    def announce(check) -> None:
+        if not args.json:
+            print(f"running {check.name}: {check.command}", flush=True)
+
+    try:
+        payload = verify(pkg, args.id, on_check=announce)
+    except WorkError as err:
+        if err.code == "check_failed" and not args.json:
+            for check in err.details["checks"]:
+                if not check["passed"]:
+                    print(f"\n{check['name']} failed (exit {check['exit_code']}): {check['command']}")
+                    if check["output"]:
+                        print(check["output"])
+        return _fail(args, err)
+    if args.json:
+        _emit(payload)
+        return 0
+    print(f"{payload['id']} verified again: {payload['verified']} (commit the backlog to record it)")
+    return 0
 
 
 def cmd_link(args: argparse.Namespace) -> int:
@@ -654,6 +736,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("validate", help="check a package (or scaffolded repo) against the spec")
     s.add_argument("dir", nargs="?", default=".")
+    s.add_argument("--trace", action="store_true",
+                   help="also list Must acceptance criteria that no test names (exit 1 if any)")
+    s.add_argument("--json", action="store_true", help=f"print JSON (schema {SCHEMA}) instead of text")
     s.set_defaults(func=cmd_validate)
 
     s = sub.add_parser("link", help="cross-link IDs, refresh nav blocks and the planning index")
@@ -813,6 +898,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--allow-outside-touches", action="store_true", help=allow_touches_help)
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_done)
+
+    s = sub.add_parser("drift", help="done items whose files changed after they were verified, and their requirements")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--check", action="store_true", help="exit 8 if anything drifted (for CI)")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_drift)
+
+    s = sub.add_parser("verify", help="re-run a done item's checks and refresh its Verified mark")
+    s.add_argument("id")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_verify)
 
     s = sub.add_parser("review", help="print a review prompt with the item, its requirements and the diff")
     s.add_argument("id", nargs="?", help="the item (default: this claim branch's)")
