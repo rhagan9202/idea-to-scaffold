@@ -9,10 +9,11 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from . import claims as cl
 from .backlog import BacklogError
 from .drift import drift
 from .edits import block, drop, promote, propose, set_item_status, unblock
-from .hooks import hook_agents, install_hooks, stop_hook
+from .hooks import hook_agents, hook_dir, install_hooks, parse_event, stop_hook
 from .ids import TASK_PATTERN
 from .importer import ImportConflict, import_export
 from .landing import land
@@ -20,9 +21,12 @@ from .linker import link_package
 from .package import BACKLOG_STATUSES, PROFILES, Package, PackageError, new_package
 from .review import review
 from .scaffold import ScaffoldError, scaffold
+from .status import STATE_LABELS, render, status_payload
 from .trace import trace
 from .validate import validate
 from .work import (
+    EXIT_CHECK_FAILED,
+    EXIT_COMPLETE,
     EXIT_DRIFT,
     EXIT_NOT_LANDED,
     EXIT_NOTHING_READY,
@@ -31,12 +35,15 @@ from .work import (
     backlog_payload,
     claims_payload,
     done,
+    failure_report,
     fetch,
     next_payload,
     release,
+    remote_freshness,
     renumber,
     show_payload,
     shown,
+    stale_note,
     start,
     verify,
     write_backlog_json,
@@ -78,10 +85,8 @@ def cmd_import(args: argparse.Namespace) -> int:
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    try:
-        pkg = Package.load(Path(args.dir))
-    except PackageError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    pkg = _load(args)
+    if pkg is None:
         return 1
     report = validate(pkg)
     traced = trace(pkg) if args.trace else None
@@ -152,6 +157,8 @@ def cmd_drift(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
+    if args.id and args.dir == "." and not TASK_RE.fullmatch(args.id):  # `its verify --all <dir>`
+        args.dir, args.id = args.id, None
     pkg = _load(args)
     if pkg is None:
         return 1
@@ -160,28 +167,59 @@ def cmd_verify(args: argparse.Namespace) -> int:
         if not args.json:
             print(f"running {check.name}: {check.command}", flush=True)
 
+    if args.drifted or args.all:
+        return _verify_many(args, pkg, announce)
+    if args.id is None:
+        return _fail(args, WorkError("usage", "name the item to verify, or pass --drifted or --all", 2))
     try:
         payload = verify(pkg, args.id, on_check=announce)
     except WorkError as err:
         if err.code == "check_failed" and not args.json:
-            for check in err.details["checks"]:
-                if not check["passed"]:
-                    print(f"\n{check['name']} failed (exit {check['exit_code']}): {check['command']}")
-                    if check["output"]:
-                        print(check["output"])
+            print("\n" + failure_report(err.details["checks"]))
         return _fail(args, err)
+    _commit(args, pkg, payload, f"Re-verify {payload['id']}")
     if args.json:
         _emit(payload)
         return 0
-    print(f"{payload['id']} verified again: {payload['verified']} (commit the backlog to record it)")
+    print(f"{payload['id']} verified again: {payload['verified']}"
+          + (f" (committed {payload['committed']})" if payload.get("committed") else " (commit the backlog to record it)"))
     return 0
 
 
+def _verify_many(args: argparse.Namespace, pkg: Package, announce) -> int:
+    """`its verify --drifted` / `--all`: re-verify each item, carrying on past failures."""
+    if args.drifted:
+        ids = [d["id"] for d in drift(pkg)["drifted"]]
+    else:
+        from .backlog import load_backlog
+        ids = [i.id for i in load_backlog(pkg) if i.status == "done" and i.touches]
+    verified, failed = [], []
+    for ident in ids:
+        if not args.json:
+            print(f"{ident}:")
+        try:
+            verified.append(verify(pkg, ident, on_check=announce))
+        except WorkError as err:
+            failed.append({"id": ident, **err.to_dict()["error"]})
+            if not args.json:
+                print(f"  not verified: {err.message}")
+    result = {"schema": SCHEMA, "ok": not failed, "verified": verified, "failed": failed}
+    if verified:
+        _commit(args, pkg, result, "Re-verify " + ", ".join(v["id"] for v in verified))
+    if args.json:
+        _emit(result)
+    elif not ids:
+        print("nothing to verify" + (": no item has drifted" if args.drifted else ""))
+    else:
+        print(f"verified again: {', '.join(v['id'] for v in verified) or 'none'}"
+              + (f"; failed: {', '.join(f['id'] for f in failed)}" if failed else "")
+              + (" (commit the backlog to record it)" if verified else ""))
+    return EXIT_CHECK_FAILED if failed else 0
+
+
 def cmd_link(args: argparse.Namespace) -> int:
-    try:
-        pkg = Package.load(Path(args.dir))
-    except PackageError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    pkg = _load(args)
+    if pkg is None:
         return 1
     try:
         changed = link_package(pkg, check=args.check)
@@ -247,14 +285,19 @@ def cmd_backlog(args: argparse.Namespace) -> int:
         _emit(payload)
         return 0
     items = payload["items"]
-    if not items:
+    proposals = [] if args.ready or args.status not in (None, "proposed") else payload["proposals"]
+    if not items and not proposals:
         what = " ready" if args.ready else (f" with status {args.status}" if args.status else "")
         print(f"no backlog items{what}")
         return 0
-    id_width = max(8, *(len(i["id"]) + 1 for i in items))
+    rows = items + proposals
+    id_width = max(8, *(len(i["id"]) + 1 for i in rows))
     print(f"{'ID':<{id_width}} {'STATUS':<12} {'MILESTONE':<10} TITLE")
-    for i in items:
+    for i in rows:
         print(f"{i['id']:<{id_width}} {i['status']:<12} {i['milestone'] or '—':<10} {i['title']}")
+    if proposals:
+        print(f"{len(proposals)} proposal(s) in {payload['proposals'][0]['file'].rsplit('/', 1)[0]}/ wait for "
+              "its promote or its renumber")
     return 0
 
 
@@ -265,12 +308,17 @@ def cmd_next(args: argparse.Namespace) -> int:
     if args.fetch:
         fetch(pkg, args.base)
     payload = next_payload(pkg, base=args.base, parallel=args.parallel)
+    payload["stale_remote"] = None if args.fetch else remote_freshness(pkg)
     if not args.all:
         payload.pop("ready")
+    note = stale_note(payload["stale_remote"])
+    if note and not args.json:
+        print(note, file=sys.stderr)
+    nothing = EXIT_COMPLETE if payload["reason"] == "complete" else EXIT_NOTHING_READY
     if args.parallel is not None:
-        code = 0 if payload["parallel"] else EXIT_NOTHING_READY
+        code = 0 if payload["parallel"] else nothing
     else:
-        code = 0 if payload["item"] else EXIT_NOTHING_READY
+        code = 0 if payload["item"] else nothing
     if args.json:
         _emit(payload)
         return code
@@ -397,18 +445,36 @@ def cmd_claims(args: argparse.Namespace) -> int:
     if not payload["claims"]:
         print("no claims")
     for c in payload["claims"]:
-        if c["orphaned"]:
-            state = "orphaned: not in the backlog, release it"
-        elif c["finished"]:
-            state = "finished, release it"
-        else:
-            state = "remote" if c["remote"] else "active"
+        state = STATE_LABELS.get(c.get("state", ""), "active")
+        if c.get("state") == "blocked" and c.get("blocked_reason"):
+            state += f": {c['blocked_reason']}"
         extra = f"  worktree {c['worktree']}" if c["worktree"] else ""
         print(f"{c['id']:<10} {c['branch']}  [{state}]{extra}")
         if c.get("conflicts_with_base"):
             print(f"           would conflict with {payload['base']} in {', '.join(c['conflicts_with_base'])}")
         for other in c.get("conflicts_with", []):
             print(f"           would conflict with {other['id']} in {', '.join(other['files'])}")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+    try:
+        if args.fetch:
+            fetch(pkg, args.base)
+        payload = status_payload(pkg, base=args.base)
+    except WorkError as err:
+        return _fail(args, err)
+    payload["stale_remote"] = None if args.fetch else remote_freshness(pkg)
+    if args.json:
+        _emit(payload)
+        return 0
+    print("\n".join(render(payload)))
+    note = stale_note(payload["stale_remote"])
+    if note:
+        print(note)
     return 0
 
 
@@ -444,6 +510,8 @@ def cmd_renumber(args: argparse.Namespace) -> int:
         payload = renumber(pkg, args.ids or None, dry_run=args.dry_run, force=args.force)
     except WorkError as err:
         return _fail(args, err)
+    if payload["renumbered"]:
+        _commit(args, pkg, payload, "Renumber " + ", ".join(f"{r['from']} as {r['to']}" for r in payload["renumbered"]))
     if args.json:
         _emit(payload)
         return 0
@@ -453,6 +521,8 @@ def cmd_renumber(args: argparse.Namespace) -> int:
         print(f"{r['from']} -> {r['to']}" + (" (dry run)" if args.dry_run else ""))
     for f in payload["files"]:
         print(f"  updated {f}")
+    if payload.get("committed"):
+        print(f"  committed {payload['committed']}")
     return 0
 
 
@@ -476,11 +546,7 @@ def cmd_done(args: argparse.Namespace) -> int:
             for finding in err.details["findings"]:
                 print(f"  {finding['kind']}: {finding['message']}")
         if err.code == "check_failed" and not args.json:
-            for check in err.details["checks"]:
-                if not check["passed"]:
-                    print(f"\n{check['name']} failed (exit {check['exit_code']}): {check['command']}")
-                    if check["output"]:
-                        print(check["output"])
+            print("\n" + failure_report(err.details["checks"]))
         return _fail(args, err)
     if args.json:
         _emit(payload)
@@ -515,11 +581,9 @@ def cmd_land(args: argparse.Namespace) -> int:
     payload = land(pkg, args.ids or None, verify=not args.no_verify, fetch=args.fetch, push=args.push,
                    release=args.release, dry_run=args.dry_run, allow_test_changes=args.allow_test_changes,
                    allow_outside_touches=args.allow_outside_touches, on_check=announce)
-    stuck = [s for s in payload["skipped"]
-             if s["reason"] in ("conflict", "check_failed", "test_changes", "outside_touches", "gate_error",
-                                "base_moved", "checkout_blocked", "git_error")]
-    if not payload["landed"] and not payload["skipped"]:
-        code = EXIT_NOTHING_READY
+    stuck = [s for s in payload["skipped"] if s["reason"] not in ("waiting", "dry_run")]
+    if not payload["landed"] and not stuck and not any(s["reason"] == "dry_run" for s in payload["skipped"]):
+        code = EXIT_NOTHING_READY  # nothing was ready, or only items still waiting on dependencies
     elif stuck:
         code = EXIT_NOT_LANDED
     else:
@@ -550,7 +614,23 @@ def cmd_land(args: argparse.Namespace) -> int:
     return code
 
 
-def _edited(args: argparse.Namespace, payload: dict) -> int:
+def _commit(args: argparse.Namespace, pkg: Package, payload: dict, message: str) -> dict:
+    """Commit the planning folder when asked (`--commit`, or by default for promote and renumber)."""
+    if not getattr(args, "commit", False) or payload.get("dry_run") or not cl.in_git(pkg.root):
+        return payload
+    folder = str(pkg.planning_dir)
+    cl.git(pkg.root, "add", "--all", "--", folder)
+    staged = cl.git(pkg.root, "diff", "--cached", "--name-only", "--", folder, check=False)
+    if staged:
+        cl.git(pkg.root, "commit", "--quiet", "-m", message, "--", folder)
+        payload["committed"] = cl.git(pkg.root, "rev-parse", "--short", "HEAD")
+    return payload
+
+
+def _edited(args: argparse.Namespace, payload: dict, pkg: Package | None = None) -> int:
+    if pkg is not None:
+        what = {"todo": "Schedule", "blocked": "Block", "dropped": "Drop"}.get(payload.get("status"), "Set status of")
+        _commit(args, pkg, payload, f"{what} {payload['id']}")
     if args.json:
         _emit(payload)
         return 0
@@ -563,6 +643,8 @@ def _edited(args: argparse.Namespace, payload: dict) -> int:
         print(f"{payload['id']} is now {payload['status']} (was {payload['previous_status']})")
     if payload.get("reason"):
         print(f"  reason: {payload['reason']}")
+    if payload.get("committed"):
+        print(f"  committed {payload['committed']}")
     return 0
 
 
@@ -583,27 +665,28 @@ def cmd_propose(args: argparse.Namespace) -> int:
 
 def cmd_promote(args: argparse.Namespace) -> int:
     pkg = _load(args)
-    return 1 if pkg is None else _edited(args, promote(pkg, args.id, force=args.force))
+    return 1 if pkg is None else _edited(args, promote(pkg, args.id, force=args.force,
+                                                       allow_incomplete=args.allow_incomplete), pkg)
 
 
 def cmd_block(args: argparse.Namespace) -> int:
     pkg = _load(args)
-    return 1 if pkg is None else _edited(args, block(pkg, args.id, args.reason))
+    return 1 if pkg is None else _edited(args, block(pkg, args.id, args.reason), pkg)
 
 
 def cmd_unblock(args: argparse.Namespace) -> int:
     pkg = _load(args)
-    return 1 if pkg is None else _edited(args, unblock(pkg, args.id))
+    return 1 if pkg is None else _edited(args, unblock(pkg, args.id), pkg)
 
 
 def cmd_drop(args: argparse.Namespace) -> int:
     pkg = _load(args)
-    return 1 if pkg is None else _edited(args, drop(pkg, args.id, args.reason))
+    return 1 if pkg is None else _edited(args, drop(pkg, args.id, args.reason), pkg)
 
 
 def cmd_set_status(args: argparse.Namespace) -> int:
     pkg = _load(args)
-    return 1 if pkg is None else _edited(args, set_item_status(pkg, args.id, args.status, reason=args.reason))
+    return 1 if pkg is None else _edited(args, set_item_status(pkg, args.id, args.status, reason=args.reason), pkg)
 
 
 def _confirm_delete(target: Path, assume_yes: bool) -> bool:
@@ -659,8 +742,9 @@ def cmd_hooks(args: argparse.Namespace) -> int:
 def cmd_hook(args: argparse.Namespace) -> int:
     """`its hook stop`: the Stop hook itself. It never fails the agent's tooling: any problem lets the agent stop."""
     try:
-        pkg = Package.find(Path(args.dir))
-        decision = stop_hook(pkg, "" if sys.stdin.isatty() else sys.stdin.read())
+        stdin = "" if sys.stdin.isatty() else sys.stdin.read()
+        pkg = Package.find(hook_dir(parse_event(stdin), args.dir))
+        decision = stop_hook(pkg, stdin)
     except Exception:  # noqa: BLE001 - a broken hook must not trap the agent
         return 0
     if decision:
@@ -712,9 +796,23 @@ def cmd_scaffold(args: argparse.Namespace) -> int:
     return 0
 
 
+class _Parser(argparse.ArgumentParser):
+    """An argument parser whose usage errors keep the JSON contract when `--json` is on the command line."""
+
+    json_errors = False
+
+    def error(self, message: str):  # type: ignore[override]
+        if _Parser.json_errors:
+            _emit(WorkError("usage", f"{self.prog}: {message}", 2).to_dict())
+            raise SystemExit(2)
+        super().error(message)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="its", description="idea-to-scaffold: planning package to agent-ready repo")
+    p = _Parser(prog="its", description="idea-to-scaffold: planning package to agent-ready repo")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    p.add_argument("-C", dest="chdir", metavar="DIR",
+                   help="run as if started in DIR (like git -C); every command's folder is taken relative to it")
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("new", help="create a blank planning package")
@@ -806,6 +904,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_start)
 
+    s = sub.add_parser("status", help="the lead's view: every claim's state (working, blocked, ready to land), "
+                       "what can start next, what to release, proposals and drift")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--base", help=base_help)
+    s.add_argument("--fetch", action="store_true", help=fetch_help)
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_status)
+
     s = sub.add_parser("claims", help="list claim branches (its/<ID>-...), local and remote, and which would conflict")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--base", help=base_help)
@@ -845,6 +951,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--force", action="store_true", help="renumber even when not on the integration branch")
+    s.add_argument("--allow-incomplete", action="store_true",
+                   help="schedule it even if Done when or Touches is empty")
+    s.add_argument("--no-commit", dest="commit", action="store_false",
+                   help="leave the change uncommitted (by default it is committed, so a worktree started next sees it)")
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_promote)
 
@@ -852,12 +962,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--reason", required=True, help="what it is waiting for")
+    s.add_argument("--commit", action="store_true", help="commit the planning folder afterwards")
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_block)
 
     s = sub.add_parser("unblock", help="set a blocked item back to todo")
     s.add_argument("id")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--commit", action="store_true", help="commit the planning folder afterwards")
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_unblock)
 
@@ -865,6 +977,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--reason", help="why it was dropped")
+    s.add_argument("--commit", action="store_true", help="commit the planning folder afterwards")
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_drop)
 
@@ -873,6 +986,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("status", choices=BACKLOG_STATUSES)
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--reason", help="recorded for blocked and dropped")
+    s.add_argument("--commit", action="store_true", help="commit the planning folder afterwards")
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_set_status)
 
@@ -889,6 +1003,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--dir", default=".", help=dir_help)
     s.add_argument("--dry-run", action="store_true", help="show the new IDs without changing anything")
     s.add_argument("--force", action="store_true", help="renumber even when not on the integration branch")
+    s.add_argument("--no-commit", dest="commit", action="store_false",
+                   help="leave the change uncommitted (by default it is committed, so a worktree started next sees it)")
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_renumber)
 
@@ -909,8 +1025,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_drift)
 
     s = sub.add_parser("verify", help="re-run a done item's checks and refresh its Verified mark")
-    s.add_argument("id")
+    s.add_argument("id", nargs="?", help="the item (or pass --drifted or --all)")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    which = s.add_mutually_exclusive_group()
+    which.add_argument("--drifted", action="store_true", help="every item its drift reports")
+    which.add_argument("--all", action="store_true", help="every done item that lists Touches")
+    s.add_argument("--commit", action="store_true", help="commit the planning folder afterwards")
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_verify)
 
@@ -949,7 +1069,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    argv = sys.argv[1:] if argv is None else list(argv)
+    _Parser.json_errors = "--json" in argv
+    try:
+        args = build_parser().parse_args(argv)
+    except SystemExit as exc:  # usage errors, --help and --version: return the code rather than exiting
+        return exc.code if isinstance(exc.code, int) else 2
+    finally:
+        _Parser.json_errors = False
+    if args.chdir:
+        for name in ("dir", "into", "package"):
+            value = getattr(args, name, None)
+            if isinstance(value, str) and not Path(value).is_absolute():
+                setattr(args, name, str(Path(args.chdir) / value))
     try:
         return args.func(args)
     except WorkError as err:

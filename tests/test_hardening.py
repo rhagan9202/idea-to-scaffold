@@ -162,7 +162,7 @@ def test_next_says_when_everything_is_done(mini: Path, capsys):
     backlog = mini / "planning/07-backlog.md"
     backlog.write_text(backlog.read_text().replace("**Status:** todo", "**Status:** done"))
     code, out = run_json(capsys, "next", str(mini))
-    assert code == 3 and out["reason"] == "complete"
+    assert code == 9 and out["reason"] == "complete"  # its own exit code, so a loop on `its next` ends
 
 
 def test_overlap_errors_name_the_paths(repo: Path, capsys):
@@ -196,6 +196,7 @@ def test_brace_globs_stay_whole():
 
 def test_a_plain_start_off_main_reads_dependencies_from_main(repo: Path, capsys):
     git(repo, "switch", "-q", "-c", "feature")
+    (repo / "src/streak/setup_check.py").write_text("ok = True\n")
     assert main(["done", "T-1.1", str(repo), "--no-verify"]) == 0
     git(repo, "commit", "-qam", "T-1.1 done on a branch")
     code, out = run_json(capsys, "start", "T-2.1", str(repo))
@@ -319,6 +320,7 @@ def test_done_finds_the_item_of_a_detached_worktree(repo: Path, capsys):
     _, out = run_json(capsys, "start", "T-1.1", str(repo), "--worktree")
     worktree = Path(out["claim"]["worktree"])
     git(worktree, "switch", "-q", "--detach")
+    (worktree / "src/streak/setup_check.py").write_text("ok = True\n")
     code, out = run_json(capsys, "done", str(worktree), "--no-verify")
     assert code == 0 and out["id"] == "T-1.1"
 

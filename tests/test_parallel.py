@@ -84,12 +84,13 @@ def test_worktree_claim_is_exclusive_and_hidden_from_next(repo: Path, capsys):
     assert [c["id"] for c in out["claimed"]] == ["T-1.1"] and out["claimed"][0]["agent"] == "claude"
 
     code, out = run_json(capsys, "claims", str(repo))
-    assert [(c["id"], c["finished"], c["remote"]) for c in out["claims"]] == [("T-1.1", False, False)]
+    assert [(c["id"], c["finished"], c["remote_only"]) for c in out["claims"]] == [("T-1.1", False, False)]
 
 
 def test_done_means_merged(repo: Path, capsys):
     _, out = run_json(capsys, "start", "T-1.1", str(repo), "--worktree")
     worktree = Path(out["claim"]["worktree"])
+    (worktree / "src/streak/setup_check.py").write_text("ok = True\n")
     code, out = run_json(capsys, "done", str(worktree), "--no-verify")  # the item comes from the branch name
     assert code == 0 and out["id"] == "T-1.1" and out["merge_needed"]
     git(worktree, "commit", "-qam", "feat: T-1.1")
@@ -113,7 +114,8 @@ def test_branch_claim_checks_out_here_and_readiness_uses_main(repo: Path, capsys
     assert code == 0 and out["claim"]["worktree"] is None
     assert git(repo, "branch", "--show-current") == "its/T-1.1-project-setup-verified"
     # Marking T-1.1 done on this branch doesn't make T-2.1 startable: it isn't merged.
-    main(["done", str(repo), "--no-verify"])
+    (repo / "src/streak/setup_check.py").write_text("ok = True\n")
+    assert main(["done", str(repo), "--no-verify"]) == 0
     git(repo, "commit", "-qam", "feat: T-1.1")
     code, out = run_json(capsys, "start", "T-2.1", str(repo), "--branch")
     assert code == 4 and "not done on main" in out["error"]["message"]
@@ -131,7 +133,7 @@ def test_remote_claim_branches_count(repo: Path, tmp_path: Path, capsys):
     git(repo, "fetch", "-q", "origin")
     code, out = run_json(capsys, "start", "T-1.1", str(repo), "--worktree")
     assert code == 1 and out["error"]["claim"]["branch"] == "origin/its/T-1.1-from-elsewhere"
-    assert out["error"]["claim"]["remote"] is True
+    assert out["error"]["claim"]["remote_only"] is True
 
 
 def test_claims_need_git(mini: Path, capsys):
@@ -280,8 +282,10 @@ def test_release_remote_deletes_pushed_branches(repo: Path, tmp_path: Path, caps
     git(repo, "push", "-q", "origin", "main")
     _, out = run_json(capsys, "start", "T-1.1", str(repo), "--worktree")
     worktree, branch = Path(out["claim"]["worktree"]), out["claim"]["branch"]
-    main(["done", str(worktree), "--no-verify"])
-    git(worktree, "commit", "-qam", "feat: T-1.1")
+    (worktree / "src/streak/setup_check.py").write_text("ok = True\n")
+    assert main(["done", str(worktree), "--no-verify"]) == 0
+    git(worktree, "add", "-A")
+    git(worktree, "commit", "-qm", "feat: T-1.1")
     git(worktree, "push", "-q", "origin", branch)
 
     code, out = run_json(capsys, "release", "T-1.1", str(repo), "--remote")

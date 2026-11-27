@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .backlog import load_backlog
 from .package import Package
-from .work import SCHEMA, WorkError, done, item_here
+from .work import SCHEMA, WorkError, done, failure_report, item_here
 
 HOOK_COMMAND = "its hook stop"
 HOOK_TIMEOUT = 900  # seconds: the test suite runs inside the hook
@@ -30,8 +30,14 @@ def _add_stop_hook(path: Path) -> bool:
             raise WorkError("bad_hooks_file", f"{path} is not valid JSON: {exc}") from exc
         if not isinstance(data, dict):
             raise WorkError("bad_hooks_file", f"{path} must hold a JSON object")
-    stop = data.setdefault("hooks", {}).setdefault("Stop", [])
-    if any(h.get("command") == HOOK_COMMAND for group in stop for h in group.get("hooks", [])):
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise WorkError("bad_hooks_file", f"{path}: \"hooks\" must be a JSON object of events, not {type(hooks).__name__}")
+    stop = hooks.setdefault("Stop", [])
+    if not isinstance(stop, list) or not all(isinstance(g, dict) and isinstance(g.get("hooks", []), list)
+                                             for g in stop):
+        raise WorkError("bad_hooks_file", f"{path}: \"hooks.Stop\" must be a list of {{\"hooks\": [...]}} groups")
+    if any(isinstance(h, dict) and h.get("command") == HOOK_COMMAND for group in stop for h in group.get("hooks", [])):
         return False
     stop.append({"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": HOOK_TIMEOUT}]})
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -56,13 +62,29 @@ def hook_agents(pkg: Package) -> list[str]:
     return agents or list(HOOK_FILES)
 
 
-def stop_hook(pkg: Package, stdin: str) -> dict | None:
-    """What the Stop hook answers: a block decision, or None to let the agent stop."""
+def parse_event(stdin: str) -> dict:
     try:
         event = json.loads(stdin) if stdin.strip() else {}
     except json.JSONDecodeError:
-        event = {}
-    if isinstance(event, dict) and event.get("stop_hook_active"):
+        return {}
+    return event if isinstance(event, dict) else {}
+
+
+def hook_dir(event: dict, given: str) -> Path:
+    """Where to look for the package: the session's `cwd` from the hook payload, unless a folder was given.
+
+    The agent's tool sets the hook's working directory to the project root, but the session may be working in a
+    worktree or a subfolder; the payload's `cwd` says which."""
+    cwd = event.get("cwd")
+    if given in ("", ".") and isinstance(cwd, str) and cwd and Path(cwd).is_dir():
+        return Path(cwd)
+    return Path(given or ".")
+
+
+def stop_hook(pkg: Package, stdin: str) -> dict | None:
+    """What the Stop hook answers: a block decision, or None to let the agent stop."""
+    event = parse_event(stdin)
+    if event.get("stop_hook_active"):
         return None  # it already blocked once this turn; never trap the agent in a loop
     items = load_backlog(pkg)
     ident = item_here(pkg, items)
@@ -74,9 +96,8 @@ def stop_hook(pkg: Package, stdin: str) -> dict | None:
     except WorkError as err:
         if err.code not in ("check_failed", "test_changes", "outside_touches", "gate_error"):
             return None
-        failed = [c for c in err.details.get("checks", []) if not c["passed"]]
-        detail = "".join(f"\n\n{c['name']} failed (exit {c['exit_code']}): {c['command']}\n{c['output']}"
-                         for c in failed)
+        report = failure_report(err.details.get("checks", []))
+        detail = f"\n\n{report}" if report else ""
         return {"decision": "block", "reason": (
             f"{err.message}{detail}\n\nFix it and run `its done {ident}`. If you can't finish it honestly, run "
             f"`its block {ident} --reason '...'` and stop.")}

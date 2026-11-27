@@ -121,7 +121,7 @@ artifacts:                         # status of each planning file
 first_task: "T-1.1"                # optional; HANDOFF.md names it, otherwise it tells agents to run `its next`
 integration_branch: "main"         # optional; where readiness is read from in parallel work (section 17)
 test_paths: ["tests/**"]           # optional; globs for test files the done gate protects (section 17)
-its_source: "git+https://..."      # optional; where scaffolded CI installs `its` from
+its_source: "git+https://...@<ref>"  # optional; where scaffolded CI installs `its` from (default: this repo, pinned to the commit that scaffolded it)
 ```
 
 Only `spec_version`, `project.name`, `project.slug`, `project.summary` and
@@ -485,8 +485,10 @@ into a full one by adding the missing docs and changing `profile`.
 
 `its backlog`, `next`, `show`, `start`, `done`, `claims`, `release`,
 `renumber`, `land`, `propose`, `promote`, `block`, `unblock`, `drop`,
-`set-status`, `review`, `hooks`, `drift`, `verify` and `validate` take `--json`. Output is one JSON object on stdout, so agents never
-parse text or stderr, even when `its` hits a bug (`internal_error`).
+`set-status`, `review`, `hooks`, `drift`, `verify`, `status`, `link` and `validate` take `--json`. Output is one
+JSON object on stdout, so agents never parse text or stderr, even when `its` hits a bug (`internal_error`) or the
+command line is wrong (`usage`, exit 2). The global `-C DIR` runs any command as if from `DIR`: it is put in front
+of the command's relative folder arguments.
 
 - Every object has `"schema": 1` and `"ok"`. A new field is not a schema
   change; removing or renaming one is.
@@ -501,7 +503,10 @@ parse text or stderr, even when `its` hits a bug (`internal_error`).
   `in_progress` (everything left is running, claimed or blocked) or `complete`.
   `source` is where statuses were read: `working tree`, or the integration
   branch's ref (section 17). `blocked: [{id, title, reason}]` lists `blocked`
-  items.
+  items. `stale_remote` is `{remote, fetched_at}` when there is a remote that
+  wasn't fetched in the last hour (`fetched_at` is `null` if never), since
+  claims made on other machines may then be missing; `null` otherwise, and
+  always with `--fetch`. `status` has it too.
 - `backlog` adds `proposals`: the items in `planning/proposals/`.
 - `show`: `{id, kind, file, anchor, line, text, referenced_by}`, plus `item`
   for a backlog ID. `referenced_by` lists the docs that mention the ID: the
@@ -512,12 +517,24 @@ parse text or stderr, even when `its` hits a bug (`internal_error`).
   `claim_held_here: true` when the claim is already this checkout's.
   `pushed` and `remote` say whether the claim branch was pushed, and
   `push_error` why a push failed for a reason other than losing the race. A claim is
-  `{id, branch, remote, worktree, agent, started, finished, orphaned}`;
+  `{id, branch, remote_only, worktree, agent, started, finished, orphaned}`;
+  `remote_only` means the branch exists only as a remote-tracking branch (another machine's claim), and
   `orphaned` means its ID isn't in the integration branch's backlog.
 - `claims`: `{base, claims}`, where each claim adds `ahead` (commits not on
   the integration branch), `conflicts_with_base` (files a merge would
   conflict in, or `null` if this git can't tell) and `conflicts_with: [{id,
-  files}]` for other claims. `release`: `{id, released, deleted_branches,
+  files}]` for other claims. Each also says what its branch tip says, read from
+  the backlog at the tip: `tip_status`, `blocked_reason`, `last_commit: {commit,
+  date, subject}` (or `null`), `waiting_on` (dependencies not done on the
+  integration branch) and `state`: `working`, `blocked`, `ready_to_land`,
+  `conflicts`, `waiting`, `no_commits` (marked done with nothing to land),
+  `finished` or `orphaned`.
+- `status`: `{project, source, branch, base, counts, next, next_reason, ready,
+  blocked, in_progress, proposals: [{id, title, file}], claims,
+  ready_to_land, to_release, drift: {drifted, unknown}}`. `claims` are the
+  active ones, with the fields above; `blocked` adds a `branch` for an item
+  blocked on its claim branch; `in_progress` lists items in progress without
+  a claim; `drift` is `null` outside git or when it can't be computed. `release`: `{id, released, deleted_branches,
   removed_worktree, deleted_remote_branches, remote_branches}`. `renumber`: `{dry_run, renumbered:
   [{from, to}], files, proposals_moved}`.
 - `land`: `{base, dry_run, landed, skipped, released, pushed, proposals}`.
@@ -534,15 +551,24 @@ parse text or stderr, even when `its` hits a bug (`internal_error`).
 - `drift`: `{drifted: [{id, title, satisfies, verified, verified_commit, files,
   commits, uncommitted}], requirements: [{id, items, files}], clean, unknown:
   [{id, reason, message}], no_touches, shallow}`. `verify`: the `done --check` object
-  plus `verified` and `previous_verified`.
+  plus `verified` and `previous_verified`. `verify --drifted` and `verify --all`
+  (every done item) return `{verified, failed}`: `verified` lists the objects for items that
+  passed, `failed` is `[{id, code, message, ...}]`, and every item is tried.
 - `review`: `{id, item, requirements: [{id, text, file}], base, merge_base,
   verify_source, touches_checked, findings, changed_files: [{status, path,
   old_path}], diff, diff_truncated, prompt, commands}`. `hooks`: `{command,
   written, unchanged}`.
 - A gate finding is `{kind, message, ...}`, where `kind` is `verify_changed`,
   `test_deleted`, `assertions_removed` or `skip_added` (test changes), or
-  `touches_changed` or `outside_touches` (scope changes, with `files`).
-- `propose`: `{id, file, item}`. `promote`: `{id, status, renumbered_from}`.
+  `touches_changed` or `outside_touches` (scope changes, with `files`),
+  `policy_changed`, `item_changed`, `other_item_changed` or
+  `agent_config_changed` (changes to what the gate reads), or `no_changes`
+  (the branch changes nothing outside the planning folder, so nothing shows
+  the item was implemented; it is dropped when re-verifying a done item).
+- `propose`: `{id, file, item}`. `promote`: `{id, status, renumbered_from}`,
+  plus `committed` (the short commit) when the change was committed: by default
+  for `promote` and `renumber`, and with `--commit` for `block`, `unblock`,
+  `drop`, `set-status` and `verify`.
   `block`, `unblock`, `drop`, `set-status`: `{id, previous_status, status}`,
   plus `deleted_file` when a proposal was dropped.
 - `done`: `{id, previous_status, status, checks: [{name, command, exit_code,
@@ -567,7 +593,9 @@ parse text or stderr, even when `its` hits a bug (`internal_error`).
   `nothing_ready` (with `reason`), `fetch_failed`, `push_failed`, `dirty`,
   `diverged`, `exists`, `bad_name`, `bad_title`, `no_reason`, `usage`,
   `test_changes` and `outside_touches` (with `findings`), `bad_hooks_file`,
-  `bad_agent`, `gate_error` (the gate couldn't compare the branch, so it
+  `bad_agent`, `incomplete` (`promote`: the item has no Done when or Touches; with
+  `missing`), `nothing_to_review` (`review`: the branch only changes the backlog),
+  `gate_error` (the gate couldn't compare the branch, so it
   refused), `override_reason` and `override_needs_person` (a waiver without a
   reason, or without a person), `git_error`, `internal_error`. `done` returns
   `override: {waived, reasons}` when a person waived findings.
@@ -583,8 +611,9 @@ Exit codes, the same with or without `--json`:
 | 4 | `start`: a dependency isn't done |
 | 5 | `done`: a check or the done gate failed; the status is unchanged |
 | 6 | `start`: the item may change the same files as one already running |
-| 7 | `land`: a branch conflicted, failed the done gate or failed its checks, and was not landed |
+| 7 | `land`: a branch could not land (it conflicted, failed the done gate or its checks, isn't done, has no commits, or the base moved); branches only waiting on dependencies don't count |
 | 8 | `drift --check`: a done item's files changed after it was verified |
+| 9 | `next`, `start --next`: every item is done |
 
 `its backlog --write` saves the `its backlog --json` object as
 `planning/backlog.json` (`docs/planning/backlog.json` in a repo), and `start`
@@ -713,10 +742,14 @@ or Codex in each; it never launches an agent itself.
   `changed_on_branch`), and the diff sits in a fence longer than any run of
   backticks inside it, so the change can't rewrite what it is judged against
   or close the fence. `its hooks` adds an opt-in Stop hook for Claude
-  Code and Codex that runs `its hook stop`: it re-runs the gate for this
-  checkout's item and, if it fails or the item isn't marked done, answers
-  `{"decision": "block", "reason": ...}`. It never blocks twice in a row, or
-  when no item is being worked on or the item is blocked.
+  Code and Codex that runs `its hook stop`: it re-runs the gate for the
+  item of the session's checkout (the `cwd` in the hook's JSON, so a session
+  in a worktree is checked there) and, if it fails or the item isn't marked
+  done, answers `{"decision": "block", "reason": ...}`. The reason carries the
+  first failing check's output once, not once per check. It never blocks
+  twice in a row, or when no item is being worked on or the item is blocked.
+  A hooks file whose `hooks` or `hooks.Stop` has the wrong shape is refused
+  (`bad_hooks_file`) and left as it was.
 - **Landing.** A clean merge of two branches can still break the build, so
   `its land` merges finished claims into the integration branch one at a
   time, in backlog order, and runs the item's Verify plus the test and lint

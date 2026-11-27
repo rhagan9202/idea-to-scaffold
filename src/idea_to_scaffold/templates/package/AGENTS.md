@@ -65,7 +65,8 @@ When several agents work at once, each item gets its own branch and worktree, an
   `its next --parallel` lists the ready items that can start now.
 - Land finished branches with `its land` on `main`: it merges them one at a time, runs the checks on each merged
   result, and undoes a merge that fails (`--push --release` also pushes `main` and removes the landed claims).
-  `its claims` shows which claim branches would conflict before anyone merges.
+  `its claims` shows which claim branches would conflict before anyone merges, and `its status` on `main` shows
+  every claim's state (working, blocked and why, ready to land) without visiting its worktree.
 - Then `its promote <ID>` (or `its renumber`) on `main` gives proposed `T-new-...` items their permanent IDs.
 
 ### Keeping docs in sync
