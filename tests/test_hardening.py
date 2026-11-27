@@ -16,9 +16,15 @@ from idea_to_scaffold.linker import link_package
 from idea_to_scaffold.package import Package
 from idea_to_scaffold.scaffold import scaffold
 
-from .test_parallel import git, run_json, set_field, status_in
+from .test_parallel import IDENTITY, git, run_json, set_field, status_in
 
 ITS = [sys.executable, "-m", "idea_to_scaffold.cli"]
+
+
+@pytest.fixture(autouse=True)
+def git_identity(monkeypatch):
+    for key, value in IDENTITY.items():
+        monkeypatch.setenv(key, value)
 
 
 @pytest.fixture
