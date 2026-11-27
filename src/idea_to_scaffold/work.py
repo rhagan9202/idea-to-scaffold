@@ -23,7 +23,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from . import claims as cl
-from . import gate
+from . import gate, ledger, results
 from .backlog import (
     BACKLOG,
     BacklogError,
@@ -397,7 +397,26 @@ def launch_commands(ident: str, worktree: str | None) -> dict:
     }
 
 
-def start(
+def _commands(pkg: Package, ident: str, worktree: str | None) -> dict:
+    """The interactive launch commands, plus the headless ones (`results.headless_commands`) inside git."""
+    commands = launch_commands(ident, worktree)
+    headless = results.headless_commands(pkg, ident, worktree)
+    if headless is not None:
+        commands["headless"] = headless
+    return commands
+
+
+def start(pkg: Package, ident: str | None, **kwargs) -> dict:
+    """`_begin`, recorded in the run ledger."""
+    payload = _begin(pkg, ident, **kwargs)
+    claim = payload.get("claim") or {}
+    ledger.record(pkg, payload["id"], "start", "claimed" if claim else "in-progress", agent=kwargs.get("agent"),
+                  branch=claim.get("branch"), worktree=claim.get("worktree"),
+                  touches=len(payload["item"]["touches"]) if payload.get("item", {}).get("touches") else None)
+    return payload
+
+
+def _begin(
     pkg: Package,
     ident: str | None,
     *,
@@ -490,7 +509,7 @@ def _start(
             return {
                 "schema": SCHEMA, "ok": True, "id": ident, "previous_status": item.status, "status": item.status,
                 "forced": False, "claim": claim.to_dict(), "claim_held_here": True,
-                "item": item_payload(pkg, item, items), "commands": launch_commands(ident, claim.worktree),
+                "item": item_payload(pkg, item, items), "commands": _commands(pkg, ident, claim.worktree),
             }
         where = f" in {claim.worktree}" if claim.worktree else ""
         raise WorkError("claimed", f"{ident} is already claimed by branch {claim.branch}{where}",
@@ -561,7 +580,7 @@ def _start(
     return {
         "schema": SCHEMA, "ok": True, "id": ident, "previous_status": item.status, "status": item.status,
         "forced": forced, "claim": claim.to_dict(), "item": item_payload(pkg, item, items), "held_out": held_out,
-        "commands": launch_commands(ident, claim.worktree),
+        "commands": _commands(pkg, ident, claim.worktree),
     }
 
 
@@ -864,6 +883,48 @@ def gate_error(ident: str, blocking: list[dict], inspection: gate.Inspection) ->
 
 
 def done(
+    pkg: Package,
+    ident: str | None = None,
+    *,
+    verify: bool = True,
+    check_only: bool = False,
+    allow_test_changes: str | None = None,
+    allow_outside_touches: str | None = None,
+    on_check: Callable[[Check], None] | None = None,
+    run: dict | None = None,
+) -> dict:
+    """`_done`, with the attempt recorded in the run ledger. `run` is what the agent reported about its run (agent,
+    cost, turns, ...: see `results.py`), recorded alongside."""
+    started = time.monotonic()
+    extra = dict(run or {})
+    try:
+        payload = _done(pkg, ident, verify=verify, check_only=check_only, allow_test_changes=allow_test_changes,
+                        allow_outside_touches=allow_outside_touches, on_check=on_check)
+    except WorkError as err:
+        target = err.details.get("id") or ident
+        if target and err.code in ("check_failed", "test_changes", "outside_touches", "gate_error"):
+            kinds = sorted({f["kind"] for f in err.details.get("findings", [])})
+            ledger.record(pkg, target, "done", err.code, findings=kinds, check_only=check_only or None,
+                          checks=[c["name"] for c in err.details.get("checks", []) if not c["passed"]] or None,
+                          touches=_touch_count(pkg, target), gate_ms=int((time.monotonic() - started) * 1000),
+                          **extra)
+        raise
+    ledger.record(pkg, payload["id"], "done", "passed", check_only=check_only or None,
+                  warnings=sorted({f["kind"] for f in payload.get("warnings", [])}) or None,
+                  touches=_touch_count(pkg, payload["id"]), gate_ms=int((time.monotonic() - started) * 1000),
+                  **extra)
+    return payload
+
+
+def _touch_count(pkg: Package, ident: str) -> int | None:
+    try:
+        item = next((i for i in load_backlog(pkg) if i.id == ident), None)
+    except BacklogError:
+        return None
+    return len(item.touches) if item and item.touches else None
+
+
+def _done(
     pkg: Package,
     ident: str | None = None,
     *,
