@@ -41,6 +41,7 @@ from .work import (
     done,
     failure_report,
     fetch,
+    is_terminal,
     next_payload,
     release,
     remote_freshness,
@@ -785,7 +786,7 @@ def _confirm_delete(target: Path, assume_yes: bool) -> bool:
     count = sum(1 for p in target.rglob("*") if p.is_file())
     if assume_yes:
         return True
-    if not sys.stdin.isatty():
+    if not is_terminal(0):
         print(
             f"error: --force would delete {target} ({count} files). Re-run with --yes to confirm non-interactively.",
             file=sys.stderr,
@@ -1216,7 +1217,7 @@ def _utf8_streams() -> None:
         if stream is not getattr(sys, f"__{name}__") or not hasattr(stream, "reconfigure"):
             continue  # replaced by a caller (a test, an embedding program): theirs to set
         try:
-            if stream.isatty() or (stream.encoding or "").lower().replace("-", "") == "utf8":
+            if is_terminal(stream.fileno()) or (stream.encoding or "").lower().replace("-", "") == "utf8":
                 continue
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (OSError, ValueError):

@@ -62,7 +62,7 @@ class Variant:
 def _edit(t: Target, rel: str, change: Callable[[list[str]], list[str]]) -> None:
     path = t.pkg.root / rel
     lines = path.read_text(encoding="utf-8").split("\n")
-    path.write_text("\n".join(change(lines)), encoding="utf-8")
+    path.write_text("\n".join(change(lines)), encoding="utf-8", newline="\n")
 
 
 def _indent(line: str) -> str:
@@ -89,7 +89,7 @@ def _write(t: Target, rel: str, text: str, *, append: bool = False) -> None:
     path = t.pkg.root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     old = path.read_text(encoding="utf-8") if append and path.is_file() else ""
-    path.write_text(old + ("\n" if old and not old.endswith("\n") else "") + text, encoding="utf-8")
+    path.write_text(old + ("\n" if old and not old.endswith("\n") else "") + text, encoding="utf-8", newline="\n")
 
 
 def _pytest_settings(t: Target) -> None:
@@ -101,7 +101,7 @@ def _pytest_settings(t: Target) -> None:
                                 "[tool.pytest.ini_options]\naddopts = \"--deselect tests/test_x.py::test_x\"", 1)
         else:
             text += "\n[tool.pytest.ini_options]\naddopts = \"--deselect tests/test_x.py::test_x\"\n"
-        pyproject.write_text(text, encoding="utf-8")
+        pyproject.write_text(text, encoding="utf-8", newline="\n")
     else:
         _write(t, "pytest.ini", "[pytest]\naddopts = --deselect tests/test_x.py::test_x\n")
 
@@ -146,7 +146,7 @@ def _os_exit(t: Target) -> None:
 def _policy_edit(t: Target) -> None:
     path = t.pkg.manifest_path
     path.write_text(path.read_text(encoding="utf-8") + "\n# its gate-audit\ntest_paths: [nothing/]\n",
-                    encoding="utf-8")
+                    encoding="utf-8", newline="\n")
 
 
 VARIANTS: list[Variant] = [

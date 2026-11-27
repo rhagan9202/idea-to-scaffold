@@ -338,5 +338,15 @@ def test_launch_commands_include_argv():
     from idea_to_scaffold.work import launch_commands
     out = launch_commands("T-1.1", "/tmp/wt dir")
     assert out["argv"]["claude"][0] == "claude" and out["cwd"] == "/tmp/wt dir"
-    if os.name != "nt":
+    if os.name == "nt":  # cmd.exe: /d changes drive too
+        assert out["claude"].startswith('cd /d "/tmp/wt dir" && claude ')
+    else:
         assert out["claude"].startswith("cd '/tmp/wt dir' && claude ")
+
+
+def test_nul_is_not_a_person():
+    """On Windows isatty is true of NUL, which is what an agent's tool gives a command as stdin."""
+    from idea_to_scaffold.work import is_terminal
+    with open(os.devnull, encoding="utf-8") as fh:
+        assert not is_terminal(fh.fileno())
+    assert not is_terminal(12345)  # not open at all

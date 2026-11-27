@@ -376,5 +376,5 @@ def link_package(pkg: Package, *, check: bool = False) -> list[str]:
         changed.append("planning/README.md")
         if not check:
             readme.parent.mkdir(parents=True, exist_ok=True)
-            readme.write_text(content, encoding="utf-8")
+            readme.write_text(content, encoding="utf-8", newline="\n")
     return changed

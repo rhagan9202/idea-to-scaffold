@@ -112,7 +112,7 @@ def _variables(pkg: Package, warnings: list[str] | None = None) -> dict[str, str
 def _write(root: Path, rel: str, content: str, written: list[str]) -> None:
     target = root / rel
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+    target.write_text(content, encoding="utf-8", newline="\n")
     written.append(rel)
 
 
@@ -341,7 +341,7 @@ def scaffold(
     if "gate" not in pkg.manifest:
         manifest = root / "docs/planning/package.yaml"
         text = manifest.read_text(encoding="utf-8")
-        manifest.write_text(text + ("" if text.endswith("\n") else "\n") + GATE_BLOCK, encoding="utf-8")
+        manifest.write_text(text + ("" if text.endswith("\n") else "\n") + GATE_BLOCK, encoding="utf-8", newline="\n")
     if pkg.playbooks_dir.is_dir():
         _copy_tree(pkg.playbooks_dir, root, "docs/playbooks", written)
     agents_md = pkg.path_of("AGENTS.md").read_text(encoding="utf-8")

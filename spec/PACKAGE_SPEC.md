@@ -498,6 +498,10 @@ JSON object on stdout, so agents never parse text or stderr, even when `its` hit
 command line is wrong (`usage`, exit 2). The global `-C DIR` runs any command as if from `DIR`: it is put in front
 of the command's relative folder arguments.
 
+Output on a pipe or a file is UTF-8 whatever the locale (cp1252 on most Windows machines). Files `its` writes are
+UTF-8 with LF line endings on every platform. A backlog field edit, such as a status change, and `its link` keep
+the file's own line endings.
+
 - Every object has `"schema": 1` and `"ok"`. A new field is not a schema
   change; removing or renaming one is.
 - A backlog item is `{id, title, status, milestone, satisfies, depends_on,
@@ -521,7 +525,8 @@ of the command's relative folder arguments.
   ones to revisit when it changes.
 - `start`: `{id, previous_status, status, forced, claim, item}`, plus
   `commands: {claude, codex, cwd, argv}` for a claim (`claude` and `codex` are
-  shell lines quoted for the platform; `argv` runs without a shell, and
+  shell lines quoted for the platform, cmd.exe on Windows, with steps joined by
+  `&&`; `argv` runs without a shell, and
   `headless: {claude, codex, argv, cwd, result_file, settings, schema,
   budget_usd, env_unset, then}` gives the unattended commands of section 17), and
   `claim_held_here: true` when the claim is already this checkout's.
@@ -843,7 +848,8 @@ or Codex in each; it never launches an agent itself.
   agent-config findings) or `--allow-outside-touches=REASON` (scope
   findings). A waiver needs a reason and a person: it is refused without an
   interactive terminal unless `ITS_ALLOW_OVERRIDES=1` is set by whoever runs
-  the agent. The waived kinds and the reason are written to the item's
+  the agent. On Windows the terminal has to be a console, since NUL, the stdin
+  an agent's tool usually gets, also counts as a terminal there. The waived kinds and the reason are written to the item's
   `Override` field, and the waived findings are still reported. Verify is
   always the integration branch's, even when test changes are waived. A
   refusal never names the waiver flags; an agent that can't finish honestly
@@ -913,7 +919,10 @@ or Codex in each; it never launches an agent itself.
     PROMPT`.
   - Push and registry tokens (`GH_TOKEN`, `GITHUB_TOKEN`, `NPM_TOKEN`, AWS
     keys, ...: `env_unset`) are unset for the agent, since `its land --push`
-    does every push. Nothing printed skips permissions or the sandbox.
+    does every push: by `env -u` in the line and in `argv`, or on Windows by
+    `set NAME=` at the start of the line (in the console that runs it), and a
+    program that runs `argv` there drops `env_unset` itself. Nothing printed
+    skips permissions or the sandbox.
   - Each line ends with `its done ID --result FILE`. The result is one
     object, `{id, status: done | blocked | needs_human, summary, reason,
     files_changed, tests_run}` (`reason` is required unless `done`, other

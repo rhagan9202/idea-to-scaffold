@@ -226,7 +226,7 @@ def _load_store(store: Path) -> dict[str, dict]:
 
 def _save_store(store: Path, data: dict[str, dict]) -> None:
     tmp = store / "claims.json.tmp"
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     os.replace(tmp, store / "claims.json")
 
 
@@ -442,7 +442,7 @@ def _load_forks(store: Path) -> dict[str, str]:
 
 def _save_forks(store: Path, data: dict[str, str]) -> None:
     tmp = store / "forks.json.tmp"
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     os.replace(tmp, store / "forks.json")
 
 

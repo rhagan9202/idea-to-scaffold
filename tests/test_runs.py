@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -37,7 +38,13 @@ def test_start_prints_headless_commands_that_keep_the_guards(repo: Path, capsys)
     assert code == 0
     h = out["commands"]["headless"]
     claude, codex = h["argv"]["claude"], h["argv"]["codex"]
-    assert claude[:2] == ["env", "-u"] and set(SCRUBBED_ENV) <= set(claude)
+    assert h["env_unset"] == list(SCRUBBED_ENV)
+    if os.name == "nt":  # no env(1): the line unsets the tokens with set, and a program drops env_unset itself
+        assert claude[0] == "claude" and all(f"set {name}=& " in h["claude"] for name in SCRUBBED_ENV)
+        assert " && claude " in h["claude"] and "cd /d " in h["claude"]
+    else:
+        assert claude[:2] == ["env", "-u"] and set(SCRUBBED_ENV) <= set(claude)
+        assert h["claude"].startswith("cd ") and " && env -u " in h["claude"]
     cl = claude[claude.index("claude"):]
     for flag in ("--bare", "-p", "--settings", "--json-schema", "--max-budget-usd", "--permission-prompts"):
         assert flag in cl

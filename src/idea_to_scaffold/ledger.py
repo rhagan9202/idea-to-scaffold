@@ -36,7 +36,7 @@ def record(pkg: Package, item: str, event: str, outcome: str, **fields) -> None:
              "outcome": outcome, **{k: v for k, v in fields.items() if v is not None}}
     try:
         folder.mkdir(parents=True, exist_ok=True)
-        with (folder / f"{item}.jsonl").open("a", encoding="utf-8") as fh:
+        with (folder / f"{item}.jsonl").open("a", encoding="utf-8", newline="\n") as fh:
             fh.write(json.dumps(entry, sort_keys=True) + "\n")
     except OSError:
         pass

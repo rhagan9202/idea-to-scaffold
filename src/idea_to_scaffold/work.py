@@ -397,8 +397,7 @@ def launch_commands(ident: str, worktree: str | None) -> dict:
     `claude` and `codex` are shell lines quoted for this platform (cmd.exe on Windows); `argv` and `cwd` give the same
     command unquoted, for a program to run without a shell."""
     prompt = f"Read AGENTS.md, then follow docs/playbooks/implement-task.md for {ident}."
-    sep = " & " if os.name == "nt" else " && "
-    cd = f"cd {_quote(worktree)}{sep}" if worktree else ""
+    cd = f"{results.cd_command(worktree)} && " if worktree else ""
     return {
         "claude": f"{cd}claude {_quote(prompt)}", "codex": f"{cd}codex {_quote(prompt)}",
         "cwd": worktree, "argv": {"claude": ["claude", prompt], "codex": ["codex", prompt]},
@@ -705,7 +704,7 @@ def red_on_parent(pkg: Package, ident: str, inspection: gate.Inspection, verify_
                 continue
             target = tree / change.git_path
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text, encoding="utf-8")
+            target.write_text(text, encoding="utf-8", newline="\n")
         here = tree / prefix if prefix else tree
         setup = policy.commands.get("setup")
         if setup and setup.strip() != "true":
@@ -812,18 +811,35 @@ def check_override(flag: str, reason: str | None) -> str:
     if not reason:
         raise WorkError("override_reason", f"{flag} needs a reason, e.g. {flag}='the old test checked removed "
                         "behaviour'; it is recorded on the item", details={"flag": flag})
-    if os.environ.get(OVERRIDE_ENV) != "1" and not (_isatty()):
+    if os.environ.get(OVERRIDE_ENV) != "1" and not is_terminal(0):
         raise WorkError("override_needs_person", f"{flag} waives the done gate, so a person has to run it: from a "
                         f"terminal, or with {OVERRIDE_ENV}=1 set by whoever runs the agent. An agent that can't "
                         "finish honestly should run its block <ID> --reason '...' instead", details={"flag": flag})
     return reason
 
 
-def _isatty() -> bool:
+def is_terminal(fd: int) -> bool:
+    """Whether `fd` is a terminal that a person types at. On Windows `isatty` is true of any character device,
+    NUL included, and NUL is what a tool usually gives a command as its stdin, so there the handle must also be a
+    console."""
     try:
-        return os.isatty(0)
-    except OSError:
+        if not os.isatty(fd):
+            return False
+        return os.name != "nt" or _windows_console(fd)
+    except (OSError, ValueError):
         return False
+
+
+def _windows_console(fd: int) -> bool:  # pragma: no cover - Windows only
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    get_mode = ctypes.WinDLL("kernel32", use_last_error=True).GetConsoleMode
+    get_mode.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    get_mode.restype = wintypes.BOOL
+    mode = wintypes.DWORD()
+    return bool(get_mode(wintypes.HANDLE(msvcrt.get_osfhandle(fd)), ctypes.byref(mode)))
 
 
 def item_here(pkg: Package, items: list[BacklogItem]) -> str | None:
@@ -1088,7 +1104,7 @@ def _off_integration_branch(pkg: Package) -> bool:
 def write_backlog_json(pkg: Package) -> Path:
     """Write the backlog mirror next to the backlog. It is generated, gitignored and never edited by hand."""
     path = pkg.path_of(BACKLOG_JSON)
-    path.write_text(json.dumps(backlog_payload(pkg), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(backlog_payload(pkg), indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
     return path
 
 
