@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from . import ledger
 from .backlog import load_backlog
 from .package import Package
 from .work import SCHEMA, WorkError, done, failure_report, item_here
@@ -96,12 +97,14 @@ def stop_hook(pkg: Package, stdin: str) -> dict | None:
     except WorkError as err:
         if err.code not in ("check_failed", "test_changes", "outside_touches", "gate_error"):
             return None
+        ledger.record(pkg, ident, "hook", "blocked", reason=err.code)
         report = failure_report(err.details.get("checks", []))
         detail = f"\n\n{report}" if report else ""
         return {"decision": "block", "reason": (
             f"{err.message}{detail}\n\nFix it and run `its done {ident}`. If you can't finish it honestly, run "
             f"`its block {ident} --reason '...'` and stop.")}
     if result["status"] != "done":
+        ledger.record(pkg, ident, "hook", "blocked", reason="not_marked_done")
         return {"decision": "block", "reason": (
             f"The checks for {ident} pass, but it isn't marked done: run `its done {ident}`, then commit.")}
     return None

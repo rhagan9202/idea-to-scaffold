@@ -126,6 +126,8 @@ gate:                              # optional; the done gate's settings (section
   acceptance_path: "tests/acceptance/"  # held-out tests: hidden from agents' worktrees, changes refused
   checks:                          # the mode of each check that started in warn mode
     tests_pass_on_parent: enforce  # warn (the default for these), enforce or off
+launch:                            # optional; the unattended commands `its start` prints (section 17)
+  budget_usd: 5                    # --max-budget-usd for a headless Claude run (default 5)
 its_source: "git+https://...@<ref>"  # optional; where scaffolded CI installs `its` from (default: this repo, pinned to the commit that scaffolded it)
 ```
 
@@ -490,7 +492,7 @@ into a full one by adding the missing docs and changing `profile`.
 
 `its backlog`, `next`, `show`, `start`, `done`, `claims`, `release`,
 `renumber`, `land`, `propose`, `promote`, `block`, `unblock`, `drop`,
-`set-status`, `review`, `hooks`, `drift`, `verify`, `status`, `gate-audit`, `link` and `validate` take `--json`. Output is one
+`set-status`, `review`, `hooks`, `drift`, `verify`, `status`, `stats`, `gate-audit`, `link` and `validate` take `--json`. Output is one
 JSON object on stdout, so agents never parse text or stderr, even when `its` hits a bug (`internal_error`) or the
 command line is wrong (`usage`, exit 2). The global `-C DIR` runs any command as if from `DIR`: it is put in front
 of the command's relative folder arguments.
@@ -518,7 +520,9 @@ of the command's relative folder arguments.
   ones to revisit when it changes.
 - `start`: `{id, previous_status, status, forced, claim, item}`, plus
   `commands: {claude, codex, cwd, argv}` for a claim (`claude` and `codex` are
-  shell lines quoted for the platform; `argv` runs without a shell), and
+  shell lines quoted for the platform; `argv` runs without a shell, and
+  `headless: {claude, codex, argv, cwd, result_file, settings, schema,
+  budget_usd, env_unset, then}` gives the unattended commands of section 17), and
   `claim_held_here: true` when the claim is already this checkout's.
   `pushed` and `remote` say whether the claim branch was pushed, and
   `push_error` why a push failed for a reason other than losing the race. A claim is
@@ -836,6 +840,53 @@ or Codex in each; it never launches an agent itself.
   releases each landed claim, `--dry-run` reports what would land. `its claims`
   shows each claim's conflicts with the base and with other claims ahead of
   time.
+
+- **Unattended runs.** `its` never launches an agent; `its start` prints
+  commands that do it safely (`commands.headless`):
+  - `claude --bare -p PROMPT --settings FILE --output-format json
+    --json-schema SCHEMA --max-budget-usd N --permission-mode acceptEdits
+    --permission-prompts none`. `--bare` skips the project's hooks, so the
+    settings file carries the Stop hook (`its hook stop`) and turns the OS
+    sandbox on. It is written to `<git common dir>/its/launch/`, outside
+    every worktree, so the agent can't edit it. The budget is
+    `launch.budget_usd` (default 5).
+  - `codex exec --sandbox workspace-write --output-schema FILE -o RESULT
+    PROMPT`.
+  - Push and registry tokens (`GH_TOKEN`, `GITHUB_TOKEN`, `NPM_TOKEN`, AWS
+    keys, ...: `env_unset`) are unset for the agent, since `its land --push`
+    does every push. Nothing printed skips permissions or the sandbox.
+  - Each line ends with `its done ID --result FILE`. The result is one
+    object, `{id, status: done | blocked | needs_human, summary, reason,
+    files_changed, tests_run}` (`reason` is required unless `done`, other
+    fields are refused), bare or as the `structured_output` of a `claude -p`
+    envelope. `done` runs the gate and checks as usual; `blocked` or
+    `needs_human` runs `its block` with the reason and commits it. A wrong
+    `id` is `result_mismatch`, a file that doesn't fit is `bad_result`, and
+    an envelope without `structured_output` (the run failed, ran out of
+    budget or declined) is `no_result`; none of them change the item. `done`
+    returns `result` and `run: {agent, cost_usd, turns, duration_ms,
+    session_id}`.
+- **The run ledger.** `start`, `done`, `block`, `land` and the Stop hook
+  each append `{ts, item, event, outcome, ...}` to
+  `<git common dir>/its/runs/<ID>.jsonl`: shared by every worktree on the
+  machine, never committed and never in a diff, so recording can't trip the
+  gate (an `.its/` folder in the checkout would be agent configuration) or
+  conflict at land. `done` records its outcome (`passed`, `check_failed`,
+  `test_changes`, `outside_touches`, `gate_error`, `no_result`), the finding
+  kinds, the failed checks, the Touches count and what the agent reported.
+  `its stats` reads it: `{items: [{id, attempts, passed, failed, blocked,
+  landed, cost_usd, first_try, touches, agents}], records, attempted,
+  first_try, first_try_rate, refusals, land, cost_usd, cost_p90_usd,
+  by_size, by_agent, ledger}`. A `done --check` (and so the Stop hook) is
+  recorded but isn't an attempt. Nothing in the ledger goes into an agent's
+  prompt.
+- **Sizing.** `its validate --sizing` adds `sizing: {checked, items,
+  warnings: [{id, kind, message}], flagged}` for todo and proposed items:
+  `too_many_touches` (more than 3), `too_many_requirements` (more than 2
+  FRs), `too_many_criteria` (more than 5 Must acceptance criteria across its
+  FRs), `no_verify` (no Verify command) and `vague` ("improve", "refactor",
+  "clean up", ... in the title or Do, with no Done when). They are warnings:
+  `validate` still passes. `promote` returns the item's as `sizing`.
 
 ## 18. Drift and traceability
 

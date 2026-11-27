@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from . import ledger, results, sizing
 from .backlog import (
     NO_VALUE,
     BacklogError,
@@ -135,15 +136,46 @@ def set_item_status(pkg: Package, ident: str, status: str, *, reason: str | None
     return _result(pkg, ident, previous, status, reason=_clean(reason) or None)
 
 
-def block(pkg: Package, ident: str, reason: str) -> dict:
-    """Mark an item blocked and say why. This is also how an agent stops honestly when it can't finish."""
+def block(pkg: Package, ident: str, reason: str, *, run: dict | None = None) -> dict:
+    """Mark an item blocked and say why. This is also how an agent stops honestly when it can't finish. `run` is
+    what a headless run reported (see `apply_result`), recorded in the ledger."""
     if not _clean(reason):
         raise WorkError("no_reason", "say why it is blocked: its block <ID> --reason '...'", details={"id": ident})
     item, _, _ = _locate(pkg, ident)
     if item.status in ("done", "dropped"):
         raise WorkError("bad_status", f"{ident} is {item.status}; it can't be blocked",
                         details={"id": ident, "status": item.status})
-    return set_item_status(pkg, ident, "blocked", reason=reason)
+    payload = set_item_status(pkg, ident, "blocked", reason=reason)
+    ledger.record(pkg, ident, "block", "blocked", reason=reason, **(run or {}))
+    return payload
+
+
+def apply_result(pkg: Package, ident: str | None, result_file: str, **done_options) -> dict:
+    """`its done --result FILE`: act on what a headless agent handed back. `done` runs the gate and checks as usual;
+    `blocked` or `needs_human` blocks the item with the agent's reason. Either way the run's cost and turns go to the
+    ledger. A run that ended without a result changes nothing (code `no_result`)."""
+    try:
+        text = Path(result_file).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise WorkError("bad_result", f"can't read the result file {result_file}: {exc}",
+                        details={"id": ident, "result_file": result_file}) from exc
+    try:
+        result, run = results.parse_result(text)
+    except results.ResultError as exc:
+        if ident:
+            ledger.record(pkg, ident, "done", exc.code, **exc.run)
+        raise WorkError(exc.code, str(exc), details={"id": ident, "result_file": result_file, **exc.run}) from exc
+    if ident and result["id"] != ident:
+        raise WorkError("result_mismatch", f"the result is for {result['id']}, not {ident}; nothing was marked",
+                        details={"id": ident, "result_id": result["id"], "result_file": result_file})
+    ident = result["id"]
+    if result["status"] == "done":
+        from .work import done
+        payload = done(pkg, ident, run=run, **done_options)
+    else:
+        reason = f"{result['status'].replace('_', ' ')}: {result['reason'].strip()}"
+        payload = block(pkg, ident, reason, run=run)
+    return {**payload, "result": result, "run": run}
 
 
 def unblock(pkg: Package, ident: str) -> dict:
@@ -190,4 +222,5 @@ def promote(pkg: Package, ident: str, *, force: bool = False, allow_incomplete: 
         ident = renumbered
     result = set_item_status(pkg, ident, "todo")
     result["renumbered_from"] = item.id if renumbered else None
+    result["sizing"] = sizing.warnings_for(pkg, item)
     return result

@@ -13,15 +13,17 @@ from . import claims as cl
 from .audit import gate_audit
 from .backlog import BacklogError
 from .drift import drift
-from .edits import block, drop, promote, propose, set_item_status, unblock
+from .edits import apply_result, block, drop, promote, propose, set_item_status, unblock
 from .hooks import hook_agents, hook_dir, install_hooks, parse_event, stop_hook
 from .ids import TASK_PATTERN
 from .importer import ImportConflict, import_export
 from .landing import land
+from .ledger import stats
 from .linker import link_package
 from .package import BACKLOG_STATUSES, PROFILES, Package, PackageError, new_package
 from .review import REPLY_SCHEMA, read_reply, review
 from .scaffold import ScaffoldError, scaffold
+from .sizing import sizing
 from .status import STATE_LABELS, render, status_payload
 from .trace import trace
 from .validate import validate
@@ -83,7 +85,7 @@ def cmd_import(args: argparse.Namespace) -> int:
         print(f"cross-linked {len(changed)} file(s) and wrote planning/README.md")
     except PackageError as exc:
         print(f"warning: could not cross-link: {exc}")
-    return cmd_validate(argparse.Namespace(dir=args.into, trace=False, json=False))
+    return cmd_validate(argparse.Namespace(dir=args.into, trace=False, sizing=False, json=False))
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -92,12 +94,15 @@ def cmd_validate(args: argparse.Namespace) -> int:
         return 1
     report = validate(pkg)
     traced = trace(pkg) if args.trace else None
+    sized = sizing(pkg) if getattr(args, "sizing", False) else None
     code = 0 if report.valid and not (traced and traced["uncovered"]) else 1
     if args.json:
         payload = {"schema": SCHEMA, "ok": True, "valid": report.valid, "ready": report.ready,
                    "errors": report.errors, "warnings": report.warnings}
         if traced is not None:
             payload["trace"] = traced
+        if sized is not None:
+            payload["sizing"] = sized
         _emit(payload)
         return code
     for e in report.errors:
@@ -106,6 +111,11 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print(f"warning {w}")
     if traced is not None:
         _print_trace(traced)
+    if sized is not None:
+        for w in sized["warnings"]:
+            print(f"sizing  {w['kind']}: {w['message']}")
+        print(f"sizing: {len(sized['flagged'])} of {sized['items']} todo or proposed item(s) may be too big or vague"
+              if sized["checked"] else f"sizing: skipped ({sized['reason']})")
     if report.valid and pkg.repo_layout:
         print("planning docs are valid")
     elif report.ready:
@@ -453,6 +463,12 @@ def cmd_start(args: argparse.Namespace) -> int:
         print("start an agent on it:")
         print(f"  {payload['commands']['claude']}")
         print(f"  {payload['commands']['codex']}")
+        headless = payload["commands"].get("headless")
+        if headless:
+            print(f"or unattended (sandboxed, budget ${headless['budget_usd']:g}, push tokens unset; it ends with "
+                  "`its done --result`):")
+            print(f"  {headless['claude']}")
+            print(f"  {headless['codex']}")
     else:
         print(f"{_item_line(item)} is now in-progress (was {payload['previous_status']})")
     if item["verify"]:
@@ -569,10 +585,16 @@ def cmd_done(args: argparse.Namespace) -> int:
         if not args.json:
             print(f"running {check.name}: {check.command}", flush=True)
 
+    options = {"verify": not args.no_verify, "check_only": args.check, "allow_test_changes": args.allow_test_changes,
+               "allow_outside_touches": args.allow_outside_touches, "on_check": announce}
     try:
-        payload = done(pkg, args.id, verify=not args.no_verify, check_only=args.check,
-                       allow_test_changes=args.allow_test_changes, allow_outside_touches=args.allow_outside_touches,
-                       on_check=announce)
+        if args.result:
+            payload = apply_result(pkg, args.id, args.result, **options)
+            if payload["status"] == "blocked":
+                args.commit = True  # nobody is at an unattended run to commit the block
+                return _edited(args, payload, pkg)
+        else:
+            payload = done(pkg, args.id, **options)
     except WorkError as err:
         if err.code in ("test_changes", "outside_touches") and not args.json and len(err.details["findings"]) > 1:
             for finding in err.details["findings"]:
@@ -601,6 +623,34 @@ def cmd_done(args: argparse.Namespace) -> int:
         print(f"  {when}: {', '.join(payload['now_ready'])}")
     elif payload["merge_needed"]:
         print("  commit, then merge this branch; dependent items become ready once it is merged")
+    return 0
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+    out = stats(pkg)
+    if args.json:
+        _emit({"schema": SCHEMA, "ok": True, **out})
+        return 0
+    if not out["records"]:
+        print("the run ledger is empty: start, done, block and land record to it" if out["ledger"] else
+              "the run ledger needs a git repository")
+        return 0
+    rate = f"{out['first_try_rate']:.0%}" if out["first_try_rate"] is not None else "n/a"
+    print(f"{out['attempted']} item(s) attempted, {out['first_try']} passed done first time ({rate})")
+    for name, label in (("by_size", "size"), ("by_agent", "agent")):
+        for key, g in out[name].items():
+            print(f"  {label} {key}: {g['first_try']} of {g['items']} first time")
+    if out["refusals"]:
+        print("refused for: " + ", ".join(f"{k} {v}" for k, v in out["refusals"].items()))
+    if out["land"]:
+        print("land: " + ", ".join(f"{k} {v}" for k, v in out["land"].items()))
+    if out["cost_usd"]:
+        p90 = f", p90 per run ${out['cost_p90_usd']:.2f}" if out["cost_p90_usd"] is not None else ""
+        print(f"agent cost ${out['cost_usd']:.2f}{p90}")
+    print(f"ledger: {out['ledger']}")
     return 0
 
 
@@ -678,6 +728,8 @@ def _edited(args: argparse.Namespace, payload: dict, pkg: Package | None = None)
         print(f"{payload['id']} is now {payload['status']} (was {payload['previous_status']})")
     if payload.get("reason"):
         print(f"  reason: {payload['reason']}")
+    for w in payload.get("sizing") or []:
+        print(f"  sizing: {w['message']}")
     if payload.get("committed"):
         print(f"  committed {payload['committed']}")
     return 0
@@ -895,6 +947,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("dir", nargs="?", default=".")
     s.add_argument("--trace", action="store_true",
                    help="also list Must acceptance criteria that no test names (exit 1 if any)")
+    s.add_argument("--sizing", action="store_true",
+                   help="also warn about todo and proposed items too big or vague for one agent run (never fails)")
     s.add_argument("--json", action="store_true", help=f"print JSON (schema {SCHEMA}) instead of text")
     s.set_defaults(func=cmd_validate)
 
@@ -1071,6 +1125,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--no-verify", action="store_true", help="don't run Verify, test and lint first")
     s.add_argument("--check", action="store_true", help="run every check but leave the status alone (exit 5 if any fails)")
+    s.add_argument("--result", metavar="FILE",
+                   help="act on a headless agent's result JSON: done runs the checks, blocked or needs_human blocks it")
     s.add_argument("--allow-test-changes", help=allow_tests_help, **allow)
     s.add_argument("--allow-outside-touches", help=allow_touches_help, **allow)
     s.add_argument("--json", action="store_true", help=json_help)
@@ -1081,6 +1137,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--check", action="store_true", help="exit 8 if anything drifted (for CI)")
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_drift)
+
+    s = sub.add_parser("stats", help="what the run ledger says: first-time pass rate, refusals, land results, cost")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_stats)
 
     s = sub.add_parser("gate-audit", help="feed the done gate known cheats and report which it catches")
     s.add_argument("id", nargs="?", help="the item to audit as (default: the first item with Touches)")

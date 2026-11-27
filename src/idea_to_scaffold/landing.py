@@ -18,7 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import claims as cl
-from . import gate
+from . import gate, ledger
 from .backlog import BacklogItem, blocked_by, load_backlog, load_proposals, parse_backlog
 from .ids import META_FILES
 from .linker import link_package
@@ -143,6 +143,10 @@ def land(
             outcome = _land_one(pkg, claim, ref, verify=verify, dry_run=dry_run, on_check=on_check,
                                 allow=(allow_test_changes is not None, allow_outside_touches is not None))
             (landed if outcome["landed"] else skipped).append(outcome)
+            if not dry_run:
+                ledger.record(pkg, claim.id, "land", "landed" if outcome["landed"] else outcome.get("reason", "skipped"),
+                              findings=sorted({f["kind"] for f in outcome.get("findings", [])}) or None,
+                              checks=[c["name"] for c in outcome.get("checks", []) if not c["passed"]] or None)
     for claim, _ in pending:
         items = load_backlog(pkg)
         item = next((i for i in items if i.id == claim.id), None)
