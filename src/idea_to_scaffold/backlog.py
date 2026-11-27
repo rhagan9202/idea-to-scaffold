@@ -274,42 +274,92 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
-def set_field(pkg: Package, item_id: str, name: str, value: str) -> str:
-    """Replace one field's value in place, keeping the rest of the file byte for byte. Returns the old value.
+def set_field(pkg: Package, item_id: str, name: str, value: str, *, add: bool = False,
+              path: Path | None = None) -> str:
+    """Replace one field's value in place, keeping the rest of the file byte for byte. Returns the old value ("" if
+    the field was added). With `add`, a missing field is added on a new line after the item's Status.
 
     The read, change and write happen under the package lock, so two commands changing different items at the same
-    moment can't lose either change."""
-    path = pkg.path_of(BACKLOG)
+    moment can't lose either change. `path` names another file holding the item (a proposal)."""
+    path = path or pkg.path_of(BACKLOG)
     if not path.is_file():
-        raise BacklogError(f"{BACKLOG} not found")
+        raise BacklogError(f"{pkg.rel(path) if path.is_relative_to(pkg.root) else path} not found")
     try:
         with package_lock(pkg.root):
-            return _set_field(path, item_id, name, value)
+            return _set_field(path, item_id, name, value, add)
     except LockTimeout as exc:
         raise BacklogError(str(exc)) from None
 
 
-def _set_field(path: Path, item_id: str, name: str, value: str) -> str:
-    text = _read(path)
+def remove_field(pkg: Package, item_id: str, name: str, *, path: Path | None = None) -> str | None:
+    """Delete a field's line if the line holds only that field. Returns the old value, or None if absent."""
+    path = path or pkg.path_of(BACKLOG)
+    try:
+        with package_lock(pkg.root):
+            text = _read(path)
+            item = _one(text, item_id)
+            span = item.fields.get(name.lower())
+            if span is None:
+                return None
+            lines = text.split("\n")
+            if len(line_fields(lines[span.line], span.line)) == 1:
+                del lines[span.line]
+            else:
+                line = lines[span.line]
+                lines[span.line] = line[: span.start] + line[span.end:]
+            _atomic_write(path, "\n".join(lines))
+            return span.raw
+    except LockTimeout as exc:
+        raise BacklogError(str(exc)) from None
+
+
+def _one(text: str, item_id: str) -> BacklogItem:
     items = [i for i in parse_backlog(text) if i.id == item_id]
     if not items:
         raise BacklogError(f"{item_id} is not in the backlog")
     if len(items) > 1:
         raise BacklogError(f"{item_id} is defined more than once in the backlog; fix that first")
-    span = items[0].fields.get(name.lower())
-    if span is None:
-        raise BacklogError(f"{item_id} has no **{name}:** field")
+    return items[0]
+
+
+def _set_field(path: Path, item_id: str, name: str, value: str, add: bool = False) -> str:
+    text = _read(path)
+    item = _one(text, item_id)
     lines = text.split("\n")  # keeps any "\r" at line ends, so line endings are preserved
+    span = item.fields.get(name.lower())
+    if span is None:
+        anchor = item.fields.get("status")
+        if not add or anchor is None:
+            raise BacklogError(f"{item_id} has no **{name}:** field")
+        status_line = lines[anchor.line]
+        prefix = status_line[: status_line.index("**")] if "**" in status_line else "- "
+        eol = "\r" if status_line.endswith("\r") else ""
+        lines.insert(anchor.line + 1, f"{prefix}**{name}:** {value}{eol}")
+        _atomic_write(path, "\n".join(lines))
+        return ""
     line = lines[span.line]
     lines[span.line] = line[: span.start] + value + line[span.end:]
     _atomic_write(path, "\n".join(lines))
     return span.raw
 
 
-def set_status(pkg: Package, item_id: str, status: str) -> str:
+def set_status(pkg: Package, item_id: str, status: str, *, path: Path | None = None) -> str:
     """Set an item's Status. Returns the previous status."""
     status = status.strip().lower()
     if status not in BACKLOG_STATUSES:
         raise BacklogError(f"status {status!r} must be one of {', '.join(BACKLOG_STATUSES)}")
-    old = set_field(pkg, item_id, "Status", status)
+    old = set_field(pkg, item_id, "Status", status, path=path)
     return TRAILING_COMMENT_RE.sub("", strip_links(old)).strip("`* ").lower()
+
+
+# --- proposals -----------------------------------------------------------------------------------------------
+
+def load_proposals(pkg: Package) -> list[tuple[Path, BacklogItem]]:
+    """Proposed items waiting in `planning/proposals/`, one per file, in file-name order. A proposal lives in its own
+    file so two branches that each propose items never edit the same lines; `its renumber` moves them into the
+    backlog with permanent IDs."""
+    out: list[tuple[Path, BacklogItem]] = []
+    for path in pkg.proposal_files():
+        for item in parse_backlog(_read(path)):
+            out.append((path, item))
+    return out

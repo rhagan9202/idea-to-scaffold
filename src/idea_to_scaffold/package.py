@@ -269,7 +269,17 @@ class Package:
         return sorted(p for p in base.rglob("*.md") if p.is_file())
 
     def planning_files(self) -> list[Path]:
-        return self._md(self.planning_dir)
+        """The planning docs. Proposal files (`planning/proposals/`) are not docs: see `proposal_files`."""
+        proposals = self.proposals_dir
+        return [p for p in self._md(self.planning_dir) if proposals not in p.parents]
+
+    @property
+    def proposals_dir(self) -> Path:
+        return self.planning_dir / "proposals"
+
+    def proposal_files(self) -> list[Path]:
+        """One file per proposed backlog item (`planning/proposals/T-new-<name>.md`), waiting for `its renumber`."""
+        return self._md(self.proposals_dir)
 
     def playbooks(self) -> list[Path]:
         return self._md(self.playbooks_dir)

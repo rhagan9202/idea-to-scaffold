@@ -19,8 +19,9 @@ item whose dependencies are `done` is next.
 - `Satisfies` lists the requirements the item delivers. Agents may add new items with `Status: proposed`
   and may change the `Status` of the item they are working on; anything else needs a human.
 - New items proposed by an agent get a placeholder ID, `T-new-<short-name>` (lowercase letters, digits and hyphens),
-  so agents on parallel branches never pick the same number. A human gives it a permanent `T-n.m` ID when it
-  is scheduled.
+  so agents on parallel branches never pick the same number. `its propose` puts each one in its own file under
+  `proposals/`, so branches that propose items never conflict; `its promote` gives it a permanent `T-n.m` ID and
+  schedules it.
 - `Verify` (optional) is how to check the item is done: a command in backticks, a test ID, or `manual: ...`.
 - `Touches` (optional) lists the paths or globs the item is expected to change, so items that would edit the
   same files aren't run in parallel.
