@@ -12,3 +12,10 @@ jobs:
       - run: ${cmd_setup}
       - run: ${cmd_lint}
       - run: ${cmd_test}
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uvx --from "${its_source}" its validate .
+      - run: uvx --from "${its_source}" its link --check .

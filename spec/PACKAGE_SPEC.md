@@ -120,6 +120,8 @@ artifacts:                         # status of each planning file
 
 first_task: "T-1.1"                # optional; HANDOFF.md names it, otherwise it tells agents to run `its next`
 integration_branch: "main"         # optional; where readiness is read from in parallel work (section 17)
+test_paths: ["tests/**"]           # optional; globs for test files the done gate protects (section 17)
+its_source: "git+https://..."      # optional; where scaffolded CI installs `its` from
 ```
 
 Only `spec_version`, `project.name`, `project.slug`, `project.summary` and
@@ -428,7 +430,7 @@ things:
 
 Drift is caught two ways: `its validate` reports broken links, undefined IDs
 and stale cross-links; and `its link --check` exits non-zero when regeneration
-would change anything (suitable for CI or a pre-commit hook). A backlog status
+would change anything (suitable for CI or a pre-commit hook); the scaffolded CI runs both. A backlog status
 change never makes generated files stale.
 
 ## 13. ID recognition
@@ -479,8 +481,8 @@ into a full one by adding the missing docs and changing `profile`.
 ## 16. JSON output
 
 `its backlog`, `next`, `show`, `start`, `done`, `claims`, `release`,
-`renumber`, `land`, `propose`, `promote`, `block`, `unblock`, `drop` and
-`set-status` take `--json`. Output is one JSON object on stdout, so agents never
+`renumber`, `land`, `propose`, `promote`, `block`, `unblock`, `drop`,
+`set-status`, `review` and `hooks` take `--json`. Output is one JSON object on stdout, so agents never
 parse text or stderr, even when `its` hits a bug (`internal_error`).
 
 - Every object has `"schema": 1` and `"ok"`. A new field is not a schema
@@ -518,13 +520,25 @@ parse text or stderr, even when `its` hits a bug (`internal_error`).
 - `land`: `{base, dry_run, landed, skipped, released, pushed, proposals}`.
   Each entry is `{id, branch, landed, ...}`: a landed one has `commit` and
   `checks`; a skipped one has `reason` (`conflict` with `files`,
-  `check_failed` with `checks`, `waiting` with `blocked_by`, `no_claim`,
+  `check_failed` with `checks`, `test_changes` or `outside_touches` with
+  `findings`, `waiting` with `blocked_by`, `no_claim`,
   `no_commits`, `not_done` or `dry_run`) and `message`.
+- `review`: `{id, item, requirements: [{id, text, file}], base, merge_base,
+  verify_source, touches_checked, findings, changed_files: [{status, path,
+  old_path}], diff, diff_truncated, prompt, commands}`. `hooks`: `{command,
+  written, unchanged}`.
+- A gate finding is `{kind, message, ...}`, where `kind` is `verify_changed`,
+  `test_deleted`, `assertions_removed` or `skip_added` (test changes), or
+  `touches_changed` or `outside_touches` (scope changes, with `files`).
 - `propose`: `{id, file, item}`. `promote`: `{id, status, renumbered_from}`.
   `block`, `unblock`, `drop`, `set-status`: `{id, previous_status, status}`,
   plus `deleted_file` when a proposal was dropped.
 - `done`: `{id, previous_status, status, checks: [{name, command, exit_code,
-  passed, output}], checks_skipped, manual_verify, now_ready, merge_needed}`. Checks are the
+  passed, output}], checks_skipped, manual_verify, verify_source, touches_checked,
+  findings, now_ready, merge_needed}`. `verify_source` is where the Verify
+  command was read (the integration branch's ref, or `working tree`);
+  `findings` are the done gate's findings that were allowed. With `--check`:
+  `{id, status, checks, ..., checked_only: true}`, and nothing is written. Checks are the
   item's `Verify` command, then `commands.test` and `commands.lint`, run from
   the repo root; they run only in a scaffolded repo, and `--no-verify` skips
   them. `Verify` is run only when its whole value is one backticked command;
@@ -539,6 +553,8 @@ parse text or stderr, even when `its` hits a bug (`internal_error`).
   `not_git`, `not_integration_branch`, `worktree_exists`, `locked`,
   `nothing_ready` (with `reason`), `fetch_failed`, `push_failed`, `dirty`,
   `diverged`, `exists`, `bad_name`, `bad_title`, `no_reason`, `usage`,
+  `test_changes` and `outside_touches` (with `findings`), `bad_hooks_file`,
+  `bad_agent`,
   `git_error`, `internal_error`.
 
 Exit codes, the same with or without `--json`:
@@ -550,9 +566,9 @@ Exit codes, the same with or without `--json`:
 | 2 | bad command-line usage |
 | 3 | `next`, `start --next`, `land`: nothing is ready (with `--parallel`: nothing can start alongside the claims) |
 | 4 | `start`: a dependency isn't done |
-| 5 | `done`: a check failed; the status is unchanged |
+| 5 | `done`: a check or the done gate failed; the status is unchanged |
 | 6 | `start`: the item may change the same files as one already running |
-| 7 | `land`: a branch conflicted or failed its checks and was not landed |
+| 7 | `land`: a branch conflicted, failed the done gate or failed its checks, and was not landed |
 
 `its backlog --write` saves the `its backlog --json` object as
 `planning/backlog.json` (`docs/planning/backlog.json` in a repo), and `start`
@@ -624,6 +640,31 @@ or Codex in each; it never launches an agent itself.
   the docs are re-linked. `--dry-run` shows the new IDs first. It refuses to
   run off the integration branch (unless `--force`) or when a placeholder is
   proposed twice, and never reuses a number still mentioned in any doc.
+- **The done gate.** An agent can edit the files its checks read, so before
+  running any check `its done` compares the branch, from its merge base with
+  the integration branch to the working tree (uncommitted and untracked files
+  included), with what the item allows:
+  - Verify and Touches are read from the integration branch, so the planned
+    acceptance test runs. A branch that changed either is refused.
+  - A deleted test file, a test file with fewer assertion lines, or a new
+    skip or xfail marker is refused. Test files match `test_paths` in
+    `package.yaml`, or by default `tests/`, `test/`, `__tests__/`, `test_*`,
+    `*_test.*`, `*_spec.*`, `*.test.*` and `*.spec.*`.
+  - A changed file outside the item's Touches is refused. The planning folder
+    is exempt; an item without Touches isn't checked.
+
+  `--allow-test-changes` and `--allow-outside-touches` accept each group for a
+  real refactor, and the accepted findings are still reported. An agent that
+  can't finish honestly runs `its block <ID> --reason`. `its land` runs the
+  same gate on each branch before merging it.
+- **Review and hooks.** `its review <ID>` prints an evidence bundle for a second
+  agent: the item, the text of each requirement it satisfies, the gate's
+  findings and the diff, with instructions to answer `VERDICT: approve` or
+  `VERDICT: changes-requested`. `its hooks` adds an opt-in Stop hook for Claude
+  Code and Codex that runs `its hook stop`: it re-runs the gate for this
+  checkout's item and, if it fails or the item isn't marked done, answers
+  `{"decision": "block", "reason": ...}`. It never blocks twice in a row, or
+  when no item is being worked on or the item is blocked.
 - **Landing.** A clean merge of two branches can still break the build, so
   `its land` merges finished claims into the integration branch one at a
   time, in backlog order, and runs the item's Verify plus the test and lint

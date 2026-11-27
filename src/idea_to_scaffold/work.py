@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import claims as cl
+from . import gate
 from .backlog import (
     BACKLOG,
     BacklogError,
@@ -569,10 +570,12 @@ class Check:
     command: str
 
 
-def checks_for(pkg: Package, item: BacklogItem) -> list[Check]:
-    """The item's Verify command, then the package's test and lint commands, without repeats."""
+def checks_for(pkg: Package, item: BacklogItem, verify: str | None | bool = True) -> list[Check]:
+    """The item's Verify command, then the package's test and lint commands, without repeats. `verify` replaces the
+    item's own Verify command (the integration branch's, from `gate.inspect`)."""
     out: list[Check] = []
-    candidates = [("verify", item.verify_command or "")]
+    command = item.verify_command if verify is True else verify
+    candidates = [("verify", command or "")]
     candidates += [(name, pkg.commands.get(name, "")) for name in ("test", "lint")]
     for name, command in candidates:
         command = command.strip()
@@ -594,30 +597,66 @@ def run_check(check: Check, cwd: Path) -> dict:
     }
 
 
+def base_ref(pkg: Package) -> str | None:
+    """The integration branch's ref for comparing against (its remote-tracking ref when local is behind)."""
+    if not cl.in_git(pkg.root):
+        return None
+    return cl.resolve_base(pkg.root, integration_branch(pkg), remote_of(pkg) or "origin")
+
+
+def item_here(pkg: Package, items: list[BacklogItem]) -> str | None:
+    """The item this checkout is working on: the claim branch's or worktree's, else the only in-progress item."""
+    if cl.in_git(pkg.root):
+        ident = cl.item_of_branch(cl.current_branch(pkg.root)) or cl.claim_of_worktree(pkg.root)
+        if ident:
+            return ident
+    active = [i.id for i in items if i.status == "in-progress"]
+    return active[0] if len(active) == 1 else None
+
+
+def gate_error(ident: str, blocking: list[dict], inspection: gate.Inspection) -> WorkError:
+    """The refusal for findings that aren't allowed: test changes first, since they matter most."""
+    tests = [f for f in blocking if f["kind"] in gate.TEST_KINDS]
+    if tests:
+        code, flag = "test_changes", "--allow-test-changes"
+    else:
+        code, flag = "outside_touches", "--allow-outside-touches"
+    worst = tests or blocking
+    message = (f"{ident} is not done: {worst[0]['message']}"
+               + (f" (and {len(blocking) - 1} more)" if len(blocking) > 1 else "")
+               + f". If that is intended, rerun with {flag}; if you can't finish honestly, run its block {ident} "
+                 "--reason '...'")
+    return WorkError(code, message, EXIT_CHECK_FAILED, {"id": ident, "findings": blocking, **inspection.to_dict()})
+
+
 def done(
     pkg: Package,
     ident: str | None = None,
     *,
     verify: bool = True,
+    check_only: bool = False,
+    allow_test_changes: bool = False,
+    allow_outside_touches: bool = False,
     on_check: Callable[[Check], None] | None = None,
 ) -> dict:
-    """Run the item's checks and, if they pass, set it `done`. With no ID, uses the item of the claim branch that is
+    """Check the item and, if it passes, set it `done`. With no ID, uses the item of the claim branch that is
     checked out, else the only `in-progress` item.
 
-    Checks run only in a scaffolded repo (a planning package has no code to test).
+    First the branch is compared with the integration branch (`gate.inspect`): the Verify command comes from there,
+    and test tampering or changes outside Touches refuse the item unless allowed. Then Verify, test and lint run,
+    only in a scaffolded repo (a planning package has no code to test). `check_only` does all of that but leaves
+    the status alone, so it can run again on a done item (the Stop hook does).
     """
     items = load_backlog(pkg)
-    if ident is None and cl.in_git(pkg.root):
-        ident = cl.item_of_branch(cl.current_branch(pkg.root)) or cl.claim_of_worktree(pkg.root)
+    if ident is None:
+        ident = item_here(pkg, items)
     if ident is None:
         active = [i.id for i in items if i.status == "in-progress"]
-        if len(active) != 1:
-            why = "no item is in-progress" if not active else f"more than one item is in-progress ({', '.join(active)})"
-            raise WorkError("which_item", f"{why}; name the item, e.g. `its done T-1.1`",
-                            details={"in_progress": active})
-        ident = active[0]
+        why = "no item is in-progress" if not active else f"more than one item is in-progress ({', '.join(active)})"
+        raise WorkError("which_item", f"{why}; name the item, e.g. `its done T-1.1`",
+                        details={"in_progress": active})
     item = _find(items, ident)
-    if item.status == "done":
+    if item.status == "done" and not check_only:
         raise WorkError("already_done", f"{ident} is already done", details={"id": ident})
     if item.status in ("proposed", "dropped") or item.placeholder:
         raise WorkError("bad_status", f"{ident} is {item.status}; it can't be done before it is scheduled",
@@ -625,6 +664,14 @@ def done(
     if "status" not in item.fields:
         raise WorkError("no_status", f"{ident} has no **Status:** field; add one, then run its done again",
                         details={"id": ident})
+    inspection = gate.inspect(pkg, ident, base_ref(pkg))
+    blocking = inspection.blocking(allow_test_changes=allow_test_changes,
+                                   allow_outside_touches=allow_outside_touches)
+    if blocking:
+        raise gate_error(ident, blocking, inspection)
+    verify_command = inspection.verify_command
+    if allow_test_changes:  # the branch's own Verify, since changing it was allowed
+        verify_command = item.verify_command
     results: list[dict] = []
     skipped = None
     if not verify:
@@ -632,7 +679,7 @@ def done(
     elif not pkg.repo_layout:
         skipped = "this is a planning package, not a scaffolded repo"
     else:
-        for check in checks_for(pkg, item):
+        for check in checks_for(pkg, item, verify_command):
             if on_check:
                 on_check(check)
             results.append(run_check(check, pkg.root))
@@ -643,6 +690,19 @@ def done(
                 {"id": ident, "checks": results},
             )
     manual = item.verify if item.verify and not item.verify_command else None
+    common = {
+        "schema": SCHEMA,
+        "ok": True,
+        "id": ident,
+        "checks": results,
+        "checks_skipped": skipped,
+        "manual_verify": manual,
+        "verify_source": inspection.verify_source,
+        "touches_checked": inspection.touches_checked,
+        "findings": inspection.findings,
+    }
+    if check_only:
+        return {**common, "checked_only": True, "status": item.status, "previous_status": item.status}
     try:
         previous = set_status(pkg, ident, "done")
     except BacklogError as exc:
@@ -650,14 +710,9 @@ def done(
     _refresh_mirror(pkg)
     items = load_backlog(pkg)
     return {
-        "schema": SCHEMA,
-        "ok": True,
-        "id": ident,
+        **common,
         "previous_status": previous,
         "status": "done",
-        "checks": results,
-        "checks_skipped": skipped,
-        "manual_verify": manual,
         "now_ready": [i.id for i in ready_items(items) if ident in i.depends_on],
         "merge_needed": _off_integration_branch(pkg),
     }
