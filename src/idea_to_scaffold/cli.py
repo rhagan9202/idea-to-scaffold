@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .backlog import BacklogError
 from .ids import TASK_PATTERN
 from .importer import ImportConflict, import_export
 from .linker import link_package
@@ -116,7 +117,7 @@ def cmd_link(args: argparse.Namespace) -> int:
 
 def _load(args: argparse.Namespace) -> Package | None:
     try:
-        return Package.load(Path(args.dir))
+        return Package.find(Path(args.dir))
     except PackageError as exc:
         _fail(args, WorkError("no_package", str(exc)))
         return None
@@ -196,7 +197,13 @@ def cmd_next(args: argparse.Namespace) -> int:
     for claim in payload["claimed"]:
         print(f"claimed: {claim['id']} on {claim['branch']}" + (f" ({claim['worktree']})" if claim["worktree"] else ""))
     if payload["item"] is None:
-        print("nothing is ready")
+        print({
+            "overlap": "nothing can start now: every ready item may touch the same files as running work "
+                       "(its next --parallel shows which)",
+            "waiting": "nothing is ready",
+            "in_progress": "nothing is ready: everything left is in progress, claimed or blocked",
+            "complete": "nothing is left: every item is done",
+        }.get(payload["reason"], "nothing is ready"))
         if payload["in_progress"]:
             print(f"  in progress: {', '.join(payload['in_progress'])}")
         for w in payload["waiting"]:
@@ -286,7 +293,12 @@ def cmd_claims(args: argparse.Namespace) -> int:
     if not payload["claims"]:
         print("no claims")
     for c in payload["claims"]:
-        state = "finished, release it" if c["finished"] else ("remote" if c["remote"] else "active")
+        if c["orphaned"]:
+            state = "orphaned: not in the backlog, release it"
+        elif c["finished"]:
+            state = "finished, release it"
+        else:
+            state = "remote" if c["remote"] else "active"
         extra = f"  worktree {c['worktree']}" if c["worktree"] else ""
         print(f"{c['id']:<10} {c['branch']}  [{state}]{extra}")
     return 0
@@ -303,6 +315,8 @@ def cmd_release(args: argparse.Namespace) -> int:
     if args.json:
         _emit(payload)
         return 0
+    if not payload["released"]:
+        print(f"{payload['id']} has no claim to release")
     if payload["removed_worktree"]:
         print(f"removed worktree {payload['removed_worktree']}")
     for b in payload["deleted_branches"]:
@@ -319,7 +333,7 @@ def cmd_renumber(args: argparse.Namespace) -> int:
     if pkg is None:
         return 1
     try:
-        payload = renumber(pkg, args.ids or None, dry_run=args.dry_run)
+        payload = renumber(pkg, args.ids or None, dry_run=args.dry_run, force=args.force)
     except WorkError as err:
         return _fail(args, err)
     if args.json:
@@ -525,6 +539,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("ids", nargs="*", metavar="ID", help="only these placeholders (default: all that aren't dropped)")
     s.add_argument("--dir", default=".", help=dir_help)
     s.add_argument("--dry-run", action="store_true", help="show the new IDs without changing anything")
+    s.add_argument("--force", action="store_true", help="renumber even when not on the integration branch")
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_renumber)
 
@@ -552,7 +567,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except WorkError as err:
+        return _fail(args, err)
+    except BacklogError as exc:
+        return _fail(args, WorkError("bad_backlog", str(exc)))
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:  # the JSON contract holds even for a bug: agents always get an error envelope
+        if not getattr(args, "json", False):
+            raise
+        return _fail(args, WorkError("internal_error", f"{type(exc).__name__}: {exc}",
+                                     details={"version": __version__}))
 
 
 if __name__ == "__main__":

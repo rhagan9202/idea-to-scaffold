@@ -470,8 +470,9 @@ into a full one by adding the missing docs and changing `profile`.
 
 ## 16. JSON output
 
-`its backlog`, `next`, `show`, `start` and `done` take `--json`. Output is one
-JSON object on stdout, so agents never parse text or stderr.
+`its backlog`, `next`, `show`, `start`, `done`, `claims`, `release` and
+`renumber` take `--json`. Output is one JSON object on stdout, so agents never
+parse text or stderr, even when `its` hits a bug (`internal_error`).
 
 - Every object has `"schema": 1` and `"ok"`. A new field is not a schema
   change; removing or renaming one is.
@@ -479,29 +480,40 @@ JSON object on stdout, so agents never parse text or stderr.
   done_when, verify, touches, placeholder, ready, blocked_by, file, line}`.
 - `next`: `{source, item, ready (with --all), in_progress, claimed, waiting:
   [{id, title, blocked_by}], cycles}`, plus `parallel` and `held_back: [{id,
-  overlaps, touches_listed}]` with `--parallel`. `item` is `null` when nothing
-  is ready. `source` is where statuses were read: `working tree`, or the
-  integration branch's ref (section 17).
+  overlaps, touches_listed}]` with `--parallel`. `item` is the first ready
+  item that can start now, so `start` never refuses it for overlap; it is
+  `null` when none can, and then `reason` says why: `overlap` (items are ready
+  but may touch running work's files), `waiting` (on dependencies),
+  `in_progress` (everything left is running, claimed or blocked) or `complete`.
+  `source` is where statuses were read: `working tree`, or the integration
+  branch's ref (section 17).
 - `show`: `{id, kind, file, anchor, line, text, referenced_by}`, plus `item`
   for a backlog ID. `referenced_by` lists the docs that mention the ID: the
   ones to revisit when it changes.
 - `start`: `{id, previous_status, status, forced, claim, item}`, plus
-  `commands: {claude, codex}` for a claim. A claim is `{id, branch, remote,
-  worktree, agent, started, finished}`.
-- `claims`: `{base, claims}`. `release`: `{id, deleted_branches,
+  `commands: {claude, codex, cwd, argv}` for a claim (`claude` and `codex` are
+  shell lines quoted for the platform; `argv` runs without a shell), and
+  `claim_held_here: true` when the claim is already this checkout's. A claim is
+  `{id, branch, remote, worktree, agent, started, finished, orphaned}`;
+  `orphaned` means its ID isn't in the integration branch's backlog.
+- `claims`: `{base, claims}`. `release`: `{id, released, deleted_branches,
   removed_worktree, deleted_remote_branches, remote_branches}`. `renumber`: `{dry_run, renumbered:
   [{from, to}], files}`.
 - `done`: `{id, previous_status, status, checks: [{name, command, exit_code,
   passed, output}], checks_skipped, manual_verify, now_ready, merge_needed}`. Checks are the
   item's `Verify` command, then `commands.test` and `commands.lint`, run from
   the repo root; they run only in a scaffolded repo, and `--no-verify` skips
-  them. A `Verify` that isn't a command (`manual: ...`, a test ID) is returned
-  as `manual_verify` for a person to check.
+  them. `Verify` is run only when its whole value is one backticked command;
+  anything else (`manual: ...`, a test ID, prose that mentions a command) is
+  never run, and is returned as `manual_verify` for a person to check.
 - An error is `{"schema": 1, "ok": false, "error": {"code", "message", ...}}`.
   Codes: `not_found`, `placeholder`, `not_placeholder`, `bad_status`,
   `already_started`, `already_done`, `blocked` (with `blocked_by`), `claimed`
-  (with `claim`), `overlap` (with `overlaps`, `touches_listed`), `which_item`, `check_failed` (with `checks`), `no_package`,
-  `no_base`, `not_git`, `worktree_exists`, `git_error`.
+  (with `claim`), `overlap` (with `overlaps`, `touches_listed`,
+  `overlapping_touches`), `which_item`, `check_failed` (with `checks`),
+  `no_status`, `duplicate_id`, `bad_backlog`, `no_package`, `no_base`,
+  `not_git`, `not_integration_branch`, `worktree_exists`, `locked`,
+  `git_error`, `internal_error`.
 
 Exit codes, the same with or without `--json`:
 
@@ -535,11 +547,14 @@ or Codex in each; it never launches an agent itself.
   integration branch. Push the branch to make the claim visible to other
   machines and cloud agents. `its next` never offers a claimed item, and
   `its start` refuses one.
-- **A lock makes claiming atomic on one machine.** While it checks for a claim
-  and creates the branch, `its start` holds `claims.lock` in
-  `$(git rev-parse --git-common-dir)/its/`, the directory every worktree
-  shares; `claims.json` there records each claim's worktree, agent and start
-  time. A lock older than 30 seconds is treated as left by a dead process.
+- **A lock makes claiming atomic on one machine.** While it checks
+  readiness, claims and overlap and creates the branch, `its start` holds an
+  OS file lock on `claims.lock` in `$(git rev-parse --git-common-dir)/its/`,
+  the directory every worktree shares. Every backlog status write holds the
+  same lock, so concurrent `start` and `done` never lose a change. The OS frees
+  the lock when its holder exits, even after a crash. `claims.json` there
+  records each claim's worktree, agent and start time. Outside git the lock
+  lives in the system temp folder.
 - **`in-progress` isn't committed on claim branches.** The branch already says
   so. The item's `done` is committed with the work (`its done` with no ID uses
   the item of the claim branch that is checked out).
@@ -555,18 +570,25 @@ or Codex in each; it never launches an agent itself.
   entries overlap when they could name the same file: equal paths, a directory
   and a path inside it, or a glob and anything under its fixed prefix. An item
   without `Touches` could touch anything, so it never runs alongside another
-  item; it can start only when nothing else is running.
+  item; it can start only when nothing else is running. A claim branch for an
+  ID that isn't in the integration branch's backlog is reported as orphaned
+  and blocks nothing. Only permanent IDs can be claimed.
 - **Releasing.** `its claims` lists claims and marks finished ones;
-  `its release <ID>` removes the claim's worktree and deletes its local branch
-  (`--force` if the worktree has changes or the branch isn't merged).
-  `--remote` also deletes its pushed branches on every remote; one that isn't
-  merged into the integration branch needs `--force` too.
+  `its release <ID>` removes the claim's worktree and deletes its local branch.
+  It checks everything first, so a refusal changes nothing: without `--force`
+  the worktree must have no uncommitted changes, and the branch must be merged
+  into the integration branch or the item done there. It refuses to remove the
+  folder you are in. `--remote` also deletes its pushed branches on every
+  remote: each is fetched first and deleted with a lease, so commits someone
+  else pushed are never deleted unseen.
 - **Renumbering.** Branches propose items with placeholder IDs
   (`T-new-<name>`). After merging, run `its renumber` on the integration branch:
   each placeholder that isn't dropped gets `T-<n>.<next free>`, where `n` is its
   milestone (`M3` gives `T-3.x`) or, without one, the milestone of the last
   numbered item above it. Every mention in the planning docs is rewritten and
-  the docs are re-linked. `--dry-run` shows the new IDs first.
+  the docs are re-linked. `--dry-run` shows the new IDs first. It refuses to
+  run off the integration branch (unless `--force`) or when a placeholder is
+  proposed twice, and never reuses a number still mentioned in any doc.
 - **Test the merged result.** A clean merge of two branches can still break the
   build; run the test command on the integration branch after each merge.
 

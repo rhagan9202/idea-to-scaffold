@@ -30,7 +30,7 @@ If you are not sure it is only a clarification, treat it as a plan change.
 Anything that adds, removes or changes the meaning of an ID, or changes scope, priority or architecture.
 
 1. State the problem in one or two sentences, citing the IDs involved (`FR-012 conflicts with ADR-0002`).
-2. Edit the affected planning docs on a branch. Never renumber IDs. Mark removed items with strikethrough and a reason.
+2. Edit the affected planning docs on a branch. Never renumber permanent IDs (`its renumber` only gives placeholder `T-new-...` items their permanent ID). Mark removed items with strikethrough and a reason.
 3. Set the edited docs' `status` to `review` and bump `version`. Update the docs that mention each changed ID:
    `its show <ID>` lists them (without `its`, the nav block's **Referenced by** line lists every doc that refers to this one).
 4. Run `its link .` and `its validate .` if available, so links, backlinks and the planning index match.

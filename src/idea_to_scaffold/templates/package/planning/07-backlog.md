@@ -13,7 +13,7 @@ The backlog is the **only** list of work items for this project. Items are in pr
 item whose dependencies are `done` is next.
 
 **Rules**
-- One `### T-n.m — Title` heading per item. IDs are never reused or renumbered.
+- One `### T-n.m — Title` heading per item. Permanent IDs are never reused or renumbered; only placeholder IDs (`T-new-...`) get renumbered, by `its renumber`.
 - `Status` is one of: `proposed` (suggested, not agreed), `todo`, `in-progress`, `blocked`, `done`, `dropped`.
 - `Milestone` is a milestone from the [project plan](06-project-plan.md), or `—` if unscheduled.
 - `Satisfies` lists the requirements the item delivers. Agents may add new items with `Status: proposed`

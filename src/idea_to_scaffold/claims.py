@@ -4,9 +4,10 @@ An item is claimed when a local or remote branch named ``its/<ID>`` or ``its/<ID
 travel to every place agents run (other worktrees, other machines once pushed, cloud agents), so they need no extra
 state store, and an abandoned claim is just a branch to delete.
 
-On one machine, ``its start`` takes a short lock in git's shared directory (``$(git rev-parse --git-common-dir)/its/``)
-while it checks for an existing claim and creates the branch, so two agents starting at the same moment can't both
-win. The same directory keeps ``claims.json``: who started each claim, where its worktree is, and when.
+On one machine, ``its start`` holds an OS file lock in git's shared directory
+(``$(git rev-parse --git-common-dir)/its/``, see ``locking.py``) while it checks readiness, claims and overlap and
+creates the branch, so two agents starting at the same moment can't both win. The same directory keeps
+``claims.json``: who started each claim, where its worktree is, and when.
 
 Readiness comes from the integration branch (``main`` unless ``integration_branch`` in ``package.yaml`` says
 otherwise): an item's dependency counts as done when it is done there, that is, merged.
@@ -17,18 +18,17 @@ import json
 import os
 import re
 import subprocess
-import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .ids import TASK_PATTERN
+from . import locking
 
 BRANCH_PREFIX = "its/"
-BRANCH_RE = re.compile(rf"^(?:refs/heads/|refs/remotes/[^/]+/)?its/({TASK_PATTERN})(?:-[a-z0-9-]*)?$")
-LOCK_STALE_SECONDS = 30
-LOCK_WAIT_SECONDS = 10
+# Only permanent IDs can be claimed: placeholders (T-new-...) are renumbered before anyone starts them, and a
+# placeholder pattern would also swallow the slug (`its/T-new-foo-store` would read as the ID `T-new-foo-store`).
+BRANCH_RE = re.compile(r"^(?:refs/heads/|refs/remotes/[^/]+/)?its/(T-\d+\.\d+)(?:-[a-z0-9-]*)?$")
 
 
 class GitError(Exception):
@@ -70,10 +70,19 @@ def resolve_base(cwd: Path, base: str) -> str | None:
 
 
 def read_at(cwd: Path, ref: str, path: Path) -> str | None:
-    """A file's content at a ref, or None if it isn't there."""
-    rel = path.resolve().relative_to(toplevel(cwd).resolve()).as_posix()
-    proc = subprocess.run(["git", "show", f"{ref}:{rel}"], cwd=cwd, capture_output=True)
-    return proc.stdout.decode("utf-8") if proc.returncode == 0 else None
+    """A file's content at a ref, or None if it isn't there (or isn't text).
+
+    The path is given to git relative to the file's own folder (`ref:./name`), so no path arithmetic is needed and
+    symlinks and Windows short names or long-path prefixes can't make it fail."""
+    if not path.parent.is_dir():
+        return None
+    proc = subprocess.run(["git", "show", f"{ref}:./{path.name}"], cwd=path.parent, capture_output=True)
+    if proc.returncode != 0:
+        return None
+    try:
+        return proc.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def item_of_branch(branch: str | None) -> str | None:
@@ -92,39 +101,44 @@ def branch_name(ident: str, title: str) -> str:
 # --- the claims store ------------------------------------------------------------------------------------------
 
 def _store_dir(cwd: Path) -> Path:
-    common = Path(git(cwd, "rev-parse", "--git-common-dir"))
-    if not common.is_absolute():
-        common = (cwd / common).resolve()
-    return common / "its"
+    store = locking.git_store_dir(cwd)
+    if store is None:
+        raise GitError(f"{cwd} is not in a git repository")
+    return store
 
 
 @contextmanager
-def claims_lock(cwd: Path):
-    """An exclusive lock shared by every worktree of the repository."""
+def claims_lock(cwd: Path, wait: float | None = None):
+    """The repository's lock (shared by every worktree), yielding the claims store folder."""
     store = _store_dir(cwd)
-    store.mkdir(parents=True, exist_ok=True)
-    lock = store / "claims.lock"
-    deadline = time.monotonic() + LOCK_WAIT_SECONDS
-    while True:
-        try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
-            break
-        except FileExistsError:
-            try:
-                if time.time() - lock.stat().st_mtime > LOCK_STALE_SECONDS:
-                    lock.unlink(missing_ok=True)  # left behind by a process that died
-                    continue
-            except FileNotFoundError:
-                continue
-            if time.monotonic() > deadline:
-                raise GitError(f"another `its` command holds {lock}; try again, or delete it if nothing is running") from None
-            time.sleep(0.05)
     try:
-        yield store
-    finally:
-        lock.unlink(missing_ok=True)
+        with locking.locked(store / locking.LOCK_NAME, wait):
+            yield store
+    except locking.LockTimeout as exc:
+        raise GitError(str(exc)) from None
+
+
+def main_worktree(cwd: Path) -> Path:
+    """The repository's main worktree: a safe place to run git from when removing another worktree."""
+    out = git(cwd, "worktree", "list", "--porcelain", check=False)
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            return Path(line.removeprefix("worktree "))
+    return toplevel(cwd)
+
+
+def claim_of_worktree(cwd: Path) -> str | None:
+    """The item whose claim worktree `cwd` is in, from the claims store (works on a detached HEAD too)."""
+    try:
+        top = toplevel(cwd).resolve()
+        data = _load_store(_store_dir(cwd))
+    except GitError:
+        return None
+    for ident, entry in data.items():
+        worktree = entry.get("worktree") if isinstance(entry, dict) else None
+        if worktree and Path(worktree).resolve() == top:
+            return ident
+    return None
 
 
 def _load_store(store: Path) -> dict[str, dict]:
@@ -150,17 +164,21 @@ class Claim:
     agent: str | None = None
     started: str | None = None
     finished: bool = False   # the item is done (or dropped) on the integration branch, so the claim can go
+    orphaned: bool = False   # the item isn't in the integration branch's backlog (deleted, renumbered or a typo)
 
     def to_dict(self) -> dict:
         return {
             "id": self.id, "branch": self.branch, "remote": self.remote, "worktree": self.worktree,
-            "agent": self.agent, "started": self.started, "finished": self.finished,
+            "agent": self.agent, "started": self.started, "finished": self.finished, "orphaned": self.orphaned,
         }
 
 
-def list_claims(cwd: Path, closed: set[str] | frozenset[str] = frozenset()) -> list[Claim]:
+def list_claims(
+    cwd: Path, closed: set[str] | frozenset[str] = frozenset(), known: set[str] | frozenset[str] | None = None,
+) -> list[Claim]:
     """Every claim branch, local and remote, with what the local store knows about it. `closed` are the items that
-    are done or dropped on the integration branch: their claims are marked finished."""
+    are done or dropped on the integration branch: their claims are marked finished. With `known` (every ID in that
+    backlog), a claim for any other ID is marked orphaned."""
     refs = git(cwd, "for-each-ref", "--format=%(refname)", "refs/heads/its/", "refs/remotes/", check=False)
     store = _load_store(_store_dir(cwd))
     local: dict[str, Claim] = {}
@@ -171,7 +189,8 @@ def list_claims(cwd: Path, closed: set[str] | frozenset[str] = frozenset()) -> l
             continue
         is_remote = ref.startswith("refs/remotes/")
         short = ref.removeprefix("refs/heads/").removeprefix("refs/remotes/")
-        claim = Claim(ident, short, is_remote, finished=ident in closed)
+        claim = Claim(ident, short, is_remote, finished=ident in closed,
+                      orphaned=known is not None and ident not in known)
         entry = store.get(ident) or {}
         if not is_remote and entry.get("branch") == short:
             claim.worktree, claim.agent, claim.started = entry.get("worktree"), entry.get("agent"), entry.get("started")
@@ -197,11 +216,11 @@ def create_claim(
         if taken:
             raise ClaimTaken(taken[0])
         if worktree is not None:
-            git(cwd, "worktree", "add", "-b", branch, str(worktree), base_ref)
+            git(cwd, "worktree", "add", "--no-track", "-b", branch, str(worktree), base_ref)
         elif switch:
-            git(cwd, "switch", "-c", branch, base_ref)
+            git(cwd, "switch", "--no-track", "-c", branch, base_ref)
         else:
-            git(cwd, "branch", branch, base_ref)
+            git(cwd, "branch", "--no-track", branch, base_ref)
         data = _load_store(store)
         started = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         data[ident] = {"branch": branch, "worktree": str(worktree) if worktree else None, "agent": agent,
@@ -231,49 +250,101 @@ def _merged(cwd: Path, ref: str, base_ref: str | None) -> bool:
                           capture_output=True).returncode == 0
 
 
+def _refresh_remote(cwd: Path, name: str) -> str | None:
+    """Fetch one pushed claim branch (`origin/its/T-2.1-store`) so we judge what is really on the remote. Returns its
+    tip, or None if it is gone from the remote (its stale tracking ref is removed)."""
+    remote_name, branch = name.split("/", 1)
+    proc = subprocess.run(
+        ["git", "fetch", "--quiet", remote_name, f"+refs/heads/{branch}:refs/remotes/{name}"],
+        cwd=cwd, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        if "couldn't find remote ref" in proc.stderr.lower():
+            git(cwd, "update-ref", "-d", f"refs/remotes/{name}", check=False)
+            return None
+        raise GitError(f"couldn't fetch {name} to check it before deleting it: {proc.stderr.strip()}")
+    return git(cwd, "rev-parse", f"refs/remotes/{name}")
+
+
 def release_claim(
     cwd: Path, ident: str, *, force: bool = False, remote: bool = False, base_ref: str | None = None,
+    closed: set[str] | frozenset[str] = frozenset(),
 ) -> dict:
-    """Remove a claim: its worktree (if it is clean, or with force) and its local branch. With `remote`, also delete
-    its pushed branches; one that isn't merged into `base_ref` is only deleted with force."""
-    with claims_lock(cwd) as store:
+    """Remove a claim: its worktree and its local branch. With `remote`, also delete its pushed branches.
+
+    Everything is checked before anything changes, so a refusal leaves the claim as it was. Without `force`, a claim
+    is only released if losing it loses no work: its worktree has no uncommitted changes, and its branches are merged
+    into `base_ref` or its item is done there (`closed`, which also covers squash merges). Pushed branches are fetched
+    first and deleted with a lease, so commits someone pushed since are never deleted unseen.
+    """
+    run_dir = main_worktree(cwd)
+    deletions: list[tuple[str, str]] = []
+    with claims_lock(run_dir) as store:
         data = _load_store(store)
         entry = data.get(ident) or {}
-        local = [c for c in list_claims(cwd) if c.id == ident and not c.remote]
-        pushed = remote_claim_branches(cwd, ident)
+        local = [c for c in list_claims(run_dir) if c.id == ident and not c.remote]
+        pushed = remote_claim_branches(run_dir, ident)
+        if remote:
+            tips = {name: _refresh_remote(run_dir, name) for name in pushed}
+            pushed = [name for name, tip in tips.items() if tip is not None]
         if not local and not entry and not (remote and pushed):
+            if force:
+                return {"id": ident, "deleted_branches": [], "removed_worktree": None, "deleted_remote_branches": [],
+                        "remote_branches": remote_claim_branches(run_dir, ident), "released": False}
             hint = f" (it has pushed branches: {', '.join(pushed)}; add --remote)" if pushed else ""
             raise GitError(f"{ident} has no local claim{hint}")
-        if remote and not force:
-            unmerged = [b for b in pushed if not _merged(cwd, f"refs/remotes/{b}", base_ref)]
-            if unmerged:
-                raise GitError(f"{', '.join(unmerged)} has work that isn't merged; add --force to delete it anyway")
-        removed_worktree = None
+
         worktree = entry.get("worktree")
-        if worktree and Path(worktree).exists():
-            git(cwd, "worktree", "remove", *(["--force"] if force else []), worktree)
-            removed_worktree = worktree
+        wt = Path(worktree) if worktree and Path(worktree).exists() else None
+        if wt is not None:
+            here = Path.cwd().resolve()
+            if here == wt.resolve() or wt.resolve() in here.parents:
+                raise GitError(f"you are inside {wt}, the worktree this would remove; run it from another folder")
+        checked_out = current_branch(run_dir)
+        for claim in local:
+            if claim.branch == checked_out:
+                raise GitError(f"{claim.branch} is checked out in {run_dir}; switch to another branch first")
+        if not force:
+            if wt is not None and git(wt, "status", "--porcelain", check=False):
+                raise GitError(f"{wt} has uncommitted changes; commit them, or add --force to discard them")
+            if ident not in closed:
+                unmerged = [c.branch for c in local if not _merged(run_dir, f"refs/heads/{c.branch}", base_ref)]
+                if remote:
+                    unmerged += [b for b in pushed if not _merged(run_dir, f"refs/remotes/{b}", base_ref)]
+                if unmerged:
+                    raise GitError(f"{', '.join(unmerged)} has work that isn't merged; "
+                                   "add --force to delete it anyway")
+
+        removed_worktree = None
+        if wt is not None:
+            git(run_dir, "worktree", "remove", *(["--force"] if force else []), str(wt))
+            removed_worktree = str(wt)
+        elif worktree:
+            git(run_dir, "worktree", "prune", check=False)  # deleted by hand: forget it
         deleted = []
         for claim in local:
-            if current_branch(cwd) == claim.branch:
-                raise GitError(f"{claim.branch} is checked out here; switch to another branch first")
-            git(cwd, "branch", "-D" if force else "-d", claim.branch)
+            git(run_dir, "branch", "-D", claim.branch)  # merged-ness was checked above, against base_ref
             deleted.append(claim.branch)
-        deleted_remote = []
         if remote:
-            for name in pushed:
-                remote_name, branch = name.split("/", 1)
-                git(cwd, "push", remote_name, "--delete", branch)
-                deleted_remote.append(name)
+            deletions = [(name, git(run_dir, "rev-parse", f"refs/remotes/{name}")) for name in pushed]
         data.pop(ident, None)
         _save_store(store, data)
+
+    # Network pushes happen outside the lock, so a slow remote never holds up other agents.
+    deleted_remote = []
+    for name, tip in deletions:
+        remote_name, branch = name.split("/", 1)
+        git(run_dir, "push", "--quiet", f"--force-with-lease=refs/heads/{branch}:{tip}", remote_name,
+            f":refs/heads/{branch}")
+        deleted_remote.append(name)
     return {"id": ident, "deleted_branches": deleted, "removed_worktree": removed_worktree,
-            "deleted_remote_branches": deleted_remote, "remote_branches": remote_claim_branches(cwd, ident)}
+            "deleted_remote_branches": deleted_remote, "remote_branches": remote_claim_branches(run_dir, ident),
+            "released": True}
 
 
 # --- Touches overlap ------------------------------------------------------------------------------------------
 
-GLOB_CHARS = re.compile(r"[*?\[]")
+GLOB_CHARS = re.compile(r"[*?\[{]")
 
 
 def _norm(path: str) -> str:

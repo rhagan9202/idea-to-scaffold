@@ -59,7 +59,7 @@ def test_force_prompt_declined(plan: Path, tmp_path: Path, monkeypatch):
 def test_handoff_names_no_item_unless_the_plan_does(plan: Path, tmp_path: Path):
     repo = scaffold(plan, tmp_path / "out", git=False).path
     handoff = (repo / "HANDOFF.md").read_text()
-    assert "T-1.1" not in handoff and "run `its next`" in handoff  # HANDOFF names no item, so it can't go stale
+    assert "T-1.1" not in handoff and "run its next to pick" in handoff  # HANDOFF names no item, so it can't go stale
     manifest = plan / "package.yaml"
     manifest.write_text(manifest.read_text() + 'first_task: "T-2.2"\n')
     repo = scaffold(plan, tmp_path / "out2", git=False).path

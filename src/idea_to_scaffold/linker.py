@@ -337,6 +337,20 @@ def _index_md(pkg: Package, docs: dict[str, Doc], index: dict[str, Target]) -> s
     return "\n".join(out)
 
 
+def _read_raw(path: Path) -> str | None:
+    """A file's text with its line endings as they are on disk."""
+    try:
+        with open(path, encoding="utf-8", newline="") as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return None
+
+
+def _write_raw(path: Path, text: str) -> None:
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+
+
 def link_package(pkg: Package, *, check: bool = False) -> list[str]:
     """Link the package in place. Returns the logical paths that changed (or would change, with check=True)."""
     docs = _load_docs(pkg)
@@ -349,10 +363,13 @@ def link_package(pkg: Package, *, check: bool = False) -> list[str]:
         if not body.endswith("\n"):
             body += "\n"
         new = doc.front + body
-        if new != doc.path.read_text(encoding="utf-8"):
+        raw = _read_raw(doc.path)
+        if raw is not None and "\r\n" in raw:  # keep a CRLF file CRLF, so a link change isn't a whole-file diff
+            new = new.replace("\r\n", "\n").replace("\n", "\r\n")
+        if new != raw:
             changed.append(rel)
             if not check:
-                doc.path.write_text(new, encoding="utf-8")
+                _write_raw(doc.path, new)
     readme = pkg.path_of("planning/README.md")
     content = _index_md(pkg, docs, index)
     if not readme.is_file() or readme.read_text(encoding="utf-8") != content:

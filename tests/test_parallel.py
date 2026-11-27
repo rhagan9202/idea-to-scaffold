@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
-import time
+import sys
 from pathlib import Path
 
 import pytest
@@ -155,16 +154,22 @@ def test_release_removes_the_worktree_and_branch(repo: Path, capsys):
     assert run_json(capsys, "next", str(repo))[1]["item"]["id"] == "T-1.1"
 
 
-def test_the_lock_serialises_claims_and_recovers_when_stale(repo: Path, monkeypatch):
-    monkeypatch.setattr(cl, "LOCK_WAIT_SECONDS", 0.2)
-    with cl.claims_lock(repo) as store:
-        with pytest.raises(cl.GitError, match="holds"):
-            with cl.claims_lock(repo):
+def test_the_lock_is_exclusive_and_freed_when_its_holder_dies(repo: Path):
+    script = (
+        "import sys, time; from pathlib import Path; from idea_to_scaffold import claims as cl\n"
+        "with cl.claims_lock(Path(sys.argv[1])):\n    print('held', flush=True); time.sleep(60)\n"
+    )
+    holder = subprocess.Popen([sys.executable, "-c", script, str(repo)], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        with pytest.raises(cl.GitError, match="still running"):
+            with cl.claims_lock(repo, wait=0.2):
                 pass
-        lock = store / "claims.lock"
-        old = time.time() - cl.LOCK_STALE_SECONDS - 5
-        os.utime(lock, (old, old))
-        with cl.claims_lock(repo):  # a lock left by a dead process is taken over
+    finally:
+        holder.kill()
+        holder.wait()
+    with cl.claims_lock(repo, wait=5):  # the OS released it when the holder died: no stale-lock rule needed
+        with cl.claims_lock(repo, wait=0):  # and it is re-entrant within one thread
             pass
 
 

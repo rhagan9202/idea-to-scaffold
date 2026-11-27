@@ -21,12 +21,14 @@ from .ids import (
     strip_links,
     strip_strike,
 )
+from .locking import LockTimeout, package_lock
 from .package import BACKLOG_STATUSES, Package
 
 BACKLOG = "planning/07-backlog.md"
 ITEM_HEADING_RE = re.compile(r"^(T-new-[a-z0-9]+(?:-[a-z0-9]+)*|T-\d+\.\d+)(?![\w-])\s*(?:[—–:-]+\s*)?(.*)$")
 TRAILING_COMMENT_RE = re.compile(r"\s+#\s.*$")
 NO_VALUE = {"", "—", "-", "–", "none", "n/a"}
+VERIFY_COMMAND_RE = re.compile(r"`([^`]+)`")
 
 
 class BacklogError(Exception):
@@ -84,9 +86,14 @@ class BacklogItem:
 
     @property
     def verify_command(self) -> str | None:
-        """The command in the Verify field, if it has one in backticks."""
-        m = re.search(r"`([^`]+)`", self.verify)
-        return m.group(1).strip() if m else None
+        """The command `its done` runs: only when the whole Verify value is one backticked span, e.g.
+        `` `uv run pytest tests/test_store.py` ``. A `manual:` note, or prose that merely mentions a command in
+        backticks, is never run."""
+        value = TRAILING_COMMENT_RE.sub("", self.verify).strip()
+        if value.lower().startswith("manual"):
+            return None
+        m = VERIFY_COMMAND_RE.fullmatch(value)
+        return m.group(1).strip() if m and m.group(1).strip() else None
 
     @property
     def touches(self) -> list[str]:
@@ -94,7 +101,7 @@ class BacklogItem:
         value = self.get("Touches")
         if value.strip().lower() in NO_VALUE:
             return []
-        return [p.strip().strip("`").strip() for p in value.split(",") if p.strip().strip("`").strip()]
+        return [p.strip().strip("`").strip() for p in split_outside_braces(value) if p.strip().strip("`").strip()]
 
     @property
     def placeholder(self) -> bool:
@@ -113,6 +120,23 @@ class BacklogItem:
             "touches": self.touches,
             "placeholder": self.placeholder,
         }
+
+
+def split_outside_braces(value: str) -> list[str]:
+    """Split a Touches list on commas, keeping brace globs such as `src/{a,b}.py` whole."""
+    parts, depth, current = [], 0, []
+    for ch in value:
+        if ch == "{":
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    parts.append("".join(current))
+    return parts
 
 
 def _read(path: Path) -> str:
@@ -196,16 +220,25 @@ def blocked_by(item: BacklogItem, items: list[BacklogItem]) -> list[str]:
 
 def find_cycles(items: list[BacklogItem]) -> list[list[str]]:
     """Dependency cycles, each as a list of IDs (`[A, B, A]`). A self-dependency is a cycle of one."""
-    graph = {i.id: [d for d in i.depends_on] for i in items}
+    graph: dict[str, list[str]] = {}
+    for i in items:
+        graph.setdefault(i.id, []).extend(i.depends_on)
     cycles: list[list[str]] = []
     seen_cycles: set[frozenset[str]] = set()
     state: dict[str, int] = {}  # 1 = on the stack, 2 = finished
-    stack: list[str] = []
-
-    def visit(node: str) -> None:
-        state[node] = 1
-        stack.append(node)
-        for dep in graph.get(node, []):
+    # Iterative depth-first search, so a long dependency chain can't hit Python's recursion limit.
+    for root in graph:
+        if state.get(root) is not None:
+            continue
+        stack: list[str] = [root]
+        todo: list[list[str]] = [list(graph[root])]
+        state[root] = 1
+        while stack:
+            if not todo[-1]:
+                state[stack.pop()] = 2
+                todo.pop()
+                continue
+            dep = todo[-1].pop(0)
             if dep not in graph:
                 continue
             if state.get(dep) == 1:
@@ -215,13 +248,9 @@ def find_cycles(items: list[BacklogItem]) -> list[list[str]]:
                     seen_cycles.add(key)
                     cycles.append(cycle)
             elif state.get(dep) is None:
-                visit(dep)
-        stack.pop()
-        state[node] = 2
-
-    for ident in graph:
-        if state.get(ident) is None:
-            visit(ident)
+                state[dep] = 1
+                stack.append(dep)
+                todo.append(list(graph[dep]))
     return cycles
 
 
@@ -246,10 +275,21 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def set_field(pkg: Package, item_id: str, name: str, value: str) -> str:
-    """Replace one field's value in place, keeping the rest of the file byte for byte. Returns the old value."""
+    """Replace one field's value in place, keeping the rest of the file byte for byte. Returns the old value.
+
+    The read, change and write happen under the package lock, so two commands changing different items at the same
+    moment can't lose either change."""
     path = pkg.path_of(BACKLOG)
     if not path.is_file():
         raise BacklogError(f"{BACKLOG} not found")
+    try:
+        with package_lock(pkg.root):
+            return _set_field(path, item_id, name, value)
+    except LockTimeout as exc:
+        raise BacklogError(str(exc)) from None
+
+
+def _set_field(path: Path, item_id: str, name: str, value: str) -> str:
     text = _read(path)
     items = [i for i in parse_backlog(text) if i.id == item_id]
     if not items:

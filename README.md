@@ -117,9 +117,9 @@ its scaffold /tmp/streak-plan --out /tmp
 | `its show ID [DIR] [--json]` | Where any ID is defined, its text, and the docs that mention it |
 | `its start ID [DIR] [--force] [--branch \| --worktree [PATH]] [--agent NAME] [--allow-overlap] [--json]` | Set a ready `todo` item `in-progress`, or with `--branch`/`--worktree` claim it with a branch instead. Exit 4 if a dependency isn't done, 6 if it may overlap running work |
 | `its claims [DIR] [--json]` | List claim branches, local and remote |
-| `its release ID [DIR] [--remote] [--force] [--json]` | Remove a claim's worktree and local branch; `--remote` also deletes its pushed branches |
-| `its renumber [ID ...] [--dir DIR] [--dry-run] [--json]` | Give placeholder items permanent `T-n.m` IDs and update every mention |
-| `its done [ID] [DIR] [--no-verify] [--json]` | Run the item's Verify command and the test and lint commands (in a repo), then set it `done`. Exit 5 if a check fails. With no ID, the only in-progress item |
+| `its release ID [DIR] [--remote] [--force] [--json]` | Remove a claim's worktree and local branch; `--remote` also deletes its pushed branches (fetched first, deleted with a lease). Refuses, changing nothing, if work would be lost, unless `--force` |
+| `its renumber [ID ...] [--dir DIR] [--dry-run] [--force] [--json]` | Give placeholder items permanent `T-n.m` IDs and update every mention. Runs on the integration branch only, unless `--force` |
+| `its done [ID] [DIR] [--no-verify] [--json]` | Run the item's Verify command (only when Verify is a single backticked command) and the test and lint commands (in a repo), then set it `done`. Exit 5 if a check fails. With no ID, the item of this claim branch or worktree, else the only in-progress item |
 | `its scaffold DIR [--out PARENT] [--github [OWNER/NAME]] [--no-git] [--force [--yes]] [--allow-unready]` | Build the repo from a package or an existing scaffolded repo. `--force` asks before deleting the target. Stacks: `python`, plus `generic` (with a warning) for anything else |
 
 ## Repository layout
