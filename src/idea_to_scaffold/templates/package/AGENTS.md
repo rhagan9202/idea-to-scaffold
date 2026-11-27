@@ -49,7 +49,7 @@ docs/playbooks/ repeatable procedures for agents
 3. Implement in small steps with tests that prove each acceptance criterion. Name each test after the criterion it proves, by requirement and position: `test_fr_001_ac2_rejects_duplicates` for the second criterion of FR-001 (`its validate --trace` reports Must criteria that no test names).
 4. Run `its done <ID>`: it runs the item's **Verify** command (as planned on `main`) and the test and lint commands, and sets the item `done` only if they pass. It refuses a change that deletes a test, removes assertions, adds a skip, edits the item's own Verify, or changes files outside its **Touches**. Optionally, ask a second agent to check the change: `its review <ID>` prints the prompt. Commit in the same change, using `<type>(<scope>): <summary> [T-n.m]` with `Refs: FR-xxx` in the body.
 5. Found more work? Run `its propose "Title" --satisfies FR-xxx` (it writes `docs/planning/proposals/T-new-<name>.md`). Without `its`, add a new item with a placeholder ID (`### T-new-<short-name> — Title`) and `Status: proposed`. Don't pick the next number yourself, and don't keep TODO lists anywhere else.
-6. Stuck, or the item can't be done as written? Run `its block <ID> --reason "..."` and stop. Never weaken or delete a test to get past a check.
+6. Stuck, or the item can't be done as written? Run `its block <ID> --reason "..."` and stop. Never weaken or delete a test to get past a check, and never change `tests/acceptance/`: those held-out tests belong to the people who run `its land`.
 7. If you edited anything in `docs/planning/`, refresh the links (see *Keeping docs in sync*).
 
 ### Working in parallel

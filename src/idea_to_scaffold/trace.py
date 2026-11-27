@@ -18,33 +18,50 @@ from .gate import is_test_path
 from .ids import ID_RE, field_value, id_kind, sections, strip_links, strip_strike
 from .package import Package
 
-REF_RE = re.compile(r"(?<![A-Za-z0-9])fr[-_ ]?(\d{3,})(?:\s*[-_./ ]?\s*ac[-_ ]?(\d+))?(?![0-9])", re.I)
-CRITERIA_RE = re.compile(r"^\s*(?:#+\s*|\*\*)?acceptance criteria\b", re.I)
-BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$")
+REF_RE = re.compile(
+    r"(?<![A-Za-z0-9])fr[-_ ]?(\d{3,})(?:\s*[-_./ ,(]?\s*ac[-_ ]?(\d+))?(?![0-9A-Za-z])", re.I)
+CRITERIA_RE = re.compile(r"^\s*(?:[-*+]\s+)?(?:#+\s*|\*\*)?acceptance criteria\b", re.I)
+BULLET_RE = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$")
 LABEL_RE = re.compile(r"^(?:\*\*)?AC[-_ ]?(\d+)(?:\*\*)?\s*[:.)-]?\s*(?:\*\*)?\s*", re.I)
+BOLD_LABEL_RE = re.compile(r"^\s*(?:[-*+]\s+)?\*\*[^*]+\*\*")  # the next field, e.g. **Out of scope**
 MAX_BYTES = 1_000_000
 
 
+def _indent(text: str) -> int:
+    return len(text.expandtabs(4))
+
+
 def criteria(section: str) -> list[tuple[int, str]]:
-    """(number, text) for each acceptance criterion in a requirement's section."""
+    """(number, text) for each acceptance criterion in a requirement's section.
+
+    Only bullets at the first criterion's indentation count: deeper bullets are details of the one above. The list
+    ends at the next heading or bold label (`**Out of scope**`), or at an unindented paragraph after it."""
     out: list[tuple[int, str]] = []
     inside = False
+    level: int | None = None
     for line in section.split("\n"):
-        if CRITERIA_RE.match(line):
-            inside = True
-            continue
         if not inside:
+            if CRITERIA_RE.match(line):
+                inside = True
             continue
         m = BULLET_RE.match(line)
-        if m:
-            text = m.group(1).strip()
+        if m and (level is None or _indent(m.group(1)) <= level):
+            if level is not None and _indent(m.group(1)) < level:
+                break  # back out to an enclosing list
+            level = _indent(m.group(1))
+            text = m.group(2).strip()
             label = LABEL_RE.match(text)
+            used = {n for n, _ in out}
             number = int(label.group(1)) if label else len(out) + 1
+            if not label and number in used:  # a label earlier took this position's number
+                number = max(used) + 1
             out.append((number, strip_links(text[label.end():] if label else text).replace("**", "").strip()))
+        elif m:
+            continue  # a sub-bullet: part of the criterion above
+        elif line.lstrip().startswith("#") or (line.strip() and BOLD_LABEL_RE.match(line)):
+            break
         elif out and line.strip() and not line.startswith((" ", "\t")):
             break  # the list ended
-        elif line.lstrip().startswith("#"):
-            break
     return out
 
 

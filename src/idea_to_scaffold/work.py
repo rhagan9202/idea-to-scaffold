@@ -12,7 +12,9 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -52,7 +54,8 @@ EXIT_CHECK_FAILED = 5
 EXIT_OVERLAP = 6
 EXIT_NOT_LANDED = 7
 EXIT_DRIFT = 8
-EXIT_COMPLETE = 9  # `next`: nothing left, every item is done
+EXIT_COMPLETE = 9
+EXIT_AUDIT_MISSED = 10  # gate-audit: the gate missed a seeded cheat  # `next`: nothing left, every item is done
 
 OUTPUT_TAIL = 40  # lines of a failed check's output to keep
 
@@ -554,9 +557,10 @@ def _start(
         raise WorkError("claimed", str(exc), details={"id": ident, "claim": exc.claim.to_dict()}) from exc
     except cl.GitError as exc:
         raise WorkError("git_error", str(exc), details={"id": ident}) from exc
+    held_out = hide_acceptance(pkg, path, v.base) if path is not None else None
     return {
         "schema": SCHEMA, "ok": True, "id": ident, "previous_status": item.status, "status": item.status,
-        "forced": forced, "claim": claim.to_dict(), "item": item_payload(pkg, item, items),
+        "forced": forced, "claim": claim.to_dict(), "item": item_payload(pkg, item, items), "held_out": held_out,
         "commands": launch_commands(ident, claim.worktree),
     }
 
@@ -646,15 +650,90 @@ class Check:
     command: str
 
 
+def red_on_parent(pkg: Package, ident: str, inspection: gate.Inspection, verify_command: str | None) -> dict | None:
+    """Run the branch's new and changed tests against the code they forked from. A test that passes there doesn't
+    show that the change does anything, so that is a finding (`tests_pass_on_parent`).
+
+    The parent is checked out in a throwaway worktree, the branch's versions of its changed test files are copied
+    in, `commands.setup` runs, then the item's Verify command (or `commands.test` when Verify isn't a command). It
+    passing is the finding; failing, or not running, is what a real change looks like. Returns what was run, or None
+    when the check is off or there is nothing to run."""
+    policy = inspection.policy
+    if policy.mode("tests_pass_on_parent") == "off" or not inspection.merge_base or not cl.in_git(pkg.root):
+        return None
+    globs = policy.test_paths or []
+    tests = [c for c in inspection.changes if c.status != "D" and gate.is_test_path(pkg, c.path, globs)
+             and not gate.covered(c.path, [policy.acceptance])]
+    command = verify_command or policy.commands.get("test")
+    if not tests or not command or command.strip() == "true":
+        return {"ran": False, "reason": "no test changed" if not tests else "no Verify or test command",
+                "files": [c.path for c in tests]}
+    top = cl.toplevel(pkg.root)
+    prefix = gate.run_git(pkg.root, "rev-parse", "--show-prefix", check=False).strip()
+    scratch = Path(tempfile.mkdtemp(prefix="its-parent-"))
+    tree = scratch / "parent"
+    try:
+        gate.run_git(top, "worktree", "add", "--detach", "--quiet", str(tree), inspection.merge_base)
+        for change in tests:
+            text = gate.after_content(pkg, inspection.head, change)
+            if text is None:
+                continue
+            target = tree / change.git_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        here = tree / prefix if prefix else tree
+        setup = policy.commands.get("setup")
+        if setup and setup.strip() != "true":
+            prepared = run_check(Check("setup", setup), here)
+            if not prepared["passed"]:
+                return {"ran": False, "reason": "setup failed on the parent", "files": [c.path for c in tests],
+                        "command": command}
+        result = run_check(Check("verify", command), here)
+    except gate.GateError as exc:
+        return {"ran": False, "reason": str(exc), "files": [c.path for c in tests]}
+    finally:
+        subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=top, capture_output=True)
+        shutil.rmtree(scratch, ignore_errors=True)
+    files = [c.path for c in tests]
+    if result["passed"]:
+        inspection.add({
+            "kind": "tests_pass_on_parent", "files": files, "command": command,
+            "message": f"the branch's new or changed tests ({', '.join(files)}) also pass on the code before the "
+                       f"change ({inspection.merge_base[:10]}), so they don't show {ident} works"})
+    return {"ran": True, "passed_on_parent": result["passed"], "command": command, "files": files,
+            "exit_code": result["exit_code"]}
+
+
+def hide_acceptance(pkg: Package, worktree: Path, base: str) -> str | None:
+    """Leave the held-out acceptance tests out of an agent's worktree with a sparse checkout, so the agent can't
+    read them and write code to the test. Returns the hidden folder, or None when the integration branch has none.
+
+    This keeps the tests out of view, not secret: they are still in the repository's history. `its land` runs them
+    on each merged result (`commands.acceptance`), and the gate refuses a branch that changes them."""
+    manifest = gate.manifest_at(pkg, base)
+    policy = gate.Policy.of(manifest or {}, base)
+    prefix = gate.run_git(pkg.root, "rev-parse", "--show-prefix", check=False).strip()
+    folder = prefix + policy.acceptance
+    if not gate.run_git(pkg.root, "ls-tree", "-d", "--name-only", base, "--", folder.rstrip("/"), check=False).strip():
+        return None
+    proc = subprocess.run(["git", "sparse-checkout", "set", "--no-cone", "/*", f"!/{folder}"], cwd=worktree,
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise WorkError("git_error", f"couldn't hide {folder} from the worktree: {proc.stderr.strip()}",
+                        details={"worktree": str(worktree)})
+    return folder
+
+
 def checks_for(pkg: Package, item: BacklogItem, verify: str | None | bool = True,
-               commands: dict[str, str] | None = None) -> list[Check]:
+               commands: dict[str, str] | None = None, *, acceptance: bool = False) -> list[Check]:
     """The item's Verify command, then the package's test and lint commands, without repeats. `verify` replaces the
-    item's own Verify command and `commands` the package's (both the integration branch's, from `gate.inspect`)."""
+    item's own Verify command and `commands` the package's (both the integration branch's, from `gate.inspect`).
+    `acceptance` adds `commands.acceptance`, the held-out tests, which only `its land` runs."""
     out: list[Check] = []
     command = item.verify_command if verify is True else verify
     commands = pkg.commands if commands is None else commands
     candidates = [("verify", command or "")]
-    candidates += [(name, commands.get(name, "")) for name in ("test", "lint")]
+    candidates += [(name, commands.get(name, "")) for name in ("test", "lint") + (("acceptance",) if acceptance else ())]
     for name, command in candidates:
         command = command.strip()
         if command and command != "true" and all(c.command != command for c in out):
@@ -849,6 +928,13 @@ def done(
                 "check_failed", f"{ident} is not done: {', '.join(failed)} failed", EXIT_CHECK_FAILED,
                 {"id": ident, "checks": results},
             )
+    red = None
+    if not skipped and item.status != "done":
+        red = red_on_parent(pkg, ident, inspection, verify_command)
+        blocking = [f for f in inspection.blocking(allow_test_changes=allow_test_changes is not None)
+                    if f["kind"] == "tests_pass_on_parent"]
+        if blocking:
+            raise gate_error(ident, blocking, inspection)
     manual = item.verify if item.verify and not item.verify_command else None
     common = {
         "schema": SCHEMA,
@@ -860,8 +946,10 @@ def done(
         "verify_source": inspection.verify_source,
         "touches_checked": inspection.touches_checked,
         "findings": inspection.findings,
+        "red_on_parent": red,
     }
-    waived = inspection.findings  # every finding left was waived, since any other refused the item above
+    common["warnings"] = inspection.warnings  # checks in warn mode: reported, never refusing
+    waived = [f for f in inspection.findings if f.get("mode") != "warn"]  # any other finding refused the item above
     if check_only:
         return {**common, "checked_only": True, "status": item.status, "previous_status": item.status}
     try:

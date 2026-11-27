@@ -102,3 +102,28 @@ def test_criteria_are_numbered_by_position_or_by_their_own_label():
                "- third\n\nSome prose after the list.\n- not a criterion\n")
     assert criteria(section) == [(1, "first"), (5, "labelled"), (3, "third")]
     assert criteria("**Priority:** Must\n\nNo criteria here.\n") == []
+
+
+def test_sub_bullets_are_details_not_criteria():  # T1
+    section = "**Acceptance criteria**\n- adds a habit\n  - including its name\n- lists habits\n"
+    assert criteria(section) == [(1, "adds a habit"), (2, "lists habits")]
+
+
+def test_criteria_as_a_field_list_item():  # T2
+    section = "- **Priority:** Must\n- **Acceptance criteria:**\n  - one\n  - two\n- **Out of scope:** export\n"
+    assert criteria(section) == [(1, "one"), (2, "two")]
+
+
+def test_a_later_list_is_not_read_as_the_criteria():  # T3
+    section = "**Acceptance criteria**\nSee the design doc.\n\n**Out of scope**\n- exporting\n- syncing\n"
+    assert criteria(section) == []
+
+
+def test_labels_and_positions_never_collide():
+    assert criteria("**Acceptance criteria**\n- AC2: b\n- c\n") == [(2, "b"), (3, "c")]
+
+
+def test_reference_spellings():  # T4
+    from idea_to_scaffold.trace import REF_RE
+    found = [(m.group(1), m.group(2)) for m in REF_RE.finditer("FR-001, AC2 / FR-002 (AC3) / fr0012ab / fr_003_ac1")]
+    assert found == [("001", "2"), ("002", "3"), ("003", "1")]
