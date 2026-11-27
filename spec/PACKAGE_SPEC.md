@@ -371,7 +371,8 @@ list, so there is one place to look and one place to update.
 | Do / Done when | Done when expected for open items | prose |
 | Verify | no | a command in backticks, a test ID, or `manual: ...`; how to check the item is done |
 | Touches | no | comma-separated paths or globs relative to the repo root; used to keep parallel items apart |
-| Verified | written by `its done` and `its verify` | the date the checks passed and the integration-branch commit the work was built on (`2026-11-27, base 1a2b3c4d5e`) |
+| Verified | written by `its done` and `its verify` | the date the checks passed, the integration-branch commit the work was built on, and a hash of its Touches files (`2026-11-27, base 1a2b3c4d5e, tree 0a1b2c3d4e5f`) |
+| Override | written by `its done` when a person waives the gate | the date, the waived finding kinds and the reason |
 | Blocked / Dropped | written by `its block` and `its drop` | why |
 
 Each field is one line (`- **Name:** value`). An empty field is empty; it never continues onto the next line.
@@ -523,15 +524,16 @@ parse text or stderr, even when `its` hits a bug (`internal_error`).
   Each entry is `{id, branch, landed, ...}`: a landed one has `commit` and
   `checks`; a skipped one has `reason` (`conflict` with `files`,
   `check_failed` with `checks`, `test_changes` or `outside_touches` with
-  `findings`, `waiting` with `blocked_by`, `no_claim`,
-  `no_commits`, `not_done` or `dry_run`) and `message`.
+  `findings`, `gate_error`, `base_moved`, `checkout_blocked`, `git_error`,
+  `waiting` with `blocked_by`, `no_claim`, `no_commits`, `not_done` or
+  `dry_run`) and `message`.
 - `validate`: `{valid, ready, errors, warnings}`, plus `trace` with
   `--trace`: `{checked, criteria, requirements: [{id, title, file, criteria:
   [{ac, text, tests: [{file, line}], by_requirement}]}], uncovered: [{id, ac,
   text}], by_requirement}`.
 - `drift`: `{drifted: [{id, title, satisfies, verified, verified_commit, files,
   commits, uncommitted}], requirements: [{id, items, files}], clean, unknown:
-  [{id, reason, message}], no_touches}`. `verify`: the `done --check` object
+  [{id, reason, message}], no_touches, shallow}`. `verify`: the `done --check` object
   plus `verified` and `previous_verified`.
 - `review`: `{id, item, requirements: [{id, text, file}], base, merge_base,
   verify_source, touches_checked, findings, changed_files: [{status, path,
@@ -565,8 +567,10 @@ parse text or stderr, even when `its` hits a bug (`internal_error`).
   `nothing_ready` (with `reason`), `fetch_failed`, `push_failed`, `dirty`,
   `diverged`, `exists`, `bad_name`, `bad_title`, `no_reason`, `usage`,
   `test_changes` and `outside_touches` (with `findings`), `bad_hooks_file`,
-  `bad_agent`,
-  `git_error`, `internal_error`.
+  `bad_agent`, `gate_error` (the gate couldn't compare the branch, so it
+  refused), `override_reason` and `override_needs_person` (a waiver without a
+  reason, or without a person), `git_error`, `internal_error`. `done` returns
+  `override: {waived, reasons}` when a person waived findings.
 
 Exit codes, the same with or without `--json`:
 
@@ -653,26 +657,62 @@ or Codex in each; it never launches an agent itself.
   run off the integration branch (unless `--force`) or when a placeholder is
   proposed twice, and never reuses a number still mentioned in any doc.
 - **The done gate.** An agent can edit the files its checks read, so before
-  running any check `its done` compares the branch, from its merge base with
-  the integration branch to the working tree (uncommitted and untracked files
-  included), with what the item allows:
-  - Verify and Touches are read from the integration branch, so the planned
-    acceptance test runs. A branch that changed either is refused.
+  running any check `its done` compares the branch with what the item allows.
+  The diff runs from the fork point to the working tree (uncommitted and
+  untracked files included) and covers the whole repository, not only the
+  package. On a claim branch the fork point is the merge base with the
+  integration branch recorded when the claim was made. On the integration
+  branch itself (a plain `its start`), it is the commit recorded at start,
+  outside the working tree, so committed work is still checked.
+  - The rules come from the integration branch: the item's Verify and
+    Touches, and the `commands` and `test_paths` in `package.yaml`. A branch
+    that edits `package.yaml` is refused (`policy_changed`).
+  - The plan is diffed item by item. A branch may change its own item's
+    Status, Verified, Blocked and Override fields and add proposals. Changing
+    its Verify (`verify_changed`) or Touches (`touches_changed`), any other
+    field of its item (`item_changed`), any other item (`other_item_changed`)
+    or another planning doc is refused; another planning doc counts as
+    outside Touches.
   - A deleted test file, a test file with fewer assertion lines, or a new
-    skip or xfail marker is refused. Test files match `test_paths` in
-    `package.yaml`, or by default `tests/`, `test/`, `__tests__/`, `test_*`,
-    `*_test.*`, `*_spec.*`, `*.test.*` and `*.spec.*`.
-  - A changed file outside the item's Touches is refused. The planning folder
-    is exempt; an item without Touches isn't checked.
+    skip or xfail marker is refused. Test files match `test_paths`, or by
+    default `tests/`, `test/`, `__tests__/`, `test_*`, `*_test.*`, `*_spec.*`,
+    `*.test.*` and `*.spec.*`.
+  - Agent configuration (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.claude/`,
+    `.codex/`, `.cursor/`, `.gemini/`, `.its/`, `.mcp.json`,
+    `.github/workflows/`) is refused whatever the Touches say
+    (`agent_config_changed`).
+  - A changed file outside the item's Touches is refused, including a file
+    outside the package in a monorepo (reported as `../path`). An item without
+    Touches isn't scope-checked.
 
-  `--allow-test-changes` and `--allow-outside-touches` accept each group for a
-  real refactor, and the accepted findings are still reported. An agent that
-  can't finish honestly runs `its block <ID> --reason`. `its land` runs the
-  same gate on each branch before merging it.
+  Touches entries are paths relative to the package root: a plain path names
+  that file or everything under that folder; a glob uses `*` (not crossing
+  `/`), `**`, `?`, `[abc]` and `{a,b}`; every entry is also tried literally,
+  so `app/[id]/page.tsx` works. The gate, `its land` and `its drift` share
+  this one meaning.
+
+  The gate fails closed: with no integration branch, a shallow clone, a fork
+  point that left the history, or a git error, `its done` refuses with
+  `gate_error` (exit 5) instead of passing.
+
+  A person can waive a group: `--allow-test-changes=REASON` (test, plan and
+  agent-config findings) or `--allow-outside-touches=REASON` (scope
+  findings). A waiver needs a reason and a person: it is refused without an
+  interactive terminal unless `ITS_ALLOW_OVERRIDES=1` is set by whoever runs
+  the agent. The waived kinds and the reason are written to the item's
+  `Override` field, and the waived findings are still reported. Verify is
+  always the integration branch's, even when test changes are waived. A
+  refusal never names the waiver flags; an agent that can't finish honestly
+  runs `its block <ID> --reason`. `its land` runs the same gate on each
+  branch before merging it.
 - **Review and hooks.** `its review <ID>` prints an evidence bundle for a second
   agent: the item, the text of each requirement it satisfies, the gate's
   findings and the diff, with instructions to answer `VERDICT: approve` or
-  `VERDICT: changes-requested`. `its hooks` adds an opt-in Stop hook for Claude
+  `VERDICT: changes-requested`. The item and requirement text come from the
+  integration branch (a requirement the branch changed is flagged
+  `changed_on_branch`), and the diff sits in a fence longer than any run of
+  backticks inside it, so the change can't rewrite what it is judged against
+  or close the fence. `its hooks` adds an opt-in Stop hook for Claude
   Code and Codex that runs `its hook stop`: it re-runs the gate for this
   checkout's item and, if it fails or the item isn't marked done, answers
   `{"decision": "block", "reason": ...}`. It never blocks twice in a row, or
@@ -680,15 +720,23 @@ or Codex in each; it never launches an agent itself.
 - **Landing.** A clean merge of two branches can still break the build, so
   `its land` merges finished claims into the integration branch one at a
   time, in backlog order, and runs the item's Verify plus the test and lint
-  commands on each merged result. It runs in the main checkout on a clean
-  integration branch. A claim is finished when its item is `done` at the
+  commands on each merged result. It runs from the main checkout on a clean
+  integration branch, but merges and checks each branch in a throwaway
+  worktree (running `commands.setup` there first, since a fresh worktree has
+  no installed dependencies). Only a result that passes moves the integration
+  branch, by a fast-forward of the user's checkout taken under the package
+  lock; the checkout is never merged into, reset or cleaned, so untracked
+  files and statuses written while the checks run survive. If the
+  integration branch moved during the checks the item is skipped
+  (`base_moved`); if an untracked file is in the way it is skipped
+  (`checkout_blocked`) and the file is left alone. A claim is finished when its item is `done` at the
   branch tip, and lands only once its dependencies are done on the
   integration branch (an item whose dependency lands earlier in the same run
   gets its turn). Before merging, `git merge-tree` checks for conflicts; a
   conflict in a generated file (`planning/README.md`, wireframe index,
   `backlog.json`) is resolved by regenerating it, any other conflict skips the
-  branch. A branch whose checks fail on the merged tree is reset away, so the
-  integration branch only moves to states that were tested whole. `--fetch`
+  branch. A branch whose checks fail on the merged tree is never applied, so
+  the integration branch only moves to states that were tested whole. `--fetch`
   fast-forwards from the remote first, `--push` pushes the result, `--release`
   releases each landed claim, `--dry-run` reports what would land. `its claims`
   shows each claim's conflicts with the base and with other claims ahead of
@@ -699,16 +747,19 @@ or Codex in each; it never launches an agent itself.
 A done item was checked against the code as it was then. Two commands say what
 that guarantee still covers.
 
-- **Drift.** `its done` and `its verify` write the item's `Verified` field.
-  The commit that brought the current value into the branch (found on its
+- **Drift.** `its done` and `its verify` write the item's `Verified` field,
+  which ends with a hash of the files in its Touches as they were checked
+  (`tree <hash>`). When the files on disk still match the hash, the item is
+  clean, with no history needed; re-verifying changed code always writes a
+  new value. When they don't, the history says which files changed: the commit that brought the current value into the branch (found on its
   first-parent history; for a landed item, the merge `its land` tested) is the
   item's verified commit. `its drift` lists each done item whose Touches differ
   between that commit and the working tree, with the commits that changed them,
   and the requirements those items satisfy. An item done before `Verified`
   existed uses the commit where it became done; one without Touches isn't
   tracked. `its verify <ID>` re-runs a done item's checks and refreshes its
-  `Verified` value; commit it to clear the drift. Drift reads git history, so
-  CI needs full history (`fetch-depth: 0`). `--check` exits 8 on drift.
+  `Verified` value; commit it. In a shallow clone, an item whose `Verified`
+  has no hash is reported as unknown (`shallow`), never as clean. `--check` exits 8 on drift.
 - **Traceability.** Acceptance criteria are numbered by position in a
   requirement's **Acceptance criteria** list (`AC1`, `AC2`, ...); a bullet
   that starts with a label (`AC3:`) keeps that number. A test covers a

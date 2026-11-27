@@ -6,10 +6,14 @@ the code the checks ran on (for a landed item, the merge `its land` tested). Dri
 tree and the working tree in the item's Touches. An item done before `Verified` existed uses the commit where it
 became done.
 
-This reads git history, so a shallow clone (CI's default) can't tell: fetch with full history (`fetch-depth: 0`).
+Since phase 5, `Verified` also records a hash of the files in the item's Touches as they were checked
+(`tree <hash>`). When that hash still matches the files on disk the item is clean, with no history needed. When it
+doesn't, the history walk above says which files and commits changed. An item verified before the hash existed
+needs the history, so in a shallow clone it is reported as unknown, never as clean.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -17,9 +21,11 @@ from . import claims as cl
 from .backlog import BACKLOG, BacklogItem, load_backlog, parse_backlog
 from .gate import _planning_prefix
 from .package import Package
-from .work import SCHEMA, WorkError
+from .touches import covered
+from .work import SCHEMA, WorkError, touched_files, touches_hash
 
 COMMIT_LIMIT = 10
+TREE_RE = re.compile(r"\btree ([0-9a-f]{6,40})\b")
 
 
 def _git(root: Path, *args: str) -> str:
@@ -32,14 +38,6 @@ def _key(item: BacklogItem | None) -> tuple | None:
     if item is None or item.status != "done":
         return None
     return ("done", item.get("Verified"))
-
-
-def pathspecs(touches: list[str]) -> list[str]:
-    out = []
-    for entry in touches:
-        entry = cl._norm(entry)
-        out.append(f":(glob){entry}" if cl.GLOB_CHARS.search(entry) else entry.rstrip("/") or ".")
-    return out
 
 
 class History:
@@ -77,6 +75,8 @@ def drift(pkg: Package) -> dict:
     items = load_backlog(pkg)
     history = History(pkg)
     planning = _planning_prefix(pkg)
+    shallow = subprocess.run(["git", "rev-parse", "--is-shallow-repository"], cwd=pkg.root, capture_output=True,
+                             text=True).stdout.strip() == "true"
     drifted, unknown, no_touches, clean = [], [], [], []
     for item in items:
         if item.status != "done":
@@ -84,7 +84,26 @@ def drift(pkg: Package) -> dict:
         if not item.touches:
             no_touches.append(item.id)
             continue
+        recorded = TREE_RE.search(item.get("Verified") or "")
+        if recorded and touches_hash(pkg, item.touches) == recorded.group(1)[:12]:
+            clean.append(item.id)
+            continue
         commit = history.verified_commit(item)
+        if shallow and not recorded:
+            unknown.append({"id": item.id, "reason": "shallow",
+                            "message": "this is a shallow clone and its Verified mark has no file hash; fetch the "
+                                       "full history (fetch-depth: 0) or re-verify it"})
+            continue
+        if recorded and commit is not None and shallow:
+            commit = None  # the history can't be trusted to say which files: the hash already says they changed
+        if commit is None and recorded:
+            drifted.append({
+                "id": item.id, "title": item.title, "satisfies": item.satisfies,
+                "verified": item.get("Verified") or None, "verified_commit": None,
+                "files": touched_files(pkg, item.touches), "commits": [],
+                "uncommitted": True, "message": "its files changed since it was verified (the history to say "
+                                                "which is missing)"})
+            continue
         if commit is None:
             if history.commits:
                 unknown.append({"id": item.id, "reason": "uncommitted",
@@ -93,20 +112,23 @@ def drift(pkg: Package) -> dict:
                 unknown.append({"id": item.id, "reason": "no_history",
                                 "message": "no git history for the backlog (a shallow clone?)"})
             continue
-        specs = pathspecs(item.touches)
-        files = [f for f in _git(pkg.root, "diff", "--name-only", "--relative", commit, "--", *specs).split("\n")
-                 if f and not (planning and f.startswith(planning))]
-        files += [f for f in _git(pkg.root, "ls-files", "--others", "--exclude-standard", "--", *specs).split("\n")
-                  if f and f not in files]
-        if not files:
+        changed = _git(pkg.root, "-c", "core.quotePath=false", "diff", "-z", "--name-only", "--relative", commit)
+        untracked = _git(pkg.root, "-c", "core.quotePath=false", "ls-files", "-z", "--others", "--exclude-standard")
+        files = sorted({f for f in changed.split("\0") + untracked.split("\0")
+                        if f and not (planning and f.startswith(planning)) and covered(f, item.touches)})
+        if not files and not recorded:
             clean.append(item.id)
             continue
-        log = _git(pkg.root, "log", f"--max-count={COMMIT_LIMIT}", "--format=%h %s", f"{commit}..HEAD", "--", *specs)
+        if not files:  # the hash differs but the history shows no change since: the verified commit is older
+            files = touched_files(pkg, item.touches)
+        log = _git(pkg.root, "log", f"--max-count={COMMIT_LIMIT}", "--format=%h %s", f"{commit}..HEAD", "--",
+                   *[f":(literal){f}" for f in files])
+        status = _git(pkg.root, "status", "--porcelain", "--", *[f":(literal){f}" for f in files])
         drifted.append({
             "id": item.id, "title": item.title, "satisfies": item.satisfies, "verified": item.get("Verified") or None,
             "verified_commit": commit, "files": sorted(files),
             "commits": [line for line in log.split("\n") if line],
-            "uncommitted": bool(_git(pkg.root, "status", "--porcelain", "--", *specs).strip()),
+            "uncommitted": bool(status.strip()),
         })
     requirements: dict[str, dict] = {}
     for entry in drifted:
@@ -117,5 +139,5 @@ def drift(pkg: Package) -> dict:
     return {
         "schema": SCHEMA, "ok": True, "drifted": drifted,
         "requirements": sorted(requirements.values(), key=lambda r: r["id"]),
-        "clean": clean, "unknown": unknown, "no_touches": no_touches,
+        "clean": clean, "unknown": unknown, "no_touches": no_touches, "shallow": shallow,
     }

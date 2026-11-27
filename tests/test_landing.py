@@ -37,6 +37,7 @@ def repo(plan: Path, tmp_path: Path) -> Path:
     text = manifest.read_text()
     text = text.replace('test: "uv run pytest"', f"test: {json.dumps(py('print(1)'))}")
     text = text.replace('lint: "uv run ruff check ."', f"lint: {json.dumps(py('print(2)'))}")
+    text = text.replace('setup: "uv sync"', f"setup: {json.dumps(py('print(0)'))}")
     manifest.write_text(text)
     git(root, "commit", "-qam", "cheap checks")
     set_field(root, "T-1.1", "Status", "done")
@@ -171,9 +172,9 @@ def test_start_next_picks_and_claims_in_one_step(repo: Path, capsys):
 def test_claims_report_conflicts_before_anyone_merges(repo: Path, capsys):
     _, a = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
     _, b = run_json(capsys, "start", "T-2.2", str(repo), "--worktree")
-    work_on(Path(a["claim"]["worktree"]), "T-2.1", "src/streak/shared.py", "a = 1\n", None, "--allow-outside-touches")
+    work_on(Path(a["claim"]["worktree"]), "T-2.1", "src/streak/shared.py", "a = 1\n", None, "--allow-outside-touches=shared file")
     work_on(Path(b["claim"]["worktree"]), "T-2.2", "src/streak/shared.py", "b = 2\n", None,
-            "--allow-outside-touches")  # Touches lied
+            "--allow-outside-touches=shared file")  # Touches lied
     _, out = run_json(capsys, "claims", str(repo))
     by_id = {c["id"]: c for c in out["claims"]}
     assert by_id["T-2.1"]["conflicts_with"] == [{"id": "T-2.2", "files": ["src/streak/shared.py"]}]
@@ -211,7 +212,7 @@ def test_land_undoes_a_merge_whose_checks_fail(repo: Path, capsys):
     _, a = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
     worktree = Path(a["claim"]["worktree"])
     set_field(repo, "T-2.1", "Verify", f"`{py('import sys; sys.exit(4)')}`")  # main's Verify fails once merged
-    work_on(worktree, "T-2.1", "src/streak/store.py", "x\n", None, "--allow-test-changes")
+    work_on(worktree, "T-2.1", "src/streak/store.py", "x\n", None, "--allow-test-changes=planned test rewrite")
     before = git(repo, "rev-parse", "HEAD")
     code, out = run_json(capsys, "land", "--dir", str(repo))
     assert code == 7 and out["landed"] == []
@@ -222,9 +223,9 @@ def test_land_undoes_a_merge_whose_checks_fail(repo: Path, capsys):
 def test_land_refuses_real_conflicts_and_lands_the_rest(repo: Path, capsys):
     _, a = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
     _, b = run_json(capsys, "start", "T-2.2", str(repo), "--worktree")
-    work_on(Path(a["claim"]["worktree"]), "T-2.1", "src/streak/shared.py", "a = 1\n", None, "--allow-outside-touches")
-    work_on(Path(b["claim"]["worktree"]), "T-2.2", "src/streak/shared.py", "b = 2\n", None, "--allow-outside-touches")
-    code, out = run_json(capsys, "land", "--dir", str(repo), "--allow-outside-touches")
+    work_on(Path(a["claim"]["worktree"]), "T-2.1", "src/streak/shared.py", "a = 1\n", None, "--allow-outside-touches=shared file")
+    work_on(Path(b["claim"]["worktree"]), "T-2.2", "src/streak/shared.py", "b = 2\n", None, "--allow-outside-touches=shared file")
+    code, out = run_json(capsys, "land", "--dir", str(repo), "--allow-outside-touches=shared file")
     assert code == 7 and [x["id"] for x in out["landed"]] == ["T-2.1"]
     skipped = out["skipped"][0]
     assert skipped["id"] == "T-2.2" and skipped["reason"] == "conflict" and skipped["files"] == ["src/streak/shared.py"]
@@ -260,11 +261,12 @@ def test_land_regenerates_the_planning_index_when_only_it_conflicts(repo: Path, 
         block = f"### {fr} — {title}\n**Feature:** F-01 · **Priority:** Could\n\n"
         req.write_text(text + "\n" + block if where == "end" else text.replace(where, block + where, 1))
         assert main(["link", str(worktree)]) == 0
-        work_on(worktree, ident, {"T-2.1": "src/streak/store.py", "T-2.2": "src/streak/streak.py"}[ident], "x = 1\n")
+        work_on(worktree, ident, {"T-2.1": "src/streak/store.py", "T-2.2": "src/streak/streak.py"}[ident], "x = 1\n",
+                None, "--allow-outside-touches=adds its requirement")  # requirement text is outside Touches
     _, claims = run_json(capsys, "claims", str(repo))
     files = {f for c in claims["claims"] for other in c["conflicts_with"] for f in other["files"]}
     assert files == {"docs/planning/README.md"}  # only the generated index collides
-    code, out = run_json(capsys, "land", "--dir", str(repo))
+    code, out = run_json(capsys, "land", "--dir", str(repo), "--allow-outside-touches=new requirements")
     assert code == 0 and [x["id"] for x in out["landed"]] == ["T-2.1", "T-2.2"], out
     assert git(repo, "status", "--porcelain") == ""
     pkg = Package.load(repo)

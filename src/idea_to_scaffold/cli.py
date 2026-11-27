@@ -472,7 +472,7 @@ def cmd_done(args: argparse.Namespace) -> int:
                        allow_test_changes=args.allow_test_changes, allow_outside_touches=args.allow_outside_touches,
                        on_check=announce)
     except WorkError as err:
-        if err.code in ("test_changes", "outside_touches") and not args.json:
+        if err.code in ("test_changes", "outside_touches") and not args.json and len(err.details["findings"]) > 1:
             for finding in err.details["findings"]:
                 print(f"  {finding['kind']}: {finding['message']}")
         if err.code == "check_failed" and not args.json:
@@ -516,7 +516,8 @@ def cmd_land(args: argparse.Namespace) -> int:
                    release=args.release, dry_run=args.dry_run, allow_test_changes=args.allow_test_changes,
                    allow_outside_touches=args.allow_outside_touches, on_check=announce)
     stuck = [s for s in payload["skipped"]
-             if s["reason"] in ("conflict", "check_failed", "test_changes", "outside_touches")]
+             if s["reason"] in ("conflict", "check_failed", "test_changes", "outside_touches", "gate_error",
+                                "base_moved", "checkout_blocked", "git_error")]
     if not payload["landed"] and not payload["skipped"]:
         code = EXIT_NOTHING_READY
     elif stuck:
@@ -749,9 +750,11 @@ def build_parser() -> argparse.ArgumentParser:
     dir_help = "package folder or scaffolded repo (default: .)"
     json_help = f"print JSON (schema {SCHEMA}) instead of text"
     fetch_help = "fetch the integration branch and claim branches from the remote first"
-    allow_tests_help = ("accept deleted tests, removed assertions, new skips and a changed Verify "
-                        "(they refuse the item by default)")
-    allow_touches_help = "accept changes to files outside the item's Touches, or to its Touches"
+    allow_tests_help = ("waive deleted tests, removed assertions, new skips, agent-config changes and changes to "
+                        "the plan (a person only: needs a terminal or ITS_ALLOW_OVERRIDES=1; the reason is recorded)")
+    allow_touches_help = ("waive changes to files outside the item's Touches, or to its Touches (a person only, "
+                          "like --allow-test-changes)")
+    allow = {"nargs": "?", "const": "", "default": None, "metavar": "REASON"}
     base_help = "integration branch to read readiness from (default: integration_branch in package.yaml, or main)"
 
     s = sub.add_parser("backlog", help="list backlog items")
@@ -819,8 +822,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--release", action="store_true",
                    help="release each landed claim (with --push, its pushed branch too)")
     s.add_argument("--dry-run", action="store_true", help="show what would land, changing nothing")
-    s.add_argument("--allow-test-changes", action="store_true", help=allow_tests_help)
-    s.add_argument("--allow-outside-touches", action="store_true", help=allow_touches_help)
+    s.add_argument("--allow-test-changes", help=allow_tests_help, **allow)
+    s.add_argument("--allow-outside-touches", help=allow_touches_help, **allow)
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_land)
 
@@ -894,8 +897,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--no-verify", action="store_true", help="don't run Verify, test and lint first")
     s.add_argument("--check", action="store_true", help="run every check but leave the status alone (exit 5 if any fails)")
-    s.add_argument("--allow-test-changes", action="store_true", help=allow_tests_help)
-    s.add_argument("--allow-outside-touches", action="store_true", help=allow_touches_help)
+    s.add_argument("--allow-test-changes", help=allow_tests_help, **allow)
+    s.add_argument("--allow-outside-touches", help=allow_touches_help, **allow)
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_done)
 

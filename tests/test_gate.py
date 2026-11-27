@@ -14,6 +14,12 @@ from idea_to_scaffold.scaffold import scaffold
 from .test_landing import git_identity, py, repo  # noqa: F401 - fixtures
 from .test_parallel import git, run_json, set_field, status_in
 
+
+def status_line(root: Path, ident: str, name: str) -> str:
+    text = (root / "docs/planning/07-backlog.md").read_text()
+    section = text[text.index(f"### {ident}"):]
+    return next((ln for ln in section.split("\n") if f"**{name}:**" in ln), "")
+
 TEST = "tests/test_store.py"
 
 
@@ -42,9 +48,10 @@ def test_a_branch_that_edits_its_own_verify_is_refused(claim: Path, capsys):
     assert code == 5 and out["error"]["code"] == "test_changes"
     assert [f["kind"] for f in out["error"]["findings"]] == ["verify_changed"]
     assert status_in(claim, "T-2.1") == "todo"
-    code, out = finish(claim, "--allow-test-changes", capsys=capsys)
+    code, out = finish(claim, "--allow-test-changes=planned test rewrite", capsys=capsys)
     assert code == 0 and out["findings"][0]["kind"] == "verify_changed"
-    assert [c["name"] for c in out["checks"]] == ["test", "lint"]  # the branch's Verify (`true`) was used
+    assert [c["name"] for c in out["checks"]] == ["verify", "test", "lint"]  # main's Verify ran, not the branch's
+    assert "planned test rewrite" in status_line(claim, "T-2.1", "Override")  # the waiver and its reason are kept
 
 
 def test_a_branch_that_deletes_a_test_is_refused(claim: Path, capsys):
@@ -82,7 +89,7 @@ def test_changes_outside_touches_are_refused_but_planning_files_are_not(claim: P
     code, out = finish(claim, capsys=capsys)
     assert code == 5 and out["error"]["code"] == "outside_touches"
     assert out["error"]["findings"][0]["files"] == ["src/streak/other.py"]
-    code, out = finish(claim, "--allow-outside-touches", capsys=capsys)
+    code, out = finish(claim, "--allow-outside-touches=shared file", capsys=capsys)
     assert code == 0 and out["touches_checked"] and out["verify_source"] == "main"
 
 
@@ -103,7 +110,7 @@ def test_land_refuses_a_branch_that_edits_its_verify_after_done(claim: Path, rep
     code, out = run_json(capsys, "land", "--dir", str(repo))
     assert code == 7 and out["landed"] == []
     assert out["skipped"][0]["reason"] == "test_changes"
-    code, out = run_json(capsys, "land", "--dir", str(repo), "--allow-test-changes")
+    code, out = run_json(capsys, "land", "--dir", str(repo), "--allow-test-changes=planned test rewrite")
     assert code == 0 and [x["id"] for x in out["landed"]] == ["T-2.1"]
 
 

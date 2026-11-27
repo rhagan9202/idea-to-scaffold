@@ -281,7 +281,7 @@ def active_claims(claims: list[Claim]) -> list[Claim]:
 
 def create_claim(
     cwd: Path, ident: str, title: str, *, base_ref: str, worktree: Path | None, agent: str | None,
-    closed: set[str] | frozenset[str] = frozenset(), switch: bool = True,
+    closed: set[str] | frozenset[str] = frozenset(), switch: bool = True, integration: str | None = None,
 ) -> Claim:
     """Atomically check no claim exists and create the branch (and worktree). Raises GitError if it is taken."""
     branch = branch_name(ident, title)
@@ -298,7 +298,8 @@ def create_claim(
         data = _load_store(store)
         started = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         data[ident] = {"branch": branch, "worktree": str(worktree) if worktree else None, "agent": agent,
-                       "started": started}
+                       "started": started, "base": base_ref,
+                       "integration_branch": integration}
         _save_store(store, data)
     return Claim(ident, branch, False, str(worktree) if worktree else None, agent, started)
 
@@ -414,6 +415,58 @@ def release_claim(
     return {"id": ident, "deleted_branches": deleted, "removed_worktree": removed_worktree,
             "deleted_remote_branches": deleted_remote, "remote_branches": remote_claim_branches(run_dir, ident),
             "released": True}
+
+
+def claim_entry(cwd: Path, ident: str) -> dict:
+    """What the local claims store recorded about an item's claim (its branch, worktree and base), or {}."""
+    try:
+        entry = _load_store(_store_dir(cwd)).get(ident)
+    except GitError:
+        return {}
+    return entry if isinstance(entry, dict) else {}
+
+
+# --- fork points for items started on the integration branch ---------------------------------------------------
+# A plain `its start` (no claim branch) works on the integration branch itself, where a merge base can't say what
+# the item changed. So start records the commit it began from, outside the working tree where the agent can't edit
+# it, and the gate diffs from there.
+
+def _load_forks(store: Path) -> dict[str, str]:
+    try:
+        data = json.loads((store / "forks.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def _save_forks(store: Path, data: dict[str, str]) -> None:
+    tmp = store / "forks.json.tmp"
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, store / "forks.json")
+
+
+def record_fork(cwd: Path, ident: str, commit: str) -> None:
+    store = _store_dir(cwd)
+    data = _load_forks(store)
+    data[ident] = commit
+    _save_forks(store, data)
+
+
+def fork_of(cwd: Path, ident: str) -> str | None:
+    try:
+        return _load_forks(_store_dir(cwd)).get(ident)
+    except GitError:
+        return None
+
+
+def clear_fork(cwd: Path, ident: str) -> None:
+    try:
+        store = _store_dir(cwd)
+    except GitError:
+        return
+    data = _load_forks(store)
+    if data.pop(ident, None) is not None:
+        _save_forks(store, data)
 
 
 # --- Touches overlap ------------------------------------------------------------------------------------------
