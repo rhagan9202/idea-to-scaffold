@@ -124,8 +124,8 @@ integration_branch: "main"         # optional; where readiness is read from in p
 test_paths: ["tests/**"]           # optional; globs for test files the done gate protects (section 17)
 gate:                              # optional; the done gate's settings (section 17)
   acceptance_path: "tests/acceptance/"  # held-out tests: hidden from agents' worktrees, changes refused
-  checks:                          # the mode of each check that started in warn mode
-    tests_pass_on_parent: enforce  # warn (the default for these), enforce or off
+  checks:                          # the mode of the checks that can be relaxed (section 17); `its scaffold`
+    tests_pass_on_parent: enforce  # writes enforce for each warn-first check. enforce, warn or off
 launch:                            # optional; the unattended commands `its start` prints (section 17)
   budget_usd: 5                    # --max-budget-usd for a headless Claude run (default 5)
 its_source: "git+https://...@<ref>"  # optional; where scaffolded CI installs `its` from (default: this repo, pinned to the commit that scaffolded it)
@@ -378,6 +378,7 @@ list, so there is one place to look and one place to update.
 | Do / Done when | Done when expected for open items | prose |
 | Verify | no | a command in backticks, a test ID, or `manual: ...`; how to check the item is done |
 | Touches | no | comma-separated paths or globs relative to the repo root; used to keep parallel items apart |
+| Kind | no | `test-only` for an item that only adds tests for behaviour that already exists: red on parent is skipped for it (section 17) |
 | Verified | written by `its done` and `its verify` | the date the checks passed, the integration-branch commit the work was built on, and a hash of its Touches files (`2026-11-27, base 1a2b3c4d5e, tree 0a1b2c3d4e5f`) |
 | Override | written by `its done` when a person waives the gate | the date, the waived finding kinds and the reason |
 | Blocked / Dropped | written by `its block` and `its drop` | why |
@@ -575,9 +576,13 @@ of the command's relative folder arguments.
   `policy_changed`, `item_changed`, `other_item_changed` or
   `agent_config_changed` (changes to what the gate reads),
   `assertions_weakened`, `test_disabled`, `test_config_changed`,
-  `acceptance_changed` or `tests_pass_on_parent` (phase 7), or `no_changes`
-  (the branch changes nothing outside the planning folder, so nothing shows
-  the item was implemented; it is dropped when re-verifying a done item).
+  `acceptance_changed` or `tests_pass_on_parent` (phase 7), `test_removed`
+  (phase 9, with `tests`), `no_test_report`, `failures_hidden`,
+  `no_tests_ran` or `tests_skipped` (phase 9, from the test report, with
+  `check`), or `no_changes` (the branch changes nothing outside the planning
+  folder, so nothing shows the item was implemented; it is dropped when
+  re-verifying a done item). A refusal's error carries the refusing findings
+  in `findings` and the rest in `warnings`.
 - `propose`: `{id, file, item}`. `promote`: `{id, status, renumbered_from}`,
   plus `committed` (the short commit) when the change was committed: by default
   for `promote` and `renumber`, and with `--commit` for `block`, `unblock`,
@@ -585,7 +590,7 @@ of the command's relative folder arguments.
   `block`, `unblock`, `drop`, `set-status`: `{id, previous_status, status}`,
   plus `deleted_file` when a proposal was dropped.
 - `done`: `{id, previous_status, status, checks: [{name, command, exit_code,
-  passed, output}], checks_skipped, manual_verify, verify_source, touches_checked,
+  passed, output, results?}], checks_skipped, manual_verify, verify_source, touches_checked,
   findings, warnings, red_on_parent, verified, now_ready, merge_needed}`; `verified` is the value
   written to the item's Verified field. `verify_source` is where the Verify
   command was read (the integration branch's ref, or `working tree`);
@@ -595,7 +600,11 @@ of the command's relative folder arguments.
   the repo root; they run only in a scaffolded repo, and `--no-verify` skips
   them. `Verify` is run only when its whole value is one backticked command;
   anything else (`manual: ...`, a test ID, prose that mentions a command) is
-  never run, and is returned as `manual_verify` for a person to check.
+  never run, and is returned as `manual_verify` for a person to check. A check
+  that runs pytest has `results`, the summary of its JUnit report: `{report:
+  true, tests, passed, failed, errors, skipped, failed_tests, skipped_tests:
+  [{id, file, reason}], files}`, or `{report: false, reason}` when it wrote
+  none.
 - An error is `{"schema": 1, "ok": false, "error": {"code", "message", ...}}`.
   Codes: `not_found`, `placeholder`, `not_placeholder`, `bad_status`,
   `already_started`, `already_done`, `blocked` (with `blocked_by`), `claimed`
@@ -627,7 +636,7 @@ Exit codes, the same with or without `--json`:
 | 7 | `land`: a branch could not land (it conflicted, failed the done gate or its checks, isn't done, has no commits, or the base moved); branches only waiting on dependencies don't count |
 | 8 | `drift --check`: a done item's files changed after it was verified |
 | 9 | `next`, `start --next`: every item is done |
-| 10 | `gate-audit`: the gate missed a seeded cheat |
+| 10 | `gate-audit`: a seeded cheat was missed, or only warned about (unless `--allow-warn`) |
 
 `its backlog --write` saves the `its backlog --json` object as
 `planning/backlog.json` (`docs/planning/backlog.json` in a repo), and `start`
@@ -716,24 +725,60 @@ or Codex in each; it never launches an agent itself.
     field of its item (`item_changed`), any other item (`other_item_changed`)
     or another planning doc is refused; another planning doc counts as
     outside Touches.
-  - A deleted test file, a test file with fewer assertions
-    (`assertions_removed`), or a new skip or xfail (`skip_added`) is refused.
-    Python test files are read with `ast`, so a comment or `pass  # assert
-    later` doesn't count as an assertion, and `pytestmark = pytest.mark.skip`,
-    `@mark.skip` and `from unittest import skip; @skip` count as skips. Other
-    languages are read line by line with comments stripped. Test files match
+  - A deleted test file, a test that lost assertions (`assertions_removed`),
+    a test that is gone (`test_removed`), or a new skip or xfail
+    (`skip_added`) is refused. Assertions are counted test by test, and only
+    those that can fail count: a test that keeps fewer than it had is a loss
+    whatever the branch adds elsewhere, so commenting out an assertion and
+    adding two `assert True` lines is still a loss. A test that is gone,
+    deleted or renamed so the runner no longer collects it (`test_add` to
+    `check_add`), is `test_removed` unless a test of that name turns up in
+    another test file the branch changed; a test that asserted nothing that
+    can fail may go. Python test files are read with `ast`, so a comment or
+    `pass  # assert later` doesn't count as an assertion, and
+    `pytestmark = pytest.mark.skip`, `@mark.skip`, `from unittest import
+    skip; @skip`, `pytest.param(..., marks=pytest.mark.skip)` and an empty
+    `@pytest.mark.parametrize("x", [])` count as skips. Other languages are
+    read line by line with comments stripped, a test running from the line
+    that starts it (`it("adds", ...)`, `test('x', ...)`) to the next; skips
+    there include `it.skip`, `xit`, `t.skip()`, `test(name, {skip: ...})`,
+    `{todo: ...}`, `.skipIf` and `.runIf`, and `.only`, `fit` and
+    `fdescribe`, which stop the other tests running. Test files match
     `test_paths`, or by default `tests/`, `test/`, `__tests__/`, `test_*`,
     `*_test.*`, `*_spec.*`, `*.test.*` and `*.spec.*`.
-  - Found, and in warn mode until a person enforces them (below): an
-    assertion that can't fail, such as `assert True`, `assert x or True` or
-    `assert 1 == 1` (`assertions_weakened`); a test that returns at once or
-    only passes (`test_disabled`); a change to which tests are collected or
-    run, such as a `conftest.py` with `collect_ignore` or
-    `pytest_collection_modifyitems`, or changed pytest settings in
-    `pyproject.toml`, `setup.cfg`, `tox.ini` or `pytest.ini`, or a changed
-    Jest, Vitest, Mocha or test-script setting (`test_config_changed`). New
-    test files are checked against nothing, so a weak test the branch added
-    itself is found too.
+  - Found, and in warn mode in projects scaffolded before phase 9 (below):
+    an assertion that can't fail, such as `assert True`, `assert x or True`,
+    `assert 1 == 1`, `assert 1 + 1 == 2`, `assert [x == 1]` or
+    `assert (x, "message")` (`assertions_weakened`); a test that returns at
+    once or only passes (`test_disabled`); a change to which tests are
+    collected or run, or to their results: a `conftest.py` with
+    `collect_ignore`, `pytest_collection_modifyitems`, a result hook
+    (`pytest_runtest_makereport`, `pytest_sessionfinish`,
+    `pytest_report_teststatus`, a hook wrapper, `exitstatus`, ...),
+    `os._exit` or `pytest_plugins`; a test file that adds `os._exit`, an exit
+    at import or `pytest_plugins`; changed pytest settings in
+    `pyproject.toml`, `setup.cfg`, `tox.ini` or `pytest.ini`; a `pytest11`
+    plugin entry point; a `sitecustomize.py`, `usercustomize.py` or `.pth`
+    file; or a changed Jest, Vitest, Mocha or test-script setting
+    (`test_config_changed`). New test files are checked against nothing, so a
+    weak test the branch added itself is found too.
+  - **The runner's report.** A check's exit code comes from the code under
+    test, so it isn't trusted alone. When a check runs pytest (`pytest`,
+    `py.test`, `python -m pytest`, `uv run pytest`, ...), it runs with
+    `PYTEST_ADDOPTS` set to write a JUnit XML report to a fresh temporary
+    folder (or the command's own `--junitxml` path wins), and the gate reads
+    it after the checks pass. Every check runs without any `PYTEST_ADDOPTS`
+    or `PYTEST_PLUGINS` from the caller's environment. A run that wrote no
+    report stopped before pytest finished, for example on `os._exit(0)` in
+    the code under test (`no_test_report`, warn first). A report with failed
+    or errored tests behind exit 0 means something rewrote the exit status
+    (`failures_hidden`). A report with no tests, or with every test skipped,
+    shows nothing (`no_tests_ran`). Skipped tests that the item's Verify ran,
+    or that are in test files the branch changed, are `tests_skipped` (warn
+    first). `its done`, `its verify` and `its land` all apply these. This
+    makes faking a pass harder, not impossible: code running inside the test
+    process can still write a report of its own. A report with a `DOCTYPE`
+    or entities, or one over 64 MB, counts as no report.
   - **Red on parent.** After the checks pass, the branch's new and changed
     test files are copied onto the fork point in a throwaway worktree, and
     Verify (or `commands.test` when Verify isn't a command) runs there after
@@ -741,7 +786,8 @@ or Codex in each; it never launches an agent itself.
     anything (`tests_pass_on_parent`, with `files` and `command`). `done`
     returns what ran as `red_on_parent: {ran, passed_on_parent, command,
     files, exit_code}`, or `{ran: false, reason}`. It is skipped when
-    re-verifying a done item.
+    re-verifying a done item, and for an item with `Kind: test-only`, whose
+    new tests are meant to pass on the code as it is.
   - **Held-out acceptance tests.** Tests under `gate.acceptance_path`
     (default `tests/acceptance/`) are left out of every worktree `its start
     --worktree` creates, by a sparse checkout (`start` returns `held_out`),
@@ -749,19 +795,32 @@ or Codex in each; it never launches an agent itself.
     land` runs `commands.acceptance` on each merged result after the other
     checks; `its done` never does. The folder is out of the agent's view,
     not secret: it is still in the repository's history.
-  - **Warn mode.** The newer checks
+  - **Warn mode.** The checks that can misfire on honest work
     (`assertions_weakened`, `test_disabled`, `test_config_changed`,
-    `tests_pass_on_parent`) start in warn mode: they are reported, with
-    `mode: "warn"`, in `findings` and `warnings`, but don't refuse the item.
-    `gate.checks.<kind>` in the integration branch's `package.yaml` sets
-    `enforce` or `off`. Every other check always enforces. Each finding has
-    `mode`.
-  - **Measuring the gate.** `its gate-audit [ID]` applies a fixed set of
-    known cheats, one at a time, to a throwaway checkout of the integration
-    branch and reports which the gate found (`{id, base, test_file, variants:
-    [{name, description, expect, caught, found, mode, message}], caught,
-    total, enforced, missed, skipped}`). It exits 10 if any was missed.
-    Nothing in the checkout changes.
+    `tests_pass_on_parent`, `no_test_report`, `tests_skipped`) start in warn
+    mode: they are reported, with `mode: "warn"`, in `findings` and
+    `warnings`, but don't refuse the item. `gate.checks.<kind>` in the
+    integration branch's `package.yaml` sets `enforce`, `warn` or `off` for
+    these and for `test_removed`, `failures_hidden` and `no_tests_ran`, which
+    enforce by default. Every other check always enforces. When the
+    package's `package.yaml` has no `gate` section, `its scaffold` writes one
+    into the new repo that sets `enforce` for every warn-first check, so only
+    projects scaffolded before phase 9 (or that set their own `gate`) warn
+    first. Each finding has `mode`.
+  - **Measuring the gate.** `its gate-audit [ID] [--no-run] [--allow-warn]`
+    applies a fixed set of known cheats, one at a time, to a throwaway
+    checkout of the integration branch and reports which the gate refused,
+    which it only warned about and which it missed (`{ok, id, base,
+    test_file, variants: [{name, description, expect, caught, found, mode,
+    message}], caught, total, refused, warned, warned_kinds, missed,
+    skipped}`). Most cheats need only the inspection. `os_exit` (`os._exit(0)`
+    appended to the item's own Python source in Touches) needs the tests to
+    run, so the audit runs `commands.setup` and the item's checks for it, and
+    skips it when nothing shows the tests imported that source; `--no-run`
+    leaves it out. `ok` is true only when every cheat was refused. It exits
+    10 when any was missed or only warned about (`--allow-warn` accepts
+    warnings), and prints the `gate.checks` settings that would refuse the
+    warned ones. Nothing in the checkout changes.
   - Agent configuration (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.claude/`,
     `.codex/`, `.cursor/`, `.gemini/`, `.its/`, `.mcp.json`,
     `.github/workflows/`) is refused whatever the Touches say

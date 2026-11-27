@@ -15,7 +15,8 @@ The checks run without any `PYTEST_ADDOPTS` or `PYTEST_PLUGINS` from the caller'
 switch pytest to `--collect-only` from its own shell.
 
 This raises the cost of faking a pass; it doesn't make faking one impossible. Code that runs inside the test
-process can still write a report of its own. Phase 10 runs checks with an allow-listed environment and timeouts.
+process can still write a report of its own, and the checks still run with the caller's environment otherwise and
+without a time limit.
 """
 from __future__ import annotations
 

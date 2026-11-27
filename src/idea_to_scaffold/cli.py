@@ -1207,7 +1207,24 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _utf8_streams() -> None:
+    """Read and write UTF-8 on the process's own pipes and files, whatever the locale says (cp1252 on most Windows
+    machines), so `--json` output and the hook's stdin always mean the same thing. A console is left alone: Python
+    already writes Unicode to it."""
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, name)
+        if stream is not getattr(sys, f"__{name}__") or not hasattr(stream, "reconfigure"):
+            continue  # replaced by a caller (a test, an embedding program): theirs to set
+        try:
+            if stream.isatty() or (stream.encoding or "").lower().replace("-", "") == "utf8":
+                continue
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_streams()
     argv = sys.argv[1:] if argv is None else list(argv)
     _Parser.json_errors = "--json" in argv
     try:

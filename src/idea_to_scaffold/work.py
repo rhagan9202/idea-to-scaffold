@@ -748,7 +748,7 @@ def hide_acceptance(pkg: Package, worktree: Path, base: str) -> str | None:
     if not gate.run_git(pkg.root, "ls-tree", "-d", "--name-only", base, "--", folder.rstrip("/"), check=False).strip():
         return None
     proc = subprocess.run(["git", "sparse-checkout", "set", "--no-cone", "/*", f"!/{folder}"], cwd=worktree,
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         raise WorkError("git_error", f"couldn't hide {folder} from the worktree: {proc.stderr.strip()}",
                         details={"worktree": str(worktree)})

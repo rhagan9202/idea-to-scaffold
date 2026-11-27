@@ -1,6 +1,7 @@
 """Phase 9: done reads what the test runner reports, assertions are counted per test, and gate-audit runs the tests."""
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
@@ -314,3 +315,15 @@ def test_gate_audit_fails_when_cheats_are_only_warned(real: Path, repo: Path, ca
     assert main(["gate-audit", "T-2.1", str(repo), "--no-run"]) == 10
     text = capsys.readouterr().out
     assert "only warned: " in text and "test_config_changed: enforce" in text
+
+
+# --- every platform ------------------------------------------------------------------------------------------------
+
+def test_json_output_is_utf8_whatever_the_locale(mini: Path):
+    backlog = mini / "planning/07-backlog.md"
+    backlog.write_text(backlog.read_text(encoding="utf-8").replace("— First", "— First → 日本"), encoding="utf-8")
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"}  # what a Windows pipe gets by default
+    proc = subprocess.run([sys.executable, "-m", "idea_to_scaffold.cli", "show", "T-1.1", str(mini), "--json"],
+                          capture_output=True, env=env, stdin=subprocess.DEVNULL)
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    assert json.loads(proc.stdout.decode("utf-8"))["item"]["title"] == "First → 日本"

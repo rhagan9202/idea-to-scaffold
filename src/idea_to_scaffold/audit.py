@@ -235,7 +235,7 @@ def _first_assert(text: str) -> tuple[int, int, int, int] | None:
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 def _target(pkg: Package, ident: str | None, base: str) -> Target:

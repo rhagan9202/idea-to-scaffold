@@ -34,5 +34,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e '.[dev]'
-      # a test stuck for two minutes prints every thread's stack, so a hang shows where it is
-      - run: pytest -q -o faulthandler_timeout=120 ${{ runner.os == 'Windows' && '-v' || '' }}
+      # A test stuck for two minutes prints every thread's stack, so a hang shows where it is. The tests read and
+      # write files in the platform's default encoding; `its` itself always names UTF-8.
+      - run: pytest -q -rfE -o faulthandler_timeout=120
+        env:
+          PYTHONUTF8: "1"

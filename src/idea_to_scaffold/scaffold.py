@@ -43,7 +43,7 @@ def _its_commit() -> str | None:
 
     def git(*args: str) -> str | None:
         try:
-            proc = subprocess.run(["git", *args], cwd=here, capture_output=True, text=True, timeout=10)
+            proc = subprocess.run(["git", *args], cwd=here, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
         except (OSError, subprocess.SubprocessError):
             return None
         return proc.stdout.strip() if proc.returncode == 0 else None
@@ -277,7 +277,7 @@ def _readme(pkg: Package) -> str:
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 def _git_commit(root: Path, message: str) -> None:
@@ -290,7 +290,7 @@ def _git_commit(root: Path, message: str) -> None:
     if not _git(root, "config", "user.email").stdout.strip():
         identity = ["-c", "user.name=idea-to-scaffold", "-c", "user.email=idea-to-scaffold@localhost"]
     result = subprocess.run(
-        ["git", *identity, "commit", "-m", message], cwd=root, capture_output=True, text=True
+        ["git", *identity, "commit", "-m", message], cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace"
     )
     if result.returncode != 0:
         raise ScaffoldError(f"git commit failed: {result.stderr.strip() or result.stdout.strip()}")
@@ -369,7 +369,7 @@ def scaffold(
             repo = github or pkg.slug
             proc = subprocess.run(
                 ["gh", "repo", "create", repo, "--private", "--source", ".", "--remote", "origin", "--push"],
-                cwd=root, capture_output=True, text=True,
+                cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             if proc.returncode != 0:
                 raise ScaffoldError(
