@@ -225,3 +225,53 @@ def test_a_blocking_claim_that_doesnt_reproduce_is_downgraded(repo: Path, remote
     assert run_json(capsys, "review", "T-2.1", str(repo), "--reply", str(unshown))[1]["outcome"] == "inconclusive"
     code, landed = run_json(capsys, "land", "--dir", str(repo))  # an inconclusive review doesn't hold it back
     assert code == 0 and [x["branch"] for x in landed["landed"]] == ["codex/store"], landed
+
+
+STREAK = ("from pathlib import Path\n\ndef test_streak_counts():\n"
+          "    assert 'def streak' in Path('src/streak/streak.py').read_text()\n")
+
+
+def test_branches_from_claude_copilot_and_codex_land_through_the_gate(repo: Path, remote: Path,  # noqa: F811
+                                                                       tmp_path: Path, capsys):
+    """The phase 12 gate: three vendors' agents, none of which runs its, push work; its gate and land hold every
+    one to the same rules, and only what passes lands."""
+    held_out(repo, {"T-2.1/test_store_held_out.py": STORE, "T-2.2/test_streak_held_out.py": STREAK})
+    git(repo, "push", "-q", "origin", "main")
+    for ident in ("T-2.1", "T-2.2"):
+        assert run_json(capsys, "brief", ident, str(repo))[0] == 0  # what each vendor's agent is given
+    vendor_branch(remote, tmp_path, "claude/T-2.1-store", {"src/streak/store.py": "def remove():\n    return 0\n"})
+    tip = vendor_branch(remote, tmp_path, "copilot/fix-store", {"src/streak/store.py": "def add():\n    return 1\n"},
+                        message="[T-2.1] add to the store")
+    git(remote, "update-ref", "refs/pull/5/head", tip)  # a pull request from a fork: no branch here, only the PR
+    git(remote, "update-ref", "-d", "refs/heads/copilot/fix-store")
+    vendor_branch(remote, tmp_path, "codex/T-2.2-streak", {"src/streak/streak.py": "def streak():\n    return 3\n"})
+    git(repo, "fetch", "-q", "origin")
+
+    # in each pull request's CI
+    assert run_json(capsys, "gate", "origin/claude/T-2.1-store", str(repo))[0] == 5
+    assert run_json(capsys, "gate", "origin/codex/T-2.2-streak", str(repo))[0] == 0
+    # the lead takes them in
+    for ref, ident, *agent in (("claude/T-2.1-store", "T-2.1"), ("pr:5", "T-2.1", "--agent", "copilot"),
+                               ("codex/T-2.2-streak", "T-2.2")):
+        code, out = run_json(capsys, "adopt", ref, ident, str(repo), *agent)
+        assert code == 0, out
+    code, out = run_json(capsys, "gate", "refs/its/pull/5", str(repo), "--id", "T-2.1")
+    assert code == 0 and out["passed"], out
+    code, status = run_json(capsys, "status", str(repo))
+    assert sorted(status["ready_to_land"]) == ["T-2.1", "T-2.2"], status
+    agents = {c["name"]: c["agent"] for c in status["claims"][0]["candidates"]}
+    assert agents == {"claude/T-2.1-store": "claude", "pr:5": "copilot"}  # a PR's agent is named at adopt
+
+    code, landed = run_json(capsys, "land", "--dir", str(repo), "--push", "--release")
+    assert code == 7, landed  # Claude's branch failed T-2.1's held-out test
+    assert [(x["id"], x["branch"]) for x in landed["landed"]] == [("T-2.1", "pr:5"), ("T-2.2", "codex/T-2.2-streak")]
+    assert [(x["branch"], x["reason"]) for x in landed["skipped"]] == [("claude/T-2.1-store", "check_failed")]
+    log = git(remote, "log", "--format=%B", "-2", "main")
+    assert "Adopted: pr:5" in log and "Adopted: codex/T-2.2-streak" in log
+    backlog = git(remote, "show", "main:docs/planning/07-backlog.md")
+    for ident in ("T-2.1", "T-2.2"):
+        block = backlog[backlog.index(f"### {ident} "):].split("\n### ")[0]
+        assert "**Status:** done" in block, block
+    assert git(repo, "for-each-ref", "refs/its/") == ""  # the fetched pull request went with the claim
+    _, stats = run_json(capsys, "stats", str(repo))
+    assert stats["by_agent"]["claude"]["first_try"] == 0 and stats["by_agent"]["codex"]["first_try"] == 1

@@ -8,6 +8,7 @@ import errno
 import json
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -1530,10 +1531,21 @@ def _utf8_streams() -> None:
 
 
 def _stdout_closed() -> bool:
-    """Whether stdout's reader has gone: the write that failed left its bytes in the buffer, so flushing again fails
-    the same way. An EINVAL from anything else leaves stdout able to flush."""
+    """Whether stdout's reader has gone. When the failed write left its bytes in the buffer, flushing again fails the
+    same way. When it left nothing (a write too big to buffer went straight to the pipe), only a real write shows
+    it, so a pipe gets a newline: harmless on the error path this is on, and an EINVAL from anything else leaves
+    the pipe writable."""
     try:
         sys.stdout.flush()
+    except OSError:
+        return True
+    try:
+        fd = sys.stdout.fileno()
+    except (OSError, ValueError, AttributeError):  # not a real file (a test's capture): it can't have gone
+        return False
+    try:
+        if stat.S_ISFIFO(os.fstat(fd).st_mode):
+            os.write(fd, b"\n")
     except OSError:
         return True
     return False
