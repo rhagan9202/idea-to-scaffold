@@ -607,7 +607,8 @@ def cmd_done(args: argparse.Namespace) -> int:
         else:
             payload = done(pkg, args.id, **options)
     except WorkError as err:
-        if err.code in ("test_changes", "outside_touches") and not args.json and len(err.details["findings"]) > 1:
+        if err.code in ("test_changes", "dependency_changes", "outside_touches") and not args.json \
+                and len(err.details["findings"]) > 1:
             for finding in err.details["findings"]:
                 print(f"  {finding['kind']}: {finding['message']}")
         if err.code == "check_failed" and not args.json:

@@ -14,10 +14,12 @@ from .linker import link_package
 from .package import GENERATED_MARKER, Package, parse_front_matter, templates_dir
 from .validate import Report, validate
 
+SCAFFOLD_WARN = {"dependency_added": "enforce it once the lockfile is committed, or the first `uv sync` trips it"}
 GATE_BLOCK = (
     "\n# The done gate. A new scaffold enforces every check, including the ones that start in warn mode for older\n"
     "# projects. Set one to warn (reported, never refusing) if it misfires on honest work here.\n"
-    "gate:\n  checks:\n" + "".join(f"    {kind}: enforce\n" for kind in sorted(DEFAULT_MODES))
+    "gate:\n  checks:\n" + "".join(f"    {kind}: warn  # {SCAFFOLD_WARN[kind]}\n" if kind in SCAFFOLD_WARN
+                                   else f"    {kind}: enforce\n" for kind in sorted(DEFAULT_MODES))
 )
 
 ITS_REPO = "https://github.com/rhagan9202/idea-to-scaffold"  # where scaffolded CI installs `its` from

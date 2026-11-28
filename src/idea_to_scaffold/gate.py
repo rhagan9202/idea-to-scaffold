@@ -43,7 +43,7 @@ from pathlib import Path
 import yaml
 
 from . import claims as cl
-from . import gitx, tamper
+from . import deps, gitx, tamper
 from .backlog import BACKLOG, BRANCH_FIELDS, BacklogItem, check_proposal, parse_backlog
 from .checks import Settings
 from .ids import META_FILES, line_fields
@@ -59,13 +59,23 @@ DEPENDENCY_KINDS = ("dependency_added",)
 # What `its waive --<group>` waives.
 WAIVER_GROUPS = {"test-changes": TEST_KINDS, "outside-touches": SCOPE_KINDS, "dependencies": DEPENDENCY_KINDS}
 WAIVER_FIELD = "Waiver"
+REFUSALS = ("test_changes", "dependency_changes", "outside_touches")  # the error codes a gate refusal has
+
+
+def refusal(blocking: list[dict]) -> str:
+    """The error code for refused findings, by the group of the worst: tests first, then dependencies, then scope."""
+    found = {f["kind"] for f in blocking}
+    if found & set(TEST_KINDS):
+        return "test_changes"
+    return "dependency_changes" if found & set(DEPENDENCY_KINDS) else "outside_touches"
 OWN_FIELDS = set(BRANCH_FIELDS)  # what a branch may change on its own item
 MODES = ("enforce", "warn", "off")
 # Checks that can misfire on honest work start in warn mode: they are reported but don't refuse the item until a
 # person sets `gate: {checks: {<kind>: enforce}}` in package.yaml (a new scaffold sets that for all of them). Every
 # other check enforces. Only the RELAXABLE checks can be set to warn or off; the rest always enforce.
 DEFAULT_MODES = {"assertions_weakened": "warn", "test_disabled": "warn", "test_config_changed": "warn",
-                 "tests_pass_on_parent": "warn", "no_test_report": "warn", "tests_skipped": "warn"}
+                 "tests_pass_on_parent": "warn", "no_test_report": "warn", "tests_skipped": "warn",
+                 "dependency_added": "warn"}
 RELAXABLE = set(DEFAULT_MODES) | {"test_removed", "failures_hidden", "no_tests_ran"}
 DEFAULT_ACCEPTANCE = "tests/acceptance/"
 
@@ -497,6 +507,9 @@ def inspect(pkg: Package, ident: str, base_ref: str | None, *, head: str | None 
                         "message": f"the branch changed {path}, a held-out acceptance test; only a person changes "
                                    "those, on the integration branch"})
             continue
+        if deps.kind_of(path) and change.status != "D":
+            for finding in deps.findings(path, _before(pkg, merge_base, change), after_content(pkg, head, change)):
+                result.add(finding)
         if change.hidden:
             result.add({"kind": "test_config_changed", "file": path, "hidden": True,
                         "message": f"{path} is test configuration that git ignores (through .git/info/exclude, a "

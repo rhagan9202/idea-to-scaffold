@@ -839,9 +839,9 @@ def gate_error(ident: str, blocking: list[dict], inspection: gate.Inspection,
                checks: list[dict] | None = None) -> WorkError:
     """The refusal for findings that aren't allowed: test changes first, since they matter most. `checks` are the
     checks that ran, for a refusal that comes from what their test reports say."""
-    tests = [f for f in blocking if f["kind"] in gate.TEST_KINDS]
-    code = "test_changes" if tests else "outside_touches"
-    worst = tests or blocking
+    code = gate.refusal(blocking)
+    group = {"test_changes": gate.TEST_KINDS, "dependency_changes": gate.DEPENDENCY_KINDS}.get(code, ())
+    worst = [f for f in blocking if f["kind"] in group] or blocking
     fix = ("Make the tests run to the end and report honestly (look for code that exits early, skips, or rewrites "
            "results)" if worst[0]["kind"] in RESULT_KINDS else "Undo that change")
     message = (f"{ident} is not done: {worst[0]['message']}"
@@ -872,7 +872,7 @@ def done(
         payload = _done(pkg, ident, verify=verify, check_only=check_only, on_check=on_check)
     except WorkError as err:
         target = err.details.get("id") or ident
-        if target and err.code in ("check_failed", "test_changes", "outside_touches", "gate_error", "no_fork_point"):
+        if target and err.code in ("check_failed", "gate_error", "no_fork_point", *gate.REFUSALS):
             kinds = sorted({f["kind"] for f in err.details.get("findings", [])})
             ledger.record(pkg, target, "done", err.code, findings=kinds, check_only=check_only or None,
                           checks=[c["name"] for c in err.details.get("checks", []) if not c["passed"]] or None,

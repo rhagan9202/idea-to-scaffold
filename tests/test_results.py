@@ -274,8 +274,11 @@ def test_hooks_that_rewrite_results_are_test_config():
 # --- policy and new scaffolds ------------------------------------------------------------------------------------
 
 def test_a_new_scaffold_enforces_every_check(repo: Path):  # noqa: F811
+    from idea_to_scaffold.scaffold import SCAFFOLD_WARN
     policy = gate.Policy.of(Package.load(repo).manifest, "here")
-    assert {kind: policy.mode(kind) for kind in gate.DEFAULT_MODES} == dict.fromkeys(gate.DEFAULT_MODES, "enforce")
+    expected = {kind: "warn" if kind in SCAFFOLD_WARN else "enforce" for kind in gate.DEFAULT_MODES}
+    assert {kind: policy.mode(kind) for kind in gate.DEFAULT_MODES} == expected
+    assert set(SCAFFOLD_WARN) == {"dependency_added"}  # until scaffold commits the lockfile setup writes
     assert gate.Policy.of({}, "here").mode("no_test_report") == "warn"  # an older project: warn first
 
 

@@ -214,7 +214,7 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
     blocking = inspection.blocking()
     if blocking:
         tests = [f for f in blocking if f["kind"] in gate.TEST_KINDS]
-        return {**result, "reason": "test_changes" if tests else "outside_touches", "findings": blocking,
+        return {**result, "reason": gate.refusal(blocking), "findings": blocking,
                 "message": (tests or blocking)[0]["message"]}
     conflicts = cl.conflicting_files(root, "HEAD", ref)
     generated = _generated(pkg)

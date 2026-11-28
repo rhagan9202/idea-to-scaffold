@@ -95,7 +95,7 @@ def stop_hook(pkg: Package, stdin: str) -> dict | None:
     try:
         result = done(pkg, ident, check_only=True)
     except WorkError as err:
-        if err.code not in ("check_failed", "test_changes", "outside_touches", "gate_error"):
+        if err.code not in ("check_failed", "test_changes", "dependency_changes", "outside_touches", "gate_error"):
             return None
         ledger.record(pkg, ident, "hook", "blocked", reason=err.code)
         report = failure_report(err.details.get("checks", []))
