@@ -1,0 +1,46 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "${runtime}"
+      # its:commands (generated from package.yaml by `its link`; edit package.yaml, not these steps)
+      - run: ${cmd_setup}
+      - run: ${cmd_lint}
+      - run: ${cmd_test}
+      # /its:commands
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # its drift compares each done item's files with the commit it was verified at
+      - uses: astral-sh/setup-uv@v5
+      - run: uvx --from "${its_source}" its validate .
+      - run: uvx --from "${its_source}" its link --check .
+      - run: uvx --from "${its_source}" its drift --check .
+      # lists Must acceptance criteria that no test names; delete continue-on-error once every one has a test
+      - run: uvx --from "${its_source}" its validate . --trace
+        continue-on-error: true
+  gate:
+    # The done gate on the pull request, with the target branch's rules: scope and tamper checks, the item's Verify,
+    # test, lint, its held-out tests and red on parent. With land, this is the one gate every surface meets,
+    # including agents that never run its (a vendor's cloud agent opening a pull request).
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # its gate compares the pull request with the branch it targets
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "${runtime}"
+      # its runs on Python, which uv fetches
+      - uses: astral-sh/setup-uv@v5
+      - run: uvx --from "${its_source}" its gate HEAD .

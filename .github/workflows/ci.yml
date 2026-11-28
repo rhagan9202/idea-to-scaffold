@@ -33,6 +33,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # the Node stack's tests run node --test, whose JUnit reporter its sets through NODE_OPTIONS
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - run: pip install -e '.[dev]'
       # A test stuck for two minutes prints every thread's stack, so a hang shows where it is. The tests read and
       # write files in the platform's default encoding; `its` itself always names UTF-8.

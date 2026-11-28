@@ -129,6 +129,9 @@ def _copy_tree(src: Path, dest_root: Path, dest_prefix: str, written: list[str])
             written.append(rel)
 
 
+STACK_ALIASES = {"javascript": "node", "js": "node", "nodejs": "node"}  # other names for a stack's folder
+
+
 def available_stacks() -> list[str]:
     stacks = templates_dir() / "stacks"
     return sorted(p.name for p in stacks.iterdir() if p.is_dir())
@@ -136,7 +139,7 @@ def available_stacks() -> list[str]:
 
 def _render_stack(pkg: Package, root: Path, written: list[str], warnings: list[str]) -> None:
     stacks = templates_dir() / "stacks"
-    stack = stacks / pkg.language
+    stack = stacks / STACK_ALIASES.get(pkg.language, pkg.language)
     if not stack.is_dir():
         warnings.append(
             f"no skeleton for stack.language {pkg.language!r} (available: {', '.join(available_stacks())}); "
