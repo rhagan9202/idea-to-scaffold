@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import json
 import os
 import re
@@ -1372,6 +1373,22 @@ def _utf8_streams() -> None:
             continue
 
 
+def _stdout_closed() -> bool:
+    """Whether stdout's reader has gone: the write that failed left its bytes in the buffer, so flushing again fails
+    the same way. An EINVAL from anything else leaves stdout able to flush."""
+    try:
+        sys.stdout.flush()
+    except OSError:
+        return True
+    return False
+
+
+def _reader_gone() -> int:
+    with contextlib.suppress(OSError, ValueError, AttributeError):
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    return EXIT_ERROR
+
+
 def main(argv: list[str] | None = None) -> int:
     _utf8_streams()
     argv = sys.argv[1:] if argv is None else list(argv)
@@ -1390,9 +1407,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except BrokenPipeError:  # `its status | head`: the reader stopped reading, so stop writing, quietly
-        with contextlib.suppress(OSError, ValueError, AttributeError):
-            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-        return EXIT_ERROR
+        return _reader_gone()
     except WorkError as err:
         return _fail(args, err)
     except BacklogError as exc:
@@ -1400,6 +1415,8 @@ def main(argv: list[str] | None = None) -> int:
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as exc:  # the JSON contract holds even for a bug: agents always get an error envelope
+        if isinstance(exc, OSError) and os.name == "nt" and exc.errno == errno.EINVAL and _stdout_closed():
+            return _reader_gone()  # on Windows a write to a closed pipe fails with EINVAL, not EPIPE
         if not getattr(args, "json", False):
             raise
         return _fail(args, WorkError("internal_error", f"{type(exc).__name__}: {exc}",
