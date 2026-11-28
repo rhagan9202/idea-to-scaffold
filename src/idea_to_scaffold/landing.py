@@ -18,7 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import claims as cl
-from . import gate, ledger
+from . import gate, gitx, ledger
 from .backlog import BacklogItem, blocked_by, load_backlog, load_proposals, parse_backlog
 from .checks import RESULT_KINDS, Check, checks_for, result_findings, run_check
 from .ids import META_FILES
@@ -40,7 +40,7 @@ from .work import (
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return gitx.run(cwd, *args)
 
 
 def _generated(pkg: Package) -> set[str]:

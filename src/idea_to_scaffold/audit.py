@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import claims as cl
-from . import gate, tamper
+from . import gate, gitx, tamper
 from .backlog import BACKLOG, BacklogItem, parse_backlog, set_field
 from .checks import Check, checks_for, result_findings, run_check, runs_pytest
 from .package import Package
@@ -235,7 +235,7 @@ def _first_assert(text: str) -> tuple[int, int, int, int] | None:
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return gitx.run(cwd, *args)
 
 
 def _target(pkg: Package, ident: str | None, base: str) -> Target:

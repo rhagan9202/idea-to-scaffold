@@ -11,9 +11,9 @@ spellings: `test_fr_001_ac2_rejects_duplicates`, `FR-001/AC2`, `fr001_ac2`, or a
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
 
+from . import gitx
 from .gate import is_test_path
 from .ids import ID_RE, field_value, id_kind, sections, strip_links, strip_strike
 from .package import Package
@@ -85,8 +85,7 @@ def must_requirements(pkg: Package) -> list[dict]:
 
 def test_files(pkg: Package) -> list[str]:
     root = pkg.root
-    proc = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"], cwd=root,
-                          capture_output=True, text=True, encoding="utf-8", errors="replace")
+    proc = gitx.run(root, "ls-files", "--cached", "--others", "--exclude-standard")
     if proc.returncode == 0:
         paths = [p for p in proc.stdout.splitlines() if p]
     else:

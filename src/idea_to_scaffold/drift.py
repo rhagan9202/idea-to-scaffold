@@ -14,10 +14,10 @@ needs the history, so in a shallow clone it is reported as unknown, never as cle
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
 
 from . import claims as cl
+from . import gitx
 from .backlog import BACKLOG, BacklogItem, load_backlog, parse_backlog
 from .gate import _planning_prefix
 from .package import Package
@@ -29,8 +29,7 @@ TREE_RE = re.compile(r"\btree ([0-9a-f]{6,40})\b")
 
 
 def _git(root: Path, *args: str) -> str:
-    proc = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace")
+    proc = gitx.run(root, *args)
     return proc.stdout if proc.returncode == 0 else ""
 
 
@@ -75,8 +74,7 @@ def drift(pkg: Package) -> dict:
     items = load_backlog(pkg)
     history = History(pkg)
     planning = _planning_prefix(pkg)
-    shallow = subprocess.run(["git", "rev-parse", "--is-shallow-repository"], cwd=pkg.root, capture_output=True,
-                             text=True, encoding="utf-8", errors="replace").stdout.strip() == "true"
+    shallow = gitx.out(pkg.root, "rev-parse", "--is-shallow-repository", check=False) == "true"
     drifted, unknown, no_touches, clean = [], [], [], []
     for item in items:
         if item.status != "done":

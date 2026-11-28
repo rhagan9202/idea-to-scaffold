@@ -17,13 +17,12 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import locking
+from . import gitx, locking
 
 BRANCH_PREFIX = "its/"
 # Only permanent IDs can be claimed: placeholders (T-new-...) are renumbered before anyone starts them, and a
@@ -31,20 +30,15 @@ BRANCH_PREFIX = "its/"
 BRANCH_RE = re.compile(r"^(?:refs/heads/|refs/remotes/[^/]+/)?its/(T-\d+\.\d+)(?:-[a-z0-9-]*)?$")
 
 
-class GitError(Exception):
-    """A git command failed, or the folder isn't in a git repository."""
+GitError = gitx.GitError
 
 
 def git(cwd: Path, *args: str, check: bool = True) -> str:
-    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if check and proc.returncode != 0:
-        raise GitError(proc.stderr.strip() or proc.stdout.strip() or f"git {' '.join(args)} failed")
-    return proc.stdout.strip() if proc.returncode == 0 else ""
+    return gitx.out(cwd, *args, check=check)
 
 
 def in_git(cwd: Path) -> bool:
-    proc = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=cwd, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
+    proc = gitx.run(cwd, "rev-parse", "--is-inside-work-tree")
     return proc.returncode == 0 and proc.stdout.strip() == "true"
 
 
@@ -70,8 +64,7 @@ def resolve_base(cwd: Path, base: str, remote: str | None = "origin") -> str | N
     tracking = f"{remote}/{base}" if remote and ref_exists(cwd, f"{remote}/{base}") else None
     if local and tracking:
         a, b = git(cwd, "rev-parse", local), git(cwd, "rev-parse", tracking)
-        if a != b and subprocess.run(["git", "merge-base", "--is-ancestor", a, b], cwd=cwd,
-                                     capture_output=True).returncode == 0:
+        if a != b and gitx.ok(cwd, "merge-base", "--is-ancestor", a, b):
             return tracking
     return local or tracking
 
@@ -90,11 +83,8 @@ def default_remote(cwd: Path, configured: str | None = None) -> str | None:
 
 def fetch(cwd: Path, remote: str, base: str) -> None:
     """Fetch the integration branch and every claim branch, pruning claim branches deleted on the remote."""
-    proc = subprocess.run(
-        ["git", "fetch", "--quiet", "--prune", remote, f"+refs/heads/{base}:refs/remotes/{remote}/{base}",
-         f"+refs/heads/its/*:refs/remotes/{remote}/its/*"],
-        cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
+    proc = gitx.run(cwd, "fetch", "--quiet", "--prune", remote, f"+refs/heads/{base}:refs/remotes/{remote}/{base}",
+                    f"+refs/heads/its/*:refs/remotes/{remote}/its/*")
     if proc.returncode != 0:
         raise GitError(f"couldn't fetch from {remote}: {proc.stderr.strip()}")
 
@@ -106,19 +96,15 @@ class PushRejected(GitError):
 def push_claim(cwd: Path, remote: str, ident: str, branch: str) -> None:
     """Publish a claim. It only succeeds if no claim branch for the item exists on the remote yet, so the remote
     settles a race between machines: the first push wins."""
-    proc = subprocess.run(["git", "ls-remote", "--heads", remote, f"refs/heads/its/{ident}",
-                           f"refs/heads/its/{ident}-*"], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    proc = gitx.run(cwd, "ls-remote", "--heads", remote, f"refs/heads/its/{ident}", f"refs/heads/its/{ident}-*")
     if proc.returncode != 0:
         raise GitError(f"couldn't reach {remote}: {proc.stderr.strip()}")
     taken = [line.split("refs/heads/", 1)[1] for line in proc.stdout.splitlines() if "refs/heads/" in line]
     taken = [b for b in taken if item_of_branch(b) == ident]
     if taken:
         raise PushRejected(f"{ident} is already claimed on {remote} by branch {taken[0]}")
-    proc = subprocess.run(
-        ["git", "push", "--quiet", "--set-upstream", f"--force-with-lease=refs/heads/{branch}:", remote,
-         f"refs/heads/{branch}:refs/heads/{branch}"],
-        cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
+    proc = gitx.run(cwd, "push", "--quiet", "--set-upstream", f"--force-with-lease=refs/heads/{branch}:", remote,
+                    f"refs/heads/{branch}:refs/heads/{branch}")
     if proc.returncode != 0:
         err = proc.stderr.strip()
         if "stale info" in err or "rejected" in err or "already exists" in err:
@@ -129,8 +115,7 @@ def push_claim(cwd: Path, remote: str, ident: str, branch: str) -> None:
 def conflicting_files(cwd: Path, ours: str, theirs: str) -> list[str] | None:
     """Files that would conflict if `theirs` were merged into `ours` (a dry run with `git merge-tree`, which
     changes nothing). [] means it merges cleanly; None means git can't tell (git older than 2.38)."""
-    proc = subprocess.run(["git", "merge-tree", "--write-tree", "--name-only", "--no-messages", ours, theirs],
-                          cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    proc = gitx.run(cwd, "merge-tree", "--write-tree", "--name-only", "--no-messages", ours, theirs)
     if proc.returncode == 0:
         return []
     if proc.returncode == 1:
@@ -151,11 +136,11 @@ def read_at(cwd: Path, ref: str, path: Path) -> str | None:
     symlinks and Windows short names or long-path prefixes can't make it fail."""
     if not path.parent.is_dir():
         return None
-    proc = subprocess.run(["git", "show", f"{ref}:./{path.name}"], cwd=path.parent, capture_output=True)
-    if proc.returncode != 0:
+    data = gitx.show(path.parent, f"{ref}:./{path.name}")
+    if data is None:
         return None
     try:
-        return proc.stdout.decode("utf-8")
+        return data.decode("utf-8")
     except UnicodeDecodeError:
         return None
 
@@ -322,18 +307,14 @@ def remote_claim_branches(cwd: Path, ident: str) -> list[str]:
 def _merged(cwd: Path, ref: str, base_ref: str | None) -> bool:
     if base_ref is None:
         return False
-    return subprocess.run(["git", "merge-base", "--is-ancestor", ref, base_ref], cwd=cwd,
-                          capture_output=True).returncode == 0
+    return gitx.ok(cwd, "merge-base", "--is-ancestor", ref, base_ref)
 
 
 def _refresh_remote(cwd: Path, name: str) -> str | None:
     """Fetch one pushed claim branch (`origin/its/T-2.1-store`) so we judge what is really on the remote. Returns its
     tip, or None if it is gone from the remote (its stale tracking ref is removed)."""
     remote_name, branch = name.split("/", 1)
-    proc = subprocess.run(
-        ["git", "fetch", "--quiet", remote_name, f"+refs/heads/{branch}:refs/remotes/{name}"],
-        cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
+    proc = gitx.run(cwd, "fetch", "--quiet", remote_name, f"+refs/heads/{branch}:refs/remotes/{name}")
     if proc.returncode != 0:
         if "couldn't find remote ref" in proc.stderr.lower():
             git(cwd, "update-ref", "-d", f"refs/remotes/{name}", check=False)

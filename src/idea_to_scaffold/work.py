@@ -23,7 +23,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from . import claims as cl
-from . import gate, ledger, results
+from . import gate, gitx, ledger, results
 from .backlog import (
     BACKLOG,
     BacklogError,
@@ -716,7 +716,7 @@ def red_on_parent(pkg: Package, ident: str, inspection: gate.Inspection, verify_
     except gate.GateError as exc:
         return {"ran": False, "reason": str(exc), "files": [c.path for c in tests]}
     finally:
-        subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=top, capture_output=True)
+        gitx.run(top, "worktree", "remove", "--force", str(tree))
         shutil.rmtree(scratch, ignore_errors=True)
     files = [c.path for c in tests]
     if result["passed"]:
@@ -746,8 +746,7 @@ def hide_acceptance(pkg: Package, worktree: Path, base: str) -> str | None:
     folder = prefix + policy.acceptance
     if not gate.run_git(pkg.root, "ls-tree", "-d", "--name-only", base, "--", folder.rstrip("/"), check=False).strip():
         return None
-    proc = subprocess.run(["git", "sparse-checkout", "set", "--no-cone", "/*", f"!/{folder}"], cwd=worktree,
-                          capture_output=True, text=True, encoding="utf-8", errors="replace")
+    proc = gitx.run(worktree, "sparse-checkout", "set", "--no-cone", "/*", f"!/{folder}")
     if proc.returncode != 0:
         raise WorkError("git_error", f"couldn't hide {folder} from the worktree: {proc.stderr.strip()}",
                         details={"worktree": str(worktree)})
@@ -785,8 +784,7 @@ def gate_target(pkg: Package, ident: str) -> tuple[str | None, str | None]:
     fork = None
     if here is not None and here == name:
         fork = cl.fork_of(pkg.root, ident)
-        if fork and subprocess.run(["git", "merge-base", "--is-ancestor", fork, "HEAD"], cwd=pkg.root,
-                                   capture_output=True).returncode != 0:
+        if fork and not gitx.ok(pkg.root, "merge-base", "--is-ancestor", fork, "HEAD"):
             raise WorkError("gate_error", f"{ident} can't be checked: the commit it started from ({fork[:10]}) is no "
                             f"longer in {name}'s history; start it again", EXIT_CHECK_FAILED, {"id": ident})
     return ref, fork

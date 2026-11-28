@@ -34,14 +34,13 @@ from __future__ import annotations
 
 import posixpath
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 from . import claims as cl
-from . import tamper
+from . import gitx, tamper
 from .backlog import BACKLOG, BacklogItem, parse_backlog
 from .ids import META_FILES, line_fields
 from .package import Package
@@ -161,8 +160,7 @@ class Inspection:
 def run_git(cwd: Path, *args: str, check: bool = True, input_text: str | None = None) -> str:
     """Run git with unquoted UTF-8 paths. With `check`, a failure raises GateError instead of reading as "no
     changes"."""
-    proc = subprocess.run(["git", "-c", "core.quotePath=false", *args], cwd=cwd, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", input=input_text)
+    proc = gitx.run(cwd, *args, input=input_text)
     if check and proc.returncode != 0:
         raise GateError(f"git {args[0]} failed: {proc.stderr.strip() or proc.stdout.strip() or proc.returncode}")
     return proc.stdout if proc.returncode == 0 else ""
@@ -226,8 +224,8 @@ def _before(pkg: Package, merge_base: str, change: Change) -> str | None:
     if change.status == "A" and change.git_old_path is None:
         return None
     path = change.git_old_path or change.git_path
-    proc = subprocess.run(["git", "show", f"{merge_base}:{path}"], cwd=cl.toplevel(pkg.root), capture_output=True)
-    return proc.stdout.decode("utf-8", "replace") if proc.returncode == 0 else None
+    data = gitx.show(cl.toplevel(pkg.root), f"{merge_base}:{path}")
+    return data.decode("utf-8", "replace") if data is not None else None
 
 
 def after_content(pkg: Package, head: str | None, change: Change) -> str | None:
@@ -240,8 +238,8 @@ def after_content(pkg: Package, head: str | None, change: Change) -> str | None:
             return (top / change.git_path).read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
-    proc = subprocess.run(["git", "show", f"{head}:{change.git_path}"], cwd=top, capture_output=True)
-    return proc.stdout.decode("utf-8", "replace") if proc.returncode == 0 else None
+    data = gitx.show(top, f"{head}:{change.git_path}")
+    return data.decode("utf-8", "replace") if data is not None else None
 
 
 # --- the plan --------------------------------------------------------------------------------------------------

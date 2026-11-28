@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import hashlib
 import os
-import subprocess
 import tempfile
 import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
+from . import gitx
 
 LOCK_WAIT_SECONDS = 60.0
 LOCK_NAME = "claims.lock"
@@ -33,8 +34,7 @@ class LockTimeout(Exception):
 
 def git_store_dir(cwd: Path) -> Path | None:
     """`<git common dir>/its`, or None outside a git repository."""
-    proc = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=cwd, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
+    proc = gitx.run(cwd, "rev-parse", "--git-common-dir")
     if proc.returncode != 0 or not proc.stdout.strip():
         return None
     common = Path(proc.stdout.strip())
