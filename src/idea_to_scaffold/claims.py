@@ -14,6 +14,7 @@ otherwise): an item's dependency counts as done when it is done there, that is, 
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -384,9 +385,11 @@ def release_claim(
         for claim in local:
             if claim.branch == checked_out:
                 raise GitError(f"{claim.branch} is checked out in {run_dir}; switch to another branch first")
+        setup_only = False  # the worktree holds nothing but what its's setup wrote: removing it loses no work
         if not force:
-            if wt is not None and git(wt, "status", "--porcelain", check=False):
+            if wt is not None and uncommitted(wt, ident, store):
                 raise GitError(f"{wt} has uncommitted changes; commit them, or add --force to discard them")
+            setup_only = wt is not None and bool(git(wt, "status", "--porcelain", check=False))
             if ident not in closed:
                 unmerged = [c.branch for c in local if not _merged(run_dir, f"refs/heads/{c.branch}", base_ref)]
                 if remote:
@@ -397,7 +400,7 @@ def release_claim(
 
         removed_worktree = None
         if wt is not None:
-            git(run_dir, "worktree", "remove", *(["--force"] if force else []), str(wt))
+            git(run_dir, "worktree", "remove", *(["--force"] if force or setup_only else []), str(wt))
             removed_worktree = str(wt)
         elif worktree:
             git(run_dir, "worktree", "prune", check=False)  # deleted by hand: forget it
@@ -522,3 +525,71 @@ def touches_overlap(a: list[str], b: list[str]) -> bool:
     if not a or not b:
         return True
     return any(paths_overlap(x, y) for x in a for y in b)
+
+
+# --- what `its`'s own setup wrote -----------------------------------------------------------------------------
+# `its start` runs the setup command in a new worktree, as the lead and before any agent runs. A lockfile that setup
+# writes (`uv.lock` on a project without one) isn't the agent's dependency change, so the gate lets it through when
+# its content is still what setup wrote. The record lives in the state folder, outside every checkout.
+
+def record_setup(cwd: Path, ident: str, files: dict[str, str]) -> None:
+    """Remember the lockfiles `its`'s setup wrote for an item: repository path to content digest."""
+    store = _store_dir(cwd)
+    data = _load_json(store / "setup.json")
+    if files:
+        data[ident] = files
+    else:
+        data.pop(ident, None)
+    store.mkdir(parents=True, exist_ok=True)
+    tmp = store / "setup.json.tmp"
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    os.replace(tmp, store / "setup.json")
+
+
+def content_digest(text: str | None) -> str:
+    """A digest of a file's text as the gate reads it, for the setup record."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16] if text is not None else ""
+
+
+def uncommitted(checkout: Path, ident: str | None = None, store: Path | None = None) -> list[str]:
+    """The paths with uncommitted changes in `checkout`, without the lockfiles `its`'s setup wrote there for `ident`
+    that still hold what it wrote: those aren't anyone's work, so they don't keep a claim from being released."""
+    proc = gitx.run(checkout, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if proc.returncode != 0:
+        raise GitError(f"couldn't read the status of {checkout}: {proc.stderr.strip()}")
+    written = {}
+    if ident:
+        entry = _load_json((store or _store_dir(checkout)) / "setup.json").get(ident)
+        written = entry if isinstance(entry, dict) else {}
+    entries, out = iter(proc.stdout.split("\0")), []
+    for entry in entries:
+        if len(entry) < 4:
+            continue
+        if entry[0] in "RC":
+            next(entries, None)  # the rename's old path
+        path = entry[3:]
+        if path in written and entry[:2] in ("??", " M"):
+            try:
+                text = (checkout / path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = None
+            if text is not None and written[path] == content_digest(text):
+                continue
+        out.append(path)
+    return out
+
+
+def setup_of(cwd: Path, ident: str) -> dict[str, str]:
+    try:
+        entry = _load_json(_store_dir(cwd) / "setup.json").get(ident)
+    except GitError:
+        return {}
+    return {str(k): str(v) for k, v in entry.items()} if isinstance(entry, dict) else {}
+
+
+def _load_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}

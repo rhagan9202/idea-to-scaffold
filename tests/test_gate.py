@@ -333,6 +333,16 @@ def test_a_failing_test_is_reported_once():
     assert "lint" not in report
 
 
+def test_a_second_different_failure_is_shown_too():  # B8
+    from idea_to_scaffold.work import failure_report
+    report = failure_report([
+        {"name": "test", "command": "pytest", "exit_code": 1, "passed": False, "output": "E   assert 1 == 2"},
+        {"name": "lint", "command": "ruff check .", "exit_code": 1, "passed": False,
+         "output": "app.py:1:8: F401 `os` imported but unused"},
+    ])
+    assert "assert 1 == 2" in report and "F401" in report and "same output" not in report
+
+
 def test_the_stop_hook_blocks_until_the_gate_passes(claim: Path, repo: Path, capsys):  # noqa: F811
     pkg = Package.load(claim)
     (claim / TEST).unlink()
@@ -343,9 +353,13 @@ def test_the_stop_hook_blocks_until_the_gate_passes(claim: Path, repo: Path, cap
     git(claim, "checkout", "--", TEST)
     decision = stop_hook(pkg, "{}")
     assert decision["decision"] == "block" and "no files outside the planning folder" in decision["reason"]
+    assert "Make the change the item asks for" in decision["reason"] and "Undo" not in decision["reason"]  # B13
+    headless = stop_hook(pkg, "{}", headless=True)
+    assert "its done T-2.1 --check" in headless["reason"] and "end with status blocked" in headless["reason"]
     (claim / "src/streak/store.py").write_text("def add(): ...\n")
     decision = stop_hook(pkg, "{}")
     assert decision["decision"] == "block" and "isn't marked done" in decision["reason"]
+    assert stop_hook(pkg, "{}", headless=True) is None  # unattended: its done --result marks it once the agent ends
     assert main(["done", "T-2.1", str(claim)]) == 0
     assert stop_hook(pkg, "{}") is None
     assert stop_hook(Package.load(repo), "{}") is None  # on main nothing is in progress: let it stop

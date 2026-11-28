@@ -73,7 +73,7 @@ def test_start_writes_launchers_that_keep_the_guards(repo: Path, capsys, state_h
         assert not settings.is_relative_to(folder)
     assert settings.is_relative_to(state_home.resolve())
     data = json.loads(settings.read_text())
-    assert data["hooks"]["Stop"][0]["hooks"][0]["command"] == "its hook stop"
+    assert data["hooks"]["Stop"][0]["hooks"][0]["command"] == "its hook stop --headless"
     assert data["sandbox"]["enabled"] is True and data["sandbox"]["failIfUnavailable"] is True
     assert git(repo, "status", "--porcelain") == ""  # nothing written into the checkout
 

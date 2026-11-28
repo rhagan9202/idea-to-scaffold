@@ -20,17 +20,29 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 
 from . import claims as cl
-from . import gate, gitx, ledger, trust
-from .backlog import BacklogItem, blocked_by, load_backlog, load_proposals, parse_backlog
+from . import gate, gitx, heldout, ledger, trust
+from .backlog import BacklogItem, blocked_by, load_backlog, load_proposals, parse_backlog, set_field
 from .checks import RESULT_KINDS, Check, checks_for, result_findings, run_check
 from .contract import EXIT_NOT_LANDED, SCHEMA, WorkError
 from .ids import META_FILES
 from .linker import link_package
 from .package import Package
-from .work import BACKLOG, BACKLOG_JSON, _locked, _refresh_mirror, changed_tests, integration_branch, remote_of, shown
+from .touches import covered
+from .work import (
+    BACKLOG,
+    BACKLOG_JSON,
+    _locked,
+    _refresh_mirror,
+    changed_tests,
+    integration_branch,
+    remote_of,
+    shown,
+    touches_hash_at,
+)
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
@@ -120,9 +132,12 @@ def land(
     skipped += early
     pending = list(ready)
     progress = True
-    while pending and progress:  # an item whose dependency lands later in this run gets another turn
+    broken: dict | None = None  # the integration branch itself fails a check: no other item can land on it
+    while pending and progress and broken is None:  # an item whose dependency lands later gets another turn
         progress = False
         for claim, ref in list(pending):
+            if broken is not None:
+                break
             items = load_backlog(pkg)
             item = next((i for i in items if i.id == claim.id), None)
             waiting = blocked_by(item, items) if item else []
@@ -132,11 +147,16 @@ def land(
             progress = True
             outcome = _land_one(pkg, claim, ref, verify=verify, dry_run=dry_run, on_check=on_check, remote=remote)
             (landed if outcome["landed"] else skipped).append(outcome)
+            if outcome.get("reason") == "base_failing":
+                broken = outcome
             if not dry_run:
                 ledger.record(pkg, claim.id, "land", "landed" if outcome["landed"] else outcome.get("reason", "skipped"),
                               findings=sorted({f["kind"] for f in outcome.get("findings", [])}) or None,
                               checks=[c["name"] for c in outcome.get("checks", []) if not c["passed"]] or None)
-    for claim, _ in pending:
+    for claim, _ in pending if broken is not None else []:
+        skipped.append({"id": claim.id, "branch": claim.branch, "reason": "base_failing", "landed": False,
+                        "message": f"not tried: {broken['message']}"})
+    for claim, _ in pending if broken is None else []:
         items = load_backlog(pkg)
         item = next((i for i in items if i.id == claim.id), None)
         skipped.append({"id": claim.id, "branch": claim.branch, "reason": "waiting", "landed": False,
@@ -197,7 +217,7 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
     root = pkg.root
     result = {"id": claim.id, "branch": claim.branch, "landed": False}
     try:  # the done gate again, on what would merge
-        inspection = gate.inspect(pkg, claim.id, "HEAD", head=ref)
+        inspection = gate.inspect(pkg, claim.id, "HEAD", head=ref, setup_files=cl.setup_of(root, claim.id))
     except gate.GateError as exc:
         return {**result, "reason": "gate_error", "message": f"{claim.id} can't be checked: {exc}"}
     blocking = inspection.blocking()
@@ -231,13 +251,23 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
         if "reason" in merged:
             return {**result, **merged}
         checks: list[dict] = []
+        held: dict | None = None
+        reverified: list[str] = []
         if verify and pkg.repo_layout:
             here = tree / prefix if prefix else tree
             commands = inspection.policy.commands
+            settings = inspection.policy.run
             item = inspection.planned or _item_at(pkg, ref, claim.id)
             plan = checks_for(pkg, item, inspection.verify_command, commands, acceptance=True) if item else []
+            folder = prefix + inspection.policy.acceptance
+            try:  # held-out tests of items not done on the merged result stay out (heldout.py)
+                held = heldout.show_for(tree, folder, heldout.done_ids(load_backlog(Package.load(here))))
+            except gitx.GitError as exc:
+                return {**result, "reason": "git_error", "message": str(exc)}
+            if held is not None and not held["runs"]:  # every held-out test belongs to an item that isn't done yet
+                plan = [c for c in plan if c.name != "acceptance"]
             if commands.get("setup") and plan:  # a fresh worktree has no installed dependencies yet
-                setup = run_check(Check("setup", commands["setup"]), here, inspection.policy.run)
+                setup = run_check(Check("setup", commands["setup"]), here, settings)
                 if not setup["passed"]:
                     return {**result, "reason": "check_failed", "checks": [setup],
                             "message": f"setup ({commands['setup']}) failed in the merge worktree; "
@@ -245,19 +275,24 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
             for check in plan:
                 if on_check:
                     on_check(claim.id, check)
-                checks.append(run_check(check, here, inspection.policy.run))
+                checks.append(run_check(check, here, settings))
                 if not checks[-1]["passed"]:
                     break
-        failed = [c["name"] for c in checks if not c["passed"]]
-        if failed:
-            return {**result, "reason": "check_failed", "checks": checks,
-                    "message": f"{', '.join(failed)} failed on the merged result; {claim.id} was not landed"}
-        for finding in result_findings(checks, changed_tests(pkg, inspection)):
-            inspection.add(finding)
-        refused = [f for f in inspection.blocking() if f["kind"] in RESULT_KINDS]
-        if refused:
-            return {**result, "reason": "test_changes", "findings": refused, "checks": checks,
-                    "message": f"{refused[0]['message']}; {claim.id} was not landed"}
+            if checks and not checks[-1]["passed"]:
+                return _failed(pkg, claim, result, checks, plan[len(checks) - 1], tree, here, before, folder,
+                               commands, settings, held)
+            for finding in result_findings(checks, changed_tests(pkg, inspection)):
+                inspection.add(finding)
+            refused = [f for f in inspection.blocking() if f["kind"] in RESULT_KINDS]
+            if refused:
+                return {**result, "reason": "test_changes", "findings": refused, "checks": checks,
+                        "message": f"{refused[0]['message']}; {claim.id} was not landed"}
+            others = _reverify(pkg, claim.id, tree, here, before, settings, on_check)
+            if "reason" in others:
+                return {**result, **others, "checks": checks + others.pop("checks", [])}
+            checks += others["checks"]
+            reverified = others["reverified"]
+            _mark_landed(here, tree, claim.id, before, reverified)
         commit = _git(tree, "rev-parse", "HEAD").stdout.strip()
         with _locked(pkg):
             if _git(root, "rev-parse", "HEAD").stdout.strip() != before:
@@ -271,12 +306,102 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
             trust.record(root, integration_branch(pkg), commit)
         _refresh_mirror(pkg)
         return {**result, "landed": True, "commit": commit, "checks": checks, "warnings": inspection.warnings,
+                "held_out": held, "reverified": reverified,
                 "checks_skipped": None if (verify and pkg.repo_layout) else
                 ("--no-verify" if not verify else "this is a planning package, not a scaffolded repo")}
     finally:
         _git(root, "worktree", "remove", "--force", str(tree))
         shutil.rmtree(scratch, ignore_errors=True)
         _git(root, "worktree", "prune")
+
+
+BASE_CHECKED = ("test", "lint", "acceptance")  # Verify is the item's own: it is meant to fail without the item
+
+
+def _failed(pkg: Package, claim: cl.Claim, result: dict, checks: list[dict], check: Check, tree: Path, here: Path,
+            before: str, folder: str, commands: dict, settings, held: dict | None) -> dict:
+    """Why a check failed on the merged result, and whose fault it is. A test, lint or held-out check that fails on
+    the integration branch too, before the item is merged, is the integration branch's (`base_failing`), not the
+    item's (B14). A held-out failure is named by the item whose held-out tests failed."""
+    failed = checks[-1]
+    name = check.name
+    if name in BASE_CHECKED:
+        on_base = _on_base(tree, here, before, check, folder, commands, settings)
+        if on_base is not None and not on_base["passed"]:
+            base = integration_branch(pkg)
+            return {**result, "reason": "base_failing", "checks": checks, "base_check": on_base,
+                    "message": f"{name} fails on {base} itself, before {claim.id} is merged ({check.command}); fix "
+                               f"{base}, then run its land again"}
+    owners = heldout.failing_items(failed, folder)
+    if owners:
+        whose = ", ".join(f"{o}'s held-out tests ({folder.rstrip('/')}/{o}/)" for o in owners)
+        message = f"{name} failed on the merged result: {whose}; {claim.id} was not landed"
+    else:
+        message = f"{name} failed on the merged result; {claim.id} was not landed"
+    return {**result, "reason": "check_failed", "checks": checks, "held_out": held, "held_out_failed": owners,
+            "message": message}
+
+
+def _on_base(tree: Path, here: Path, before: str, check: Check, folder: str, commands: dict, settings) -> dict | None:
+    """Run `check` on the integration branch as it was before the merge, in the same worktree: held-out tests of
+    the items done there, after setup. None if the worktree can't be moved there."""
+    if _git(tree, "checkout", "--detach", "--quiet", "--force", before).returncode != 0:
+        return None
+    try:
+        view = heldout.show_for(tree, folder, heldout.done_ids(load_backlog(Package.load(here))))
+    except (gitx.GitError, OSError):
+        return None
+    if check.name == "acceptance" and (view is None or not view["runs"]):
+        return {"name": check.name, "command": check.command, "passed": True, "exit_code": 0, "output": "",
+                "skipped": "no held-out test of an item done there"}
+    if commands.get("setup"):
+        setup = run_check(Check("setup", commands["setup"]), here, settings)
+        if not setup["passed"]:
+            return setup
+    return run_check(check, here, settings)
+
+
+def _reverify(pkg: Package, ident: str, tree: Path, here: Path, before: str, settings,
+              on_check: Callable[[str, Check], None] | None) -> dict:
+    """Run again the Verify command of every other done item whose Touches the merge changed, so its Verified mark
+    can be refreshed in the merge commit and `its drift` stays quiet for what land has checked. One that fails
+    refuses the landing: the merge broke an item that was done."""
+    merged = Package.load(here)
+    changed = [f for f in _git(here, "diff", "-z", "--name-only", "--relative", before, "HEAD").stdout.split("\0") if f]
+    checks: list[dict] = []
+    again: list[str] = []
+    for other in load_backlog(merged):
+        if other.id == ident or other.status != "done" or not other.touches or not other.verify_command:
+            continue
+        if (other.get("Verified") or "").startswith("skipped") or not any(covered(f, other.touches) for f in changed):
+            continue
+        check = Check(f"verify {other.id}", other.verify_command)
+        if on_check:
+            on_check(ident, check)
+        checks.append(run_check(check, here, settings))
+        if not checks[-1]["passed"]:
+            return {"reason": "check_failed", "checks": checks,
+                    "message": f"{other.id}'s Verify fails on the merged result ({other.verify_command}), so merging "
+                               f"{ident} broke work that was done; {ident} was not landed"}
+        again.append(other.id)
+    return {"checks": checks, "reverified": again}
+
+
+def _mark_landed(here: Path, tree: Path, ident: str, before: str, others: list[str]) -> None:
+    """Write the Verified mark of the landed item, and of the other items checked again, from the merged tree, and
+    amend the merge commit with it: the mark then describes what landed, not the agent's working tree (E1)."""
+    merged = Package.load(here)
+    stamp = f"{date.today().isoformat()}, base {before[:10]}"
+    wrote = False
+    for item in load_backlog(merged):
+        if item.id != ident and item.id not in others:
+            continue
+        tree_hash = touches_hash_at(merged, item.touches, "HEAD")
+        set_field(merged, item.id, "Verified", stamp + (f", tree {tree_hash}" if tree_hash else ""), add=True)
+        wrote = True
+    if wrote:
+        _git(tree, "add", "--", str(merged.path_of(BACKLOG)))
+        _git(tree, "commit", "--quiet", "--amend", "--no-edit")
 
 
 def _merge_in(tree: Path, prefix: str, ref: str, message: str, generated: set[str]) -> dict:

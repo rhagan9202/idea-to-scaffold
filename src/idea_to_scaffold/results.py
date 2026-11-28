@@ -99,7 +99,7 @@ def claude_settings() -> dict:
     run stops instead of running unsandboxed (`failIfUnavailable`), with no way for a command to step outside it
     (`allowUnsandboxedCommands: false`)."""
     return {
-        "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "its hook stop", "timeout": HOOK_TIMEOUT}]}]},
+        "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "its hook stop --headless", "timeout": HOOK_TIMEOUT}]}]},
         "sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True, "failIfUnavailable": True,
                     "allowUnsandboxedCommands": False},
     }

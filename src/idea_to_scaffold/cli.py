@@ -9,7 +9,7 @@ import re
 import sys
 from pathlib import Path
 
-from . import __version__, trust
+from . import __version__, gate, trust
 from . import claims as cl
 from .audit import gate_audit
 from .backlog import BacklogError
@@ -58,6 +58,7 @@ from .work import (
     stale_note,
     start,
     verify,
+    verify_many,
     write_backlog_json,
 )
 
@@ -188,6 +189,12 @@ def cmd_gate_audit(args: argparse.Namespace) -> int:
         return _fail(args, err)
     ok = payload["ok"] or (args.allow_warn and not payload["missed"])
     code = 0 if ok else EXIT_AUDIT_MISSED
+    payload["ok"] = ok
+    if not ok:  # an ok: false object always has an error (section 16)
+        missed = payload["missed"] or payload["warned"]
+        payload["error"] = WorkError("audit_missed", f"the gate {'missed' if payload['missed'] else 'only warned about'} "
+                                     f"{len(missed)} seeded cheat(s): {', '.join(missed)}", EXIT_AUDIT_MISSED,
+                                     {"missed": payload["missed"], "warned": payload["warned"]}).to_dict()["error"]
     if args.json:
         _emit(payload)
         return code
@@ -248,17 +255,13 @@ def _verify_many(args: argparse.Namespace, pkg: Package, announce) -> int:
     else:
         from .backlog import load_backlog
         ids = [i.id for i in load_backlog(pkg) if i.status == "done" and i.touches]
-    verified, failed = [], []
-    for ident in ids:
-        if not args.json:
-            print(f"{ident}:")
-        try:
-            verified.append(verify(pkg, ident, on_check=announce))
-        except WorkError as err:
-            failed.append({"id": ident, **err.to_dict()["error"]})
-            if not args.json:
-                print(f"  not verified: {err.message}")
+    verified, failed = verify_many(pkg, ids, on_check=announce,
+                                   on_item=None if args.json else (lambda ident: print(f"{ident}:")))
     result = {"schema": SCHEMA, "ok": not failed, "verified": verified, "failed": failed}
+    if failed:  # an ok: false object always has an error (section 16)
+        result["error"] = WorkError("not_verified", f"{len(failed)} item(s) failed their checks again: "
+                                    + ", ".join(f["id"] for f in failed), EXIT_CHECK_FAILED,
+                                    {"failed": [f["id"] for f in failed]}).to_dict()["error"]
     if verified:
         _commit(args, pkg, result, "Re-verify " + ", ".join(v["id"] for v in verified))
     if args.json:
@@ -266,9 +269,12 @@ def _verify_many(args: argparse.Namespace, pkg: Package, announce) -> int:
     elif not ids:
         print("nothing to verify" + (": no item has drifted" if args.drifted else ""))
     else:
+        for f in failed:
+            print(f"  not verified: {f['id']}: {f['message']}")
         print(f"verified again: {', '.join(v['id'] for v in verified) or 'none'}"
               + (f"; failed: {', '.join(f['id'] for f in failed)}" if failed else "")
-              + (" (commit the backlog to record it)" if verified else ""))
+              + ((f" (committed {result['committed']})" if result.get("committed") else
+                  " (commit the backlog to record it)") if verified else ""))
     return EXIT_CHECK_FAILED if failed else 0
 
 
@@ -454,7 +460,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     try:
         payload = start(pkg, None if args.next else args.id, force=args.force, branch=args.branch,
                         worktree=args.worktree, agent=args.agent, base=args.base, allow_overlap=args.allow_overlap,
-                        push=False if args.no_push else None)
+                        push=False if args.no_push else None, setup=not args.no_setup)
     except WorkError as err:
         if err.code == "blocked" and not args.json:
             print(f"error: {err.message} (use --force to start it anyway)", file=sys.stderr)
@@ -476,6 +482,14 @@ def cmd_start(args: argparse.Namespace) -> int:
             print(f"  pushed to {payload['remote']}, so other machines see the claim")
         elif payload.get("push_error"):
             print(f"  warning: the claim is only local; pushing it failed: {payload['push_error']}")
+        setup = payload.get("setup")
+        if setup and setup["passed"]:
+            wrote = f"; it wrote {', '.join(setup['lockfiles'])}, which done lets through" if setup["lockfiles"] else ""
+            print(f"  ran setup in the worktree: {setup['command']}{wrote}")
+        elif setup:
+            print(f"  warning: setup failed in the worktree (exit {setup['exit_code']}): {setup['command']}")
+            for line in (setup.get("output") or "").splitlines()[-5:]:
+                print(f"    {line}")
         print("start an agent on it:")
         print(f"  {payload['commands']['claude']}")
         print(f"  {payload['commands']['codex']}")
@@ -621,7 +635,7 @@ def cmd_done(args: argparse.Namespace) -> int:
         else:
             payload = done(pkg, args.id, **options)
     except WorkError as err:
-        if err.code in ("test_changes", "dependency_changes", "outside_touches") and not args.json \
+        if err.code in gate.REFUSALS and not args.json \
                 and len(err.details["findings"]) > 1:
             for finding in err.details["findings"]:
                 print(f"  {finding['kind']}: {finding['message']}")
@@ -947,7 +961,7 @@ def cmd_hook(args: argparse.Namespace) -> int:
     try:
         stdin = "" if sys.stdin.isatty() else sys.stdin.read()
         pkg = Package.find(hook_dir(parse_event(stdin), args.dir))
-        decision = stop_hook(pkg, stdin)
+        decision = stop_hook(pkg, stdin, headless=args.headless)
     except Exception:  # noqa: BLE001 - a broken hook must not trap the agent
         return 0
     if decision:
@@ -1098,6 +1112,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-overlap", action="store_true",
         help="start it even though its Touches don't confirm it is apart from the items already running",
     )
+    s.add_argument("--no-setup", action="store_true",
+                   help="with --worktree: don't run the setup command (commands.setup) in the new worktree")
     s.add_argument("--no-push", action="store_true",
                    help="keep a claim local (by default it is pushed to the remote, if there is one)")
     s.add_argument("--base", help=base_help)
@@ -1290,6 +1306,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("hook", help="run a hook (what the files written by its hooks call)")
     s.add_argument("event", choices=["stop"])
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--headless", action="store_true",
+                   help="an unattended run: ask only for passing checks; its done --result marks and commits")
     s.set_defaults(func=cmd_hook)
 
     s = sub.add_parser("scaffold", help="create the project repo from a package")

@@ -11,13 +11,14 @@ from pathlib import Path
 import pytest
 
 import idea_to_scaffold
+from idea_to_scaffold import claims as cl
 from idea_to_scaffold import ledger
 from idea_to_scaffold.package import Package
 from idea_to_scaffold.results import RESULT_SCHEMA
 
 from .test_gate import TEST, claim  # noqa: F401 - fixtures
 from .test_landing import git_identity, py, remote, repo  # noqa: F401 - fixtures
-from .test_parallel import git, run_json
+from .test_parallel import git, run_json, set_field
 
 
 def envelope(result: dict | None, cost: float = 0.42, **extra) -> str:
@@ -247,3 +248,226 @@ def test_release_forgets_a_claim_branch_another_machine_deleted(repo: Path, remo
     code, out = run_json(capsys, "release", "T-2.1", str(other))
     assert code == 0 and out["released"] and out["remote_branches"] == [], out
     assert not any("its/T-2.1" in r for r in git(other, "branch", "-r").split())
+
+
+# --- setup in new worktrees, and the lockfiles it writes (B3) --------------------------------------------------------
+
+def set_setup(repo: Path, code: str) -> None:  # noqa: F811
+    manifest = repo / "docs/planning/package.yaml"
+    text = manifest.read_text()
+    start = text.index("setup: ")
+    manifest.write_text(text[:start] + f"setup: {json.dumps(py(code))}" + text[text.index("\n", start):])
+    git(repo, "commit", "-qam", "setup writes a lockfile")
+
+
+def test_start_runs_setup_and_done_lets_its_lockfile_through(repo: Path, capsys):  # noqa: F811
+    set_setup(repo, "open('uv.lock', 'w').write('version = 1\\n')")
+    code, out = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
+    wt = Path(out["claim"]["worktree"])
+    assert code == 0 and out["setup"]["passed"] and out["setup"]["lockfiles"] == ["uv.lock"], out
+    assert (wt / "uv.lock").is_file()
+    (wt / "src/streak/store.py").write_text("def add(): ...\n")
+    code, out = run_json(capsys, "done", "T-2.1", str(wt))
+    assert code == 0 and out["setup_files"] == ["uv.lock"], out  # neither outside Touches nor a dependency change
+    git(wt, "add", "-A")
+    git(wt, "commit", "-qm", "feat(store): add the store [T-2.1]")
+    code, out = run_json(capsys, "land", "--dir", str(repo))
+    assert code == 0 and [x["id"] for x in out["landed"]] == ["T-2.1"], out
+    assert (repo / "uv.lock").is_file()  # the lockfile is on main now, so later items don't write one
+
+
+def test_a_lockfile_the_agent_changed_is_still_a_dependency_change(repo: Path, capsys):  # noqa: F811
+    set_setup(repo, "open('uv.lock', 'w').write('version = 1\\n')")
+    _, out = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
+    wt = Path(out["claim"]["worktree"])
+    (wt / "src/streak/store.py").write_text("def add(): ...\n")
+    (wt / "uv.lock").write_text("version = 1\n[[package]]\nname = 'evil'\n")
+    code, out = run_json(capsys, "done", "T-2.1", str(wt))
+    assert code == 5 and out["error"]["code"] == "outside_touches" and out["error"]["setup_files"] == [], out
+    assert "uv.lock" in out["error"]["findings"][0]["files"]
+    assert any(f["kind"] == "dependency_added" for f in out["error"]["warnings"])  # warn mode until it is committed
+
+
+def test_release_doesnt_count_setup_output_as_work(repo: Path, capsys):  # noqa: F811
+    set_setup(repo, "open('uv.lock', 'w').write('version = 1\\n')")
+    _, out = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
+    wt = Path(out["claim"]["worktree"])
+    assert cl.uncommitted(wt, "T-2.1") == [] and cl.uncommitted(wt) == ["uv.lock"]
+    code, out = run_json(capsys, "release", "T-2.1", str(repo))  # no commits, only setup's lockfile: nothing lost
+    assert code == 0 and out["removed_worktree"] and not wt.exists(), out
+    _, out = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
+    wt = Path(out["claim"]["worktree"])
+    (wt / "uv.lock").write_text("version = 2\n")  # changed since setup wrote it: that is work
+    code, out = run_json(capsys, "release", "T-2.1", str(repo))
+    assert code == 1 and "uncommitted" in out["error"]["message"] and wt.exists()
+
+
+def test_no_setup_skips_it(repo: Path, capsys):  # noqa: F811
+    set_setup(repo, "open('uv.lock', 'w').write('version = 1\\n')")
+    code, out = run_json(capsys, "start", "T-2.1", str(repo), "--worktree", "--no-setup")
+    assert code == 0 and out["setup"] is None and not (Path(out["claim"]["worktree"]) / "uv.lock").exists()
+
+
+@pytest.mark.parametrize("profile", ["package", "lite"])
+def test_the_templates_first_item_touches_nothing_the_gate_always_refuses(profile: str):  # H1
+    from idea_to_scaffold import gate
+    from idea_to_scaffold.backlog import parse_backlog
+    text = (Path(idea_to_scaffold.__file__).parent / "templates" / profile / "planning/07-backlog.md").read_text(
+        encoding="utf-8")
+    first = next(i for i in parse_backlog(text) if i.id == "T-1.1")
+    assert first.touches and not any(gate.AGENT_CONFIG.search(t) for t in first.touches)
+    assert "lockfile" in first.get("Do")
+
+
+# --- per-item held-out tests (B2), and failures that are the base's (B14) -------------------------------------------
+
+def held_out(repo: Path, files: dict[str, str]) -> None:  # noqa: F811
+    """Held-out tests on main, and an acceptance command that runs them."""
+    for rel, body in files.items():
+        path = repo / "tests/acceptance" / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+    manifest = repo / "docs/planning/package.yaml"
+    text = manifest.read_text()
+    command = subprocess.list2cmdline([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                                       "tests/acceptance"]) if os.name == "nt" else \
+        f"'{sys.executable}' -m pytest -q -p no:cacheprovider tests/acceptance"
+    if "  acceptance: " not in text:
+        manifest.write_text(text.replace("commands:\n", f"commands:\n  acceptance: {json.dumps(command)}\n", 1))
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "held-out tests")
+
+
+def finish(repo: Path, ident: str, path: str, capsys) -> Path:  # noqa: F811
+    _, out = run_json(capsys, "start", ident, str(repo), "--worktree")
+    wt = Path(out["claim"]["worktree"])
+    assert not (wt / "tests/acceptance").exists()  # hidden from the agent
+    (wt / path).write_text("def f(): ...\n")
+    assert run_json(capsys, "done", ident, str(wt), "--no-verify")[0] == 0
+    git(wt, "add", "-A")
+    git(wt, "commit", "-qm", f"feat: {ident} [{ident}]")
+    return wt
+
+
+NEEDS = "from pathlib import Path\n\ndef test_{name}():\n    assert Path('src/streak/{name}.py').is_file()\n"
+
+
+def test_parallel_items_with_held_out_tests_both_land(repo: Path, capsys):  # noqa: F811
+    held_out(repo, {"T-2.1/test_store_held_out.py": NEEDS.format(name="store"),
+                    "T-2.2/test_streak_held_out.py": NEEDS.format(name="streak"),
+                    "test_shared_held_out.py": "def test_shared():\n    assert True\n"})
+    finish(repo, "T-2.1", "src/streak/store.py", capsys)
+    finish(repo, "T-2.2", "src/streak/streak.py", capsys)
+    code, out = run_json(capsys, "land", "--dir", str(repo))
+    assert code == 0 and [x["id"] for x in out["landed"]] == ["T-2.1", "T-2.2"], out
+    first, second = out["landed"]
+    assert first["held_out"]["included"] == ["T-2.1"] and first["held_out"]["left_out"] == ["T-2.2"]
+    assert second["held_out"]["included"] == ["T-2.1", "T-2.2"] and second["held_out"]["left_out"] == []
+    assert any(c["name"] == "acceptance" and c["passed"] for c in first["checks"])
+
+
+def test_a_held_out_failure_names_the_item_and_a_failing_base_isnt_the_items(repo: Path, capsys):  # noqa: F811
+    held_out(repo, {"T-2.1/test_store_held_out.py": NEEDS.format(name="nowhere")})
+    finish(repo, "T-2.1", "src/streak/store.py", capsys)
+    code, out = run_json(capsys, "land", "--dir", str(repo))
+    skip = out["skipped"][0]
+    assert code == 7 and skip["reason"] == "check_failed" and skip["held_out_failed"] == ["T-2.1"], out
+    assert "T-2.1's held-out tests (tests/acceptance/T-2.1/)" in skip["message"]
+
+    held_out(repo, {"test_shared_held_out.py": "def test_shared():\n    assert False\n"})  # the lead's own file
+    code, out = run_json(capsys, "land", "--dir", str(repo), "--accept-base")  # a person made that commit
+    skip = out["skipped"][0]
+    assert code == 7 and skip["reason"] == "base_failing" and not skip["base_check"]["passed"], out
+    assert "fails on main itself, before T-2.1 is merged" in skip["message"]
+
+
+def test_plain_done_ignores_the_held_out_tests_of_items_not_done(repo: Path, capsys):  # noqa: F811
+    held_out(repo, {"T-2.2/test_streak_held_out.py": NEEDS.format(name="streak")})
+    manifest = repo / "docs/planning/package.yaml"
+    text = manifest.read_text()
+    start = text.index("  test: ")
+    test = subprocess.list2cmdline([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]) \
+        if os.name == "nt" else f"'{sys.executable}' -m pytest -q -p no:cacheprovider tests"
+    manifest.write_text(text[:start] + f"  test: {json.dumps(test)}" + text[text.index("\n", start):])
+    git(repo, "commit", "-qam", "pytest runs every test")
+    assert run_json(capsys, "start", "T-2.1", str(repo))[0] == 0
+    git(repo, "commit", "-qam", "start T-2.1")
+    (repo / "src/streak/store.py").write_text("def add(): ...\n")
+    code, out = run_json(capsys, "done", "T-2.1", str(repo))
+    assert code == 0, out  # T-2.2's held-out test, which needs streak.py, isn't collected
+
+
+# --- drift stays quiet after land (E1) -------------------------------------------------------------------------------
+
+def test_a_landed_item_is_marked_from_what_landed_and_doesnt_drift(repo: Path, capsys):  # noqa: F811
+    set_field(repo, "T-2.1", "Touches", "`src/streak/`")
+    set_field(repo, "T-1.1", "Touches", "`src/streak/`")
+    set_field(repo, "T-1.1", "Verify", f"`{py('print(4)')}`")
+    _, out = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
+    wt = Path(out["claim"]["worktree"])
+    (wt / "src/streak/store.py").write_text("def add(): ...\n")
+    (wt / "src/streak/scratch_notes.txt").write_text("an untracked note the agent never commits\n")
+    assert run_json(capsys, "done", "T-2.1", str(wt))[0] == 0
+    git(wt, "add", "src/streak/store.py", "docs/planning")
+    git(wt, "commit", "-qm", "feat(store): add the store [T-2.1]")
+    code, out = run_json(capsys, "land", "--dir", str(repo))
+    assert code == 0 and out["landed"][0]["reverified"] == ["T-1.1"], out  # its files changed: Verify ran again
+    assert any(c["name"] == "verify T-1.1" for c in out["landed"][0]["checks"])
+    code, out = run_json(capsys, "drift", str(repo), "--check")
+    assert code == 0 and out["drifted"] == [] and {"T-1.1", "T-2.1"} <= set(out["clean"]), out
+
+
+def test_a_merge_that_breaks_a_done_items_verify_doesnt_land(repo: Path, capsys):  # noqa: F811
+    set_field(repo, "T-2.1", "Touches", "`src/streak/`")
+    set_field(repo, "T-1.1", "Touches", "`src/streak/`")
+    broken = py("import pathlib, sys; sys.exit(pathlib.Path('src/streak/store.py').exists())")
+    set_field(repo, "T-1.1", "Verify", f"`{broken}`")
+    finish(repo, "T-2.1", "src/streak/store.py", capsys)
+    code, out = run_json(capsys, "land", "--dir", str(repo))
+    assert code == 7 and "T-1.1's Verify fails on the merged result" in out["skipped"][0]["message"], out
+
+
+def test_the_committed_hash_matches_the_disk_hash_on_a_clean_checkout(repo: Path):  # noqa: F811
+    from idea_to_scaffold.work import touches_hash, touches_hash_at
+    pkg = Package.load(repo)
+    for touches in (["src/"], ["tests/"], ["src/streak/"]):
+        assert touches_hash(pkg, touches) == touches_hash_at(pkg, touches, "HEAD")
+
+
+# --- G1: done keeps a status written while its checks ran ------------------------------------------------------------
+
+def test_a_block_written_while_the_checks_run_is_kept(claim: Path):  # noqa: F811
+    from idea_to_scaffold.contract import WorkError
+    from idea_to_scaffold.edits import block
+    from idea_to_scaffold.work import done
+    pkg = Package.load(claim)
+    (claim / "src/streak/store.py").write_text("def add(): ...\n")
+    blocked = []
+
+    def lead_blocks(check) -> None:  # the lead runs its block while done's checks run
+        if not blocked:
+            blocked.append(block(pkg, "T-2.1", "the schema changed"))
+
+    with pytest.raises(WorkError) as exc:
+        done(pkg, "T-2.1", on_check=lead_blocks)
+    assert exc.value.code == "status_changed" and exc.value.details["status"] == "blocked"
+    assert status_at(claim, "HEAD", "T-2.1") == "todo"
+    text = (claim / "docs/planning/07-backlog.md").read_text()
+    assert "the schema changed" in text and "**Status:** blocked" in text
+
+
+# --- B7: verify --drifted re-verifies every drifted item in one run --------------------------------------------------
+
+def test_verify_drifted_fixes_every_drifted_item_in_one_run(repo: Path, capsys):  # noqa: F811
+    set_field(repo, "T-1.1", "Touches", "`src/streak/__init__.py`")
+    set_field(repo, "T-2.1", "Status", "done")
+    for ident in ("T-1.1", "T-2.1"):
+        set_field(repo, ident, "Verified", "2026-01-01, tree 000000000000")
+    (repo / "src/streak/store.py").write_text("x = 1\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "changes after both were verified")
+    code, out = run_json(capsys, "drift", str(repo))
+    assert {d["id"] for d in out["drifted"]} == {"T-1.1", "T-2.1"}
+    code, out = run_json(capsys, "verify", "--drifted", str(repo), "--commit")
+    assert code == 0 and {v["id"] for v in out["verified"]} == {"T-1.1", "T-2.1"} and not out["failed"], out
+    assert run_json(capsys, "drift", str(repo), "--check")[0] == 0

@@ -642,6 +642,7 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | ---- | ---- | ------- | -------- |
 | `already_done` | 1 | `done`: the item is already done |  |
 | `already_started` | 1 | `start`: the item is already in progress |  |
+| `audit_missed` | 10 | `gate-audit`: the gate missed a seeded cheat, or only warned about one (unless `--allow-warn`) | `missed`, `warned` |
 | `bad_agent` | 1 | `hooks`: no Stop hook is known for that agent |  |
 | `bad_backlog` | 1 | the backlog can't be read or changed as asked |  |
 | `bad_hooks_file` | 1 | `hooks`: the agent's settings file isn't a JSON object |  |
@@ -669,6 +670,7 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `launch_settings_changed` | 5 | `done --result`: the headless launch files were changed during the run, so it may have had no Stop hook or sandbox; nothing was marked | `files`, `result_file` |
 | `locked` | 1 | another `its` command holds the package lock |  |
 | `no_base` | 1 | `start --claim`, `gate-audit`: there is no integration branch |  |
+| `no_changes` | 5 | `done`: the branch changes nothing outside the planning folder, so nothing shows the item was implemented | `findings`, `warnings` |
 | `no_fork_point` | 5 | `done` on the integration branch: no start was recorded for the item, so the gate can't tell which commits are its work; `its start <ID> --force` records one |  |
 | `no_package` | 1 | no planning package was found |  |
 | `no_reason` | 1 | `block`, `waive`: `--reason` is missing |  |
@@ -680,6 +682,7 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `not_integration_branch` | 1 | `land`, `renumber`: run it on the integration branch | `branch`, `integration_branch` |
 | `not_on_base` | 1 | `waive`: run it in the main checkout, on the integration branch | `branch`, `integration_branch` |
 | `not_placeholder` | 1 | `renumber`: the ID is permanent already |  |
+| `not_verified` | 5 | `verify --drifted`, `verify --all`: some items failed their checks again; the rest were re-verified | `failed` |
 | `nothing_ready` | 3, 9 | `start --next`: nothing can start, and `reason` says why; exit 9 when every item is done | `reason` |
 | `nothing_to_review` | 1 | `review`: the branch only changes the backlog |  |
 | `outside_touches` | 5 | `done`: the done gate refused the branch's scope changes (files outside Touches, or Touches changed); the lead waives them with `its waive <ID> --outside-touches` | `findings`, `warnings` |
@@ -687,6 +690,7 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `placeholder` | 1 | the item has a placeholder ID; `its promote` gives it a permanent one |  |
 | `push_failed` | 1 | `land --push`: the branches landed locally, but the push failed | `landed`, `skipped` |
 | `result_mismatch` | 1 | `done --result`: the result is for another item | `result_id`, `result_file` |
+| `status_changed` | 1 | `done`: the item's status changed while its checks ran (a `block`, say), and that change is kept | `status`, `was` |
 | `test_changes` | 5 | `done`: the done gate refused the branch's test changes (tests, test config, or how the item is verified); the lead waives them with `its waive <ID> --test-changes` | `findings`, `warnings` |
 | `usage` | 2 | the command line is wrong |  |
 | `use_waive` | 1 | an `--allow-*` flag, which is gone: the lead waives with `its waive` | `flag` |

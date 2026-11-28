@@ -14,6 +14,7 @@ from pathlib import Path
 from . import ledger
 from .backlog import load_backlog
 from .contract import SCHEMA, WorkError
+from .gate import REFUSALS
 from .package import Package
 from .results import HOOK_TIMEOUT
 from .work import done, failure_report, item_here
@@ -83,8 +84,10 @@ def hook_dir(event: dict, given: str) -> Path:
     return Path(given or ".")
 
 
-def stop_hook(pkg: Package, stdin: str) -> dict | None:
-    """What the Stop hook answers: a block decision, or None to let the agent stop."""
+def stop_hook(pkg: Package, stdin: str, *, headless: bool = False) -> dict | None:
+    """What the Stop hook answers: a block decision, or None to let the agent stop. `headless` is an unattended run
+    (`its hook stop --headless`, in the launch settings): there `its done --result` sets the status and commits once
+    the agent ends, so the hook only asks for passing checks, and tells the agent to end with a result."""
     event = parse_event(stdin)
     if event.get("stop_hook_active"):
         return None  # it already blocked once this turn; never trap the agent in a loop
@@ -96,15 +99,19 @@ def stop_hook(pkg: Package, stdin: str) -> dict | None:
     try:
         result = done(pkg, ident, check_only=True)
     except WorkError as err:
-        if err.code not in ("check_failed", "test_changes", "dependency_changes", "outside_touches", "gate_error"):
+        if err.code not in ("check_failed", "gate_error", *REFUSALS):
             return None
         ledger.record(pkg, ident, "hook", "blocked", reason=err.code)
         report = failure_report(err.details.get("checks", []))
         detail = f"\n\n{report}" if report else ""
-        return {"decision": "block", "reason": (
-            f"{err.message}{detail}\n\nFix it and run `its done {ident}`. If you can't finish it honestly, run "
-            f"`its block {ident} --reason '...'` and stop.")}
-    if result["status"] != "done":
+        if headless:
+            then = (f"Fix it and run `its done {ident} --check`. If you can't finish it honestly, end with status "
+                    "blocked or needs_human and the reason.")
+        else:
+            then = (f"Fix it and run `its done {ident}`. If you can't finish it honestly, run "
+                    f"`its block {ident} --reason '...'` and stop.")
+        return {"decision": "block", "reason": f"{err.message}{detail}\n\n{then}"}
+    if result["status"] != "done" and not headless:
         ledger.record(pkg, ident, "hook", "blocked", reason="not_marked_done")
         return {"decision": "block", "reason": (
             f"The checks for {ident} pass, but it isn't marked done: run `its done {ident}`, then commit.")}
