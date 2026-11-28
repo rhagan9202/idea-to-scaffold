@@ -11,6 +11,10 @@ is, and when, and which integration branch it lands on.
 
 Readiness comes from the integration branch (``main`` unless ``integration_branch`` in ``package.yaml`` says
 otherwise): an item's dependency counts as done when it is done there, that is, merged.
+
+An adopted claim (`its adopt`, `dispatch.py`) is a claim branch like any other, made at the integration branch, plus
+the branches a vendor's agent made for the item (``claude/...``, ``copilot/...``, a pull request), recorded in the
+store as its *candidates*. `its land` gates and merges a candidate instead of the claim branch.
 """
 from __future__ import annotations
 
@@ -19,7 +23,7 @@ import json
 import os
 import re
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -254,11 +258,13 @@ class Claim:
     started: str | None = None
     finished: bool = False   # the item is done (or dropped) on the integration branch, so the claim can go
     orphaned: bool = False   # the item isn't in the integration branch's backlog (deleted, renumbered or a typo)
+    candidates: list[dict] = field(default_factory=list)  # an adopted claim's vendor branches (`its adopt`)
 
     def to_dict(self) -> dict:
         return {
             "id": self.id, "branch": self.branch, "remote_only": self.remote, "worktree": self.worktree,
             "agent": self.agent, "started": self.started, "finished": self.finished, "orphaned": self.orphaned,
+            "candidates": [dict(c) for c in self.candidates],
         }
 
 
@@ -283,6 +289,7 @@ def list_claims(
         entry = store.get(ident) or {}
         if not is_remote and entry.get("branch") == short:
             claim.worktree, claim.agent, claim.started = entry.get("worktree"), entry.get("agent"), entry.get("started")
+            claim.candidates = [c for c in entry.get("candidates") or [] if isinstance(c, dict) and c.get("ref")]
         (remote if is_remote else local).setdefault(ident, claim)
     out = dict(remote)
     out.update(local)  # a local branch says more (worktree, agent) than its pushed copy
@@ -417,6 +424,10 @@ def release_claim(
             deletions = [(name, git(run_dir, "rev-parse", f"refs/remotes/{name}")) for name in pushed]
         data.pop(ident, None)
         _save_store(store, data)
+        for cand in entry.get("candidates") or []:  # a pull request's head, fetched by its adopt, is its own ref
+            ref = cand.get("ref") if isinstance(cand, dict) else None
+            if isinstance(ref, str) and ref.startswith(ADOPTED_REFS):
+                git(run_dir, "update-ref", "-d", ref, check=False)
 
     # Network pushes happen outside the lock, so a slow remote never holds up other agents.
     deleted_remote = []
@@ -428,6 +439,42 @@ def release_claim(
     return {"id": ident, "deleted_branches": deleted, "removed_worktree": removed_worktree,
             "deleted_remote_branches": deleted_remote, "remote_branches": still_pushed(run_dir, ident),
             "released": True}
+
+
+ADOPTED_REFS = "refs/its/"  # where its adopt keeps refs that have no branch of their own (pull request heads)
+
+
+def add_candidate(cwd: Path, ident: str, candidate: dict) -> tuple[list[dict], bool]:
+    """Record a vendor branch as a candidate for an adopted claim. Returns the candidates and whether this one is
+    new (a branch already recorded keeps its place, with its tip brought up to date)."""
+    with claims_lock(cwd) as store:
+        data = _load_store(store)
+        entry = data.get(ident)
+        if not isinstance(entry, dict):
+            raise GitError(f"{ident} has no local claim to add a candidate to")
+        found = [c for c in entry.get("candidates") or [] if isinstance(c, dict)]
+        same = next((c for c in found if c.get("ref") == candidate["ref"]), None)
+        if same is not None:
+            same.update({k: v for k, v in candidate.items() if k in ("tip", "agent") and v})
+        else:
+            found.append(candidate)
+        entry["candidates"] = found
+        entry["adopted"] = True
+        _save_store(store, data)
+    return found, same is None
+
+
+def fetch_candidate(cwd: Path, candidate: dict) -> str | None:
+    """Bring an adopted candidate's ref up to date from its remote. Returns its tip, or None when the branch or
+    pull request is gone there. A candidate that is a local branch is read as it is."""
+    remote, source, ref = candidate.get("remote"), candidate.get("fetch"), candidate["ref"]
+    if remote and source:
+        proc = gitx.run(cwd, "fetch", "--quiet", "--no-tags", remote, f"+{source}:{ref}")
+        if proc.returncode != 0:
+            if "couldn't find remote ref" in proc.stderr.lower():
+                return None
+            raise GitError(f"couldn't fetch {candidate.get('name') or source} from {remote}: {proc.stderr.strip()}")
+    return git(cwd, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False) or None
 
 
 def still_pushed(cwd: Path, ident: str) -> list[str]:
@@ -601,15 +648,27 @@ def _load_json(path: Path) -> dict:
 # `its review` notes what it put in front of the reviewer, and `its review --reply` the verdict, per item, so that
 # `its land` and `its status` can act on it (review.py). Like the setup record, it is the lead's record, not proof.
 
-def record_review(cwd: Path, ident: str, *, prompt: dict | None = None, verdict: dict | None = None) -> None:
-    """Record the review prompt `its review` made for an item, or the verdict on it."""
+KEPT_VERDICTS = 20  # verdicts kept per item, one per content reviewed (several candidates each keep theirs)
+
+
+def record_review(cwd: Path, ident: str, *, prompt: dict | None = None, verdict: dict | None = None,
+                  target: str | None = None) -> None:
+    """Record the review prompt `its review` made for an item, or the verdict on it. `target` names the branch the
+    prompt showed when it isn't the claim's own (an adopted candidate); verdicts are kept by the digest they judged."""
     store = _store_dir(cwd)
     data = _load_json(store / "reviews.json")
     entry = data.get(ident) if isinstance(data.get(ident), dict) else {}
     if prompt is not None:
         entry["prompt"] = prompt
+        if target:
+            prompts = entry.get("prompts") if isinstance(entry.get("prompts"), dict) else {}
+            entry["prompts"] = {**prompts, target: prompt}
     if verdict is not None:
         entry["verdict"] = verdict
+        kept = entry.get("verdicts") if isinstance(entry.get("verdicts"), dict) else {}
+        kept = {k: v for k, v in kept.items() if isinstance(v, dict) and k != verdict["digest"]}
+        newest = sorted(kept.items(), key=lambda kv: str(kv[1].get("at") or ""))[-(KEPT_VERDICTS - 1):]
+        entry["verdicts"] = {**dict(newest), verdict["digest"]: verdict}
     data[ident] = entry
     _save_json(store, "reviews.json", data)
 
@@ -624,3 +683,18 @@ def _save_json(store: Path, name: str, data: dict) -> None:
     tmp = store / f"{name}.tmp"
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     os.replace(tmp, store / name)
+
+
+# --- briefs ------------------------------------------------------------------------------------------------------
+
+def record_brief(cwd: Path, ident: str, data: dict) -> None:
+    """Remember what `its brief --github` made for an item: the issue it created or updated."""
+    store = _store_dir(cwd)
+    briefs = _load_json(store / "briefs.json")
+    briefs[ident] = {**(briefs.get(ident) if isinstance(briefs.get(ident), dict) else {}), **data}
+    _save_json(store, "briefs.json", briefs)
+
+
+def brief_of(cwd: Path, ident: str) -> dict:
+    entry = _load_json(_store_dir(cwd) / "briefs.json").get(ident)
+    return entry if isinstance(entry, dict) else {}

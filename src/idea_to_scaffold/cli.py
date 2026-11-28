@@ -8,6 +8,7 @@ import errno
 import json
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from .contract import (
     SCHEMA,
     WorkError,
 )
+from .dispatch import adopt, brief
 from .drift import drift
 from .edits import apply_result, block, drop, promote, propose, set_item_status, unblock, waive
 from .hooks import hook_agents, hook_dir, install_hooks, parse_event, stop_hook
@@ -36,6 +38,7 @@ from .landing import land
 from .ledger import stats
 from .linker import link_package
 from .package import BACKLOG_STATUSES, PROFILES, Package, PackageError, new_package
+from .pr_gate import gate_ref
 from .review import REPLY_SCHEMA, judge, review
 from .scaffold import ScaffoldError, scaffold
 from .sizing import sizing
@@ -401,6 +404,8 @@ def cmd_next(args: argparse.Namespace) -> int:
     if args.json:
         _emit(payload)
         return code
+    for w in payload.get("warnings", []):
+        print(f"warning: {w['message']}", file=sys.stderr)
     if args.parallel is not None:
         for item in payload["parallel"]:
             print(_item_line(item))
@@ -505,6 +510,8 @@ def cmd_start(args: argparse.Namespace) -> int:
             print(f"  warning: setup failed in the worktree (exit {setup['exit_code']}): {setup['command']}")
             for line in (setup.get("output") or "").splitlines()[-5:]:
                 print(f"    {line}")
+        for w in payload.get("warnings", []):
+            print(f"  warning: {w['message']}")
         print("start an agent on it:")
         print(f"  {payload['commands']['claude']}")
         print(f"  {payload['commands']['codex']}")
@@ -597,6 +604,34 @@ def cmd_release(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_adopt(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+    try:
+        payload = adopt(pkg, args.ref, args.id, push=False if args.no_push else None, fetch=args.fetch,
+                        agent=args.agent)
+    except WorkError as err:
+        return _fail(args, err)
+    if args.json:
+        _emit(payload)
+        return 0
+    cand = payload["candidate"]
+    if payload["created"]:
+        where = f", pushed to {payload['remote']}" if payload["pushed"] else ""
+        print(f"claimed {payload['id']} with {payload['claim']['branch']}{where}")
+    if payload["push_error"]:
+        print(f"warning: the claim wasn't pushed: {payload['push_error']}", file=sys.stderr)
+    verb = "adopted" if payload["added"] else "already adopted"
+    print(f"{verb} {cand['name']} ({cand['tip'][:10]}) for {payload['id']}: {payload['title']}")
+    if len(payload["candidates"]) > 1:
+        print(f"candidates, tried in this order: {', '.join(c['name'] for c in payload['candidates'])}")
+    for other in payload["overlaps"]:
+        print(f"note: {payload['id']} may change the same files as {other}, which is running")
+    print(f"next: {payload['commands']['land']}  (runs the done gate and the held-out tests on each candidate)")
+    return 0
+
+
 def cmd_renumber(args: argparse.Namespace) -> int:
     pkg = _load(args)
     if pkg is None:
@@ -656,6 +691,11 @@ def cmd_done(args: argparse.Namespace) -> int:
                 print(f"  {finding['kind']}: {finding['message']}")
         if err.code == "check_failed" and not args.json:
             print("\n" + failure_report(err.details["checks"]))
+        again = err.details.get("retry")
+        if again and getattr(args, "result", None) and not args.json:  # a headless run ended: say what's next
+            print(f"attempt {again['attempt']} of {again['max_attempts']}: "
+                  + (f"retry with {again['command']}" if again["command"] else "no retries left; it needs a person"),
+                  file=sys.stderr)
         return _fail(args, err)
     if args.json:
         _emit(payload)
@@ -716,11 +756,21 @@ def cmd_stats(args: argparse.Namespace) -> int:
         print("the run ledger is empty: start, done, block and land record to it" if out["ledger"] else
               "the run ledger needs a git repository")
         return 0
-    rate = f"{out['first_try_rate']:.0%}" if out["first_try_rate"] is not None else "n/a"
-    print(f"{out['attempted']} item(s) attempted, {out['first_try']} passed done first time ({rate})")
+    def rate(value: float | None, interval: list[float] | None) -> str:
+        if value is None:
+            return "n/a"
+        return f"{value:.0%}" + (f", 95% interval {interval[0]:.0%}-{interval[1]:.0%}" if interval else "")
+
+    print(f"{out['attempted']} item(s) attempted, {out['first_try']} passed first time "
+          f"({rate(out['first_try_rate'], out['first_try_interval'])})")
+    few = False
     for name, label in (("by_size", "size"), ("by_agent", "agent")):
         for key, g in out[name].items():
-            print(f"  {label} {key}: {g['first_try']} of {g['items']} first time")
+            few = few or not g["comparable"]
+            print(f"  {label} {key}: {g['first_try']} of {g['items']} first time "
+                  f"({rate(g['first_try_rate'], g['interval'])})")
+    if few:
+        print(f"  (groups under {out['comparable_from']} items are too few to compare: their intervals overlap)")
     if out["refusals"]:
         print("refused for: " + ", ".join(f"{k} {v}" for k, v in out["refusals"].items()))
     if out["land"]:
@@ -785,6 +835,64 @@ def cmd_land(args: argparse.Namespace) -> int:
         print(f"released the claim on {ident}")
     if payload["proposals"]:
         print(f"{len(payload['proposals'])} proposal(s) are waiting: its promote <ID>, or its renumber to number them")
+    return code
+
+
+def cmd_brief(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+    try:
+        payload = brief(pkg, args.id, retry=args.retry, github=args.github, base=args.base)
+    except WorkError as err:
+        return _fail(args, err)
+    if args.json:
+        _emit(payload)
+        return 0
+    issue = payload["issue"]
+    if issue is None:
+        sys.stdout.write(payload["brief"])
+        return 0
+    where = f": {issue['url']}" if issue.get("url") else ""
+    print(f"{issue['action']} issue #{issue['number']} for {payload['id']}{where}")
+    if issue["action"] == "created":
+        print("assign it to an agent on GitHub (Copilot, Claude or Codex), then: "
+              f"its adopt <its branch or pr:N> {payload['id']}")
+    return 0
+
+
+def cmd_gate(args: argparse.Namespace) -> int:
+    if args.ref and args.dir == "." and Path(args.ref).is_dir():  # `its gate DIR`
+        args.dir, args.ref = args.ref, None
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+
+    def announce(ident, check) -> None:
+        if not args.json:
+            print(f"{ident}: running {check.name}: {check.command}", flush=True)
+
+    try:
+        payload = gate_ref(pkg, args.ref or "HEAD", base=args.base, ident=args.id, require_item=args.require_item,
+                           verify=not args.no_verify, on_check=announce)
+    except WorkError as err:
+        return _fail(args, err)
+    code = 0 if payload["passed"] else EXIT_CHECK_FAILED
+    if args.json:
+        _emit(payload)
+        return code
+    what = f"{payload['id']} ({payload['found_by'].replace('_', ' ')})" if payload["id"] else "nothing"
+    print(f"gate {what} on {payload['branch'] or payload['ref']} against {payload['base']}: "
+          + ("passed" if payload["passed"] else "refused"))
+    print(f"  {payload['message']}")
+    for finding in payload["findings"]:
+        print(f"  {finding['kind']}: {finding['message']}")
+    for check in payload["checks"]:
+        print(f"  {'ok' if check['passed'] else 'failed'}: {check['name']}: {check['command']}")
+        if not check["passed"] and check.get("output"):
+            print(check["output"])
+    for w in payload["warnings"]:
+        print(f"  warning: {w['kind']}: {w['message']}")
     return code
 
 
@@ -927,7 +1035,8 @@ def cmd_review(args: argparse.Namespace) -> int:
             return 1
         try:
             text = sys.stdin.read() if args.reply == "-" else Path(args.reply).read_text(encoding="utf-8")
-            payload = judge(pkg, args.id, text, min_severity=args.min_severity, base=args.base)
+            payload = judge(pkg, args.id, text, min_severity=args.min_severity, base=args.base, branch=args.branch,
+                            run_evidence=not args.no_evidence)
         except OSError as exc:
             return _fail(args, WorkError("not_found", f"can't read {args.reply}: {exc}"))
         except WorkError as err:
@@ -936,7 +1045,12 @@ def cmd_review(args: argparse.Namespace) -> int:
         if args.json:
             _emit(payload)
             return code
-        print(f"review of {payload['id']}: {payload['verdict']}" + ("" if payload["passed"] else " (not passed)"))
+        print(f"review of {payload['id']}: {payload['outcome'].replace('_', ' ')}"
+              + (f" (the reviewer said {payload['verdict'].replace('_', ' ')})" if payload["verdict"] != "approve"
+                 and payload["outcome"] != "changes_requested" else ""))
+        for e in payload["evidence"]:
+            print(f"  {'reproduced' if e['reproduced'] else 'not reproduced, downgraded'}: {e['kind']} {e['of']}: "
+                  f"{e['why']}" + (f" ({e['command']})" if e.get("command") else ""))
         for ident in payload["unmet"]:
             print(f"  {ident}: " + ("not in the reply" if ident in payload["missing"] else "not met"))
         for f in payload["findings"]:
@@ -948,13 +1062,15 @@ def cmd_review(args: argparse.Namespace) -> int:
                   "reviewer saw")
         elif payload["recorded"]:
             print("recorded: its land " + ("will take it" if payload["passed"] else
-                                           "refuses this version until it changes and is reviewed again"))
+                                           "refuses this version until it changes and is reviewed again"
+                                           if payload["outcome"] == "changes_requested" else
+                                           "takes it, unless it needs an approving review"))
         return code
     pkg = _load(args)
     if pkg is None:
         return 1
     try:
-        payload = review(pkg, args.id, base=args.base)
+        payload = review(pkg, args.id, base=args.base, branch=args.branch)
     except WorkError as err:
         return _fail(args, err)
     if args.json:
@@ -1164,6 +1280,31 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_claims)
 
+    s = sub.add_parser("brief", help="print a self-contained task for an agent that may never run its "
+                                     "(or put it on a GitHub issue)")
+    s.add_argument("id", help="the item")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--retry", action="store_true", help="a brief for one more attempt: only what the last failed "
+                                                        "attempt got wrong (up to gate.max_attempts)")
+    s.add_argument("--github", action="store_true", help="create or update the item's GitHub issue with gh "
+                                                         "(a retry is posted as a comment)")
+    s.add_argument("--base", help="the integration branch to read the item and the rules from")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_brief)
+
+    s = sub.add_parser("gate", help="run the done gate on a branch or pull request with the integration branch's "
+                                    "rules, for CI; changes nothing")
+    s.add_argument("ref", nargs="?", help="the branch or commit to gate (default: HEAD, the pull request in CI)")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--base", help="the branch to compare with and take the rules from (default: GITHUB_BASE_REF in a "
+                                  "pull request, else the integration branch)")
+    s.add_argument("--id", help="the item the branch is for (default: from the branch name, its backlog change, or "
+                                "[T-n.m] in its commits)")
+    s.add_argument("--require-item", action="store_true", help="fail when the branch names no backlog item")
+    s.add_argument("--no-verify", action="store_true", help="only the checks of the change; run no commands")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_gate)
+
     s = sub.add_parser("land", help="merge finished claim branches one at a time, testing each merged result")
     s.add_argument("ids", nargs="*", metavar="ID", help="only these items (default: every claim that is done)")
     s.add_argument("--dir", default=".", help=dir_help)
@@ -1261,6 +1402,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_release)
 
+    s = sub.add_parser("adopt", help="claim an item for a branch a vendor's agent made (claude/..., copilot/..., a "
+                       "pull request), so its land gates and merges it")
+    s.add_argument("ref", help="the branch (claude/x or origin/claude/x) or pull request (pr:12, or its URL)")
+    s.add_argument("id", help="the item the branch implements")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--agent", help="who made the branch, for the run ledger (default: from its name, e.g. claude)")
+    s.add_argument("--no-push", action="store_true",
+                   help="keep the claim local (by default it is pushed to the remote, if there is one)")
+    s.add_argument("--fetch", action="store_true", help=fetch_help)
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_adopt)
+
     s = sub.add_parser("renumber", help="give placeholder items (T-new-...) permanent IDs, after merging")
     s.add_argument("ids", nargs="*", metavar="ID", help="only these placeholders (default: all that aren't dropped)")
     s.add_argument("--dir", default=".", help=dir_help)
@@ -1320,11 +1473,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id", nargs="?", help="the item (default: this claim branch's)")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--base", help="the ref to diff against (default: the integration branch)")
+    s.add_argument("--branch", metavar="REF", help="review this branch: one of an adopted item's candidates, or any "
+                                                   "branch here (default: the claim's, or its first candidate)")
     s.add_argument("--schema", action="store_true", help="print the JSON schema the reviewer's reply must follow")
     s.add_argument("--reply", metavar="FILE", help="read a reviewer's JSON reply to the item's review (- for stdin), "
                                                    "record the verdict, and say if it passes (exit 5 if not)")
     s.add_argument("--min-severity", default="major", choices=["blocker", "major", "minor"],
                    help="with --reply: the lowest severity that fails the review (default: major)")
+    s.add_argument("--no-evidence", action="store_true",
+                   help="with --reply: don't run the reviewer's repro commands (their claims are then downgraded)")
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_review)
 
@@ -1374,10 +1531,21 @@ def _utf8_streams() -> None:
 
 
 def _stdout_closed() -> bool:
-    """Whether stdout's reader has gone: the write that failed left its bytes in the buffer, so flushing again fails
-    the same way. An EINVAL from anything else leaves stdout able to flush."""
+    """Whether stdout's reader has gone. When the failed write left its bytes in the buffer, flushing again fails the
+    same way. When it left nothing (a write too big to buffer went straight to the pipe), only a real write shows
+    it, so a pipe gets a newline: harmless on the error path this is on, and an EINVAL from anything else leaves
+    the pipe writable."""
     try:
         sys.stdout.flush()
+    except OSError:
+        return True
+    try:
+        fd = sys.stdout.fileno()
+    except (OSError, ValueError, AttributeError):  # not a real file (a test's capture): it can't have gone
+        return False
+    try:
+        if stat.S_ISFIFO(os.fstat(fd).st_mode):
+            os.write(fd, b"\n")
     except OSError:
         return True
     return False

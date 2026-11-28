@@ -35,7 +35,7 @@ EXIT_CODES: dict[int, str] = {
                         "alongside the claims)",
     EXIT_BLOCKED: "`start`: a dependency isn't done",
     EXIT_CHECK_FAILED: "`done`: a check or the done gate failed, or a headless run's launch settings were changed; "
-                       "the status is unchanged",
+                       "the status is unchanged. `gate`: the branch failed the done gate or a check",
     EXIT_OVERLAP: "`start`: the item may change the same files as one already running",
     EXIT_NOT_LANDED: "`land`: a branch could not land (it conflicted, failed the done gate or its checks, isn't done, "
                      "has no commits, or the base moved), or the integration branch has commits nothing vouches for "
@@ -80,7 +80,9 @@ ERRORS: dict[str, Code] = {
                           "stale; pull first", fields=("branch", "base", "behind")),
     "blocked": Code("`start`: a dependency isn't done", (EXIT_BLOCKED,), ("blocked_by",)),
     "check_failed": Code("`done`: a check failed", (EXIT_CHECK_FAILED,), ("checks",)),
-    "claimed": Code("`start`: another branch holds the item's claim", fields=("claim",)),
+    "claim_branch": Code("`adopt`: the branch is an `its` claim branch already, which `its land` takes as it is",
+                         fields=("branch",)),
+    "claimed": Code("`start`, `adopt`: another branch holds the item's claim", fields=("claim",)),
     "dependency_changes": Code(_REFUSAL + "dependency changes (`dependency_added` enforced); the lead waives them "
                                "with `its waive <ID> --dependencies`", (EXIT_CHECK_FAILED,), ("findings", "warnings")),
     "dirty": Code("`land`, `waive`: uncommitted or staged changes are in the way"),
@@ -88,9 +90,11 @@ ERRORS: dict[str, Code] = {
     "duplicate_id": Code("an ID is defined more than once in the backlog", fields=("ids",)),
     "exists": Code("`propose`: that proposal exists already"),
     "fetch_failed": Code("`--fetch`: fetching the remote failed", fields=("remote",)),
-    "gate_error": Code("`done`, `review`: the gate couldn't compare the branch, so it refused (exit 1 from `review`)",
+    "gate_error": Code("`done`, `review`, `gate`: the gate couldn't compare the branch, so it refused (exit 1 from "
+                       "`review` and `gate`)",
                        (EXIT_CHECK_FAILED, EXIT_ERROR)),
     "git_error": Code("a git command failed"),
+    "github_failed": Code("`brief --github`: the GitHub CLI (`gh`) isn't installed, isn't signed in, or failed"),
     "incomplete": Code("`promote`: the item has no Done when or Touches", fields=("missing",)),
     "internal_error": Code("a bug in `its`; the message says what to report", fields=("version",)),
     "launch_settings_changed": Code("`done --result`: the headless launch files were changed during the run, so it "
@@ -99,7 +103,11 @@ ERRORS: dict[str, Code] = {
     "link_outdated": Code("`link --check`: generated links, the index or the commands blocks are out of date",
                           fields=("changed",)),
     "locked": Code("another `its` command holds the package lock"),
-    "no_base": Code("`start --claim`, `gate-audit`: there is no integration branch"),
+    "no_branch": Code("`adopt`, `gate`, `review --branch`: there is no such branch or pull request, here or on the "
+                      "remote",
+                      fields=("branch",)),
+    "no_base": Code("`start --claim`, `gate-audit`, `adopt`, `gate`: there is no integration branch (or no base "
+                    "to gate against)"),
     "no_changes": Code("`done`: the branch changes nothing outside the planning folder, so nothing shows the item "
                        "was implemented", (EXIT_CHECK_FAILED,), ("findings", "warnings")),
     "no_fork_point": Code("`done` on the integration branch: no start was recorded for the item, so the gate can't "
@@ -112,6 +120,8 @@ ERRORS: dict[str, Code] = {
     "no_waiver_group": Code("`waive`: name what is waived (`--test-changes`, `--outside-touches`, `--dependencies`)"),
     "not_found": Code("no such ID, or a file `its` was given can't be read", fields=("mentioned_in",)),
     "not_git": Code("the command needs a git repository"),
+    "out_of_attempts": Code("`brief --retry`: the item has failed `gate.max_attempts` times; it needs a person "
+                            "(split it, clarify it, or block it)", fields=("attempts", "max_attempts")),
     "not_integration_branch": Code("`land`, `renumber`: run it on the integration branch",
                                    fields=("branch", "integration_branch")),
     "not_on_base": Code("`waive`: run it in the main checkout, on the integration branch",
@@ -120,6 +130,9 @@ ERRORS: dict[str, Code] = {
                          "re-verified", (EXIT_CHECK_FAILED,), ("failed",)),
     "not_placeholder": Code("`renumber`: the ID is permanent already"),
     "not_utf8": Code("`link`: a planning file isn't valid UTF-8 text"),
+    "nothing_to_adopt": Code("`adopt`: the branch has no commits the integration branch lacks",
+                             fields=("branch",)),
+    "nothing_to_retry": Code("`brief --retry`: the item has no failed attempt since it was started or adopted"),
     "nothing_ready": Code("`start --next`: nothing can start, and `reason` says why; exit 9 when every item is done",
                           (EXIT_NOTHING_READY, EXIT_COMPLETE), ("reason",)),
     "nothing_to_review": Code("`review`: the branch only changes the backlog"),
@@ -137,7 +150,8 @@ ERRORS: dict[str, Code] = {
                          "them with `its waive <ID> --test-changes`", (EXIT_CHECK_FAILED,), ("findings", "warnings")),
     "usage": Code("the command line is wrong", (EXIT_USAGE,)),
     "use_waive": Code("an `--allow-*` flag, which is gone: the lead waives with `its waive`", fields=("flag",)),
-    "which_item": Code("`done`, `review`: name the item; none could be inferred", fields=("in_progress",)),
+    "which_item": Code("`done`, `review`: name the item; none could be inferred. `gate`: the branch could be for "
+                       "several (`candidates`)", fields=("in_progress", "candidates")),
     "worktree_exists": Code("`start --claim`: the worktree's folder exists already", fields=("worktree",)),
 }
 

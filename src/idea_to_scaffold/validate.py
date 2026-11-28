@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass, field
 
 from . import blocks
-from .backlog import bad_touches, find_cycles, load_backlog, proposal_problems
+from .backlog import RISKS, bad_touches, find_cycles, load_backlog, proposal_problems
 from .ids import (
     ID_RE,
     META_FILES,
@@ -152,6 +152,9 @@ def _check_backlog(pkg: Package, defined: set[str], must_frs: set[str], r: Repor
             r.warnings.append(
                 f"{ident}: Depends on lists {other}; only backlog items (T-...) are dependencies, so it is ignored"
             )
+        risk = item.get("Risk").lower()
+        if risk and risk not in RISKS:
+            r.warnings.append(f"{ident}: Risk {item.get('Risk')!r} should be one of {', '.join(RISKS)}; it counts as normal")
         for path in item.touches:
             if bad_touches(path):
                 r.errors.append(f"{ident}: Touches {path!r} must be a relative path inside the repository")

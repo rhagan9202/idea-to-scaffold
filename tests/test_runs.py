@@ -182,6 +182,8 @@ def test_stats_reports_first_try_rate_refusals_and_cost(claim: Path, repo: Path,
     assert code == 0 and out["attempted"] == 1 and out["first_try"] == 0 and out["first_try_rate"] == 0.0
     item = next(i for i in out["items"] if i["id"] == "T-2.1")
     assert item["attempts"] == 2 and item["passed"] == 1 and item["landed"] and item["agents"] == ["claude"]
+    assert len(item["runs"]) == 1 and out["first_try_interval"] == [0.0, 0.79]  # one run links start, done and land
+    assert out["by_agent"]["claude"]["comparable"] is False and out["by_agent"]["claude"]["interval"] == [0.0, 0.79]
     assert out["refusals"] == {"assertions_removed": 1} and out["land"]["landed"] == 1
     assert out["cost_usd"] == 0.42 and out["by_size"]["2-3 files"]["items"] == 1
     assert git(repo, "status", "--porcelain") == ""  # the ledger lives outside the checkout
@@ -189,7 +191,8 @@ def test_stats_reports_first_try_rate_refusals_and_cost(claim: Path, repo: Path,
     capsys.readouterr()
     assert main(["stats", str(repo)]) == 0
     text = capsys.readouterr().out
-    assert "passed done first time (0%)" in text and "assertions_removed 1" in text
+    assert "passed first time (0%, 95% interval 0%-79%)" in text and "assertions_removed 1" in text
+    assert "too few to compare" in text
 
 
 def test_check_only_runs_are_not_attempts(claim: Path, capsys):  # noqa: F811
@@ -229,3 +232,18 @@ def test_promote_shows_sizing_warnings(repo: Path, capsys):  # noqa: F811
                  "--touches", "a.py, b.py, c.py, d.py"]) == 0
     code, out = run_json(capsys, "promote", "T-new-undo", str(repo))
     assert code == 0 and {w["kind"] for w in out["sizing"]} >= {"too_many_touches", "no_verify"}
+
+
+def test_wilson_intervals_and_one_agent_identity(repo: Path, tmp_path: Path, capsys):  # noqa: F811
+    assert ledger.wilson(0, 0) is None and ledger.wilson(10, 10) == [0.72, 1.0] and ledger.wilson(5, 10) == [0.24, 0.76]
+    _, out = run_json(capsys, "start", "T-2.1", str(repo), "--worktree", "--agent", "alice")  # a person starts it
+    wt = Path(out["claim"]["worktree"])
+    assert out["run"]
+    (wt / "src/streak/store.py").write_text("def add(): ...\n")
+    path = write(tmp_path, envelope({"id": "T-2.1", "status": "done", "summary": "store"}))
+    assert run_json(capsys, "done", "T-2.1", str(wt), "--result", path)[0] == 0  # claude does the work
+    _, stats = run_json(capsys, "stats", str(repo))
+    item = next(i for i in stats["items"] if i["id"] == "T-2.1")
+    assert item["agent"] == "claude" and item["started_by"] == "alice" and item["runs"] == [out["run"]]
+    assert list(stats["by_agent"]) == ["claude"]  # counted once, as the agent that did the work
+    assert {e["run"] for e in ledger.of(Package.find(repo), "T-2.1")} == {out["run"]}

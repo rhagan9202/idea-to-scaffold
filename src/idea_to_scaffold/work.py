@@ -282,7 +282,46 @@ def next_payload(pkg: Package, *, base: str | None = None, parallel: int | None 
         chosen, held = _parallel(v, ready, parallel)
         payload["parallel"] = [item_payload(pkg, i, items) for i in chosen]
         payload["held_back"] = held
+    wip = wip_warning(pkg, v)
+    payload["warnings"] = [wip] if wip else []
     return payload
+
+
+def waiting_on_lead(pkg: Package, v: View) -> list[str]:
+    """The claimed items whose work is finished and waits for the lead to review or land it: done on the claim
+    branch, or an adopted claim with a candidate that has commits."""
+    if v.base is None:
+        return []
+    out = []
+    for c in v.claims:
+        if c.finished or c.orphaned:
+            continue
+        if c.candidates:
+            if any(cl.ref_exists(pkg.root, x["ref"]) and cl.ahead(pkg.root, x["ref"], v.base) for x in c.candidates):
+                out.append(c.id)
+            continue
+        ref = _ref(c)
+        if not cl.ahead(pkg.root, ref, v.base):
+            continue
+        text = cl.read_at(pkg.root, ref, pkg.path_of(BACKLOG))
+        item = next((i for i in parse_backlog(text) if i.id == c.id), None) if text else None
+        if item is not None and item.status == "done":
+            out.append(c.id)
+    return out
+
+
+def wip_warning(pkg: Package, v: View) -> dict | None:
+    """`gate.max_unreviewed` on the integration branch: a warning once that many finished items wait for the lead,
+    since agents can finish work faster than a person can review and land it. Nothing is refused."""
+    if v.base is None:
+        return None
+    limit = gate.Policy.of(gate.manifest_at(pkg, v.base) or {}, v.base).max_unreviewed
+    waiting = waiting_on_lead(pkg, v) if limit else []
+    if not limit or len(waiting) < limit:
+        return None
+    return {"kind": "wip_limit", "limit": limit, "items": waiting,
+            "message": f"{len(waiting)} finished item(s) wait for you to review or land ({', '.join(waiting)}), and "
+                       f"gate.max_unreviewed is {limit}: land or review them before starting more (its status)"}
 
 
 def _definition(doc: Doc, ident: str, target: Target) -> tuple[int, str]:
@@ -423,9 +462,16 @@ def start(pkg: Package, ident: str | None, *, setup: bool = True, **kwargs) -> d
         payload["setup"] = run_setup(pkg, payload["id"], Path(claim["worktree"])) if setup else None
     elif not claim and cl.in_git(pkg.root):
         record_setup_output(pkg, payload["id"], cl.toplevel(pkg.root))  # the plain flow: setup ran here already
+    if not payload.get("claim_held_here"):
+        payload["run"] = ledger.new_run(pkg, payload["id"])
     ledger.record(pkg, payload["id"], "start", "claimed" if claim else "in-progress", agent=kwargs.get("agent"),
                   branch=claim.get("branch"), worktree=claim.get("worktree"),
                   touches=len(payload["item"]["touches"]) if payload.get("item", {}).get("touches") else None)
+    try:
+        wip = wip_warning(pkg, view(pkg, kwargs.get("base")))
+    except WorkError:
+        wip = None
+    payload["warnings"] = [*payload.get("warnings", []), wip] if wip else payload.get("warnings", [])
     return payload
 
 
@@ -678,10 +724,17 @@ def _tip(pkg: Package, claim: cl.Claim, entry: dict, v: View) -> dict:
     last = {"commit": log[0], "date": log[1], "subject": log[2]} if len(log) == 3 else None
     planned = next((i for i in v.items if i.id == claim.id), None)
     waiting = blocked_by(planned, v.items) if planned else []
+    candidates = [_candidate_tip(pkg, c, v.base) for c in claim.candidates] if v.base else []
     if claim.orphaned:
         state = "orphaned"
     elif claim.finished:
         state = "finished"
+    elif claim.candidates:  # adopted: land runs the done gate on the vendor's branches, so they are what counts
+        ahead = [c for c in candidates if c["ahead"]]
+        state = ("no_commits" if not ahead else "waiting" if waiting
+                 else "conflicts" if all(c["conflicts_with_base"] for c in ahead) else "ready_to_land")
+        if ahead and not entry.get("ahead"):
+            last = ahead[0]["last_commit"]
     elif status == "blocked":
         state = "blocked"
     elif status != "done":
@@ -695,7 +748,18 @@ def _tip(pkg: Package, claim: cl.Claim, entry: dict, v: View) -> dict:
     else:
         state = "ready_to_land"
     return {"tip_status": status, "blocked_reason": (item.get("Blocked") or None) if item else None,
-            "last_commit": last, "state": state, "waiting_on": waiting}
+            "last_commit": last, "state": state, "waiting_on": waiting, "candidates": candidates}
+
+
+def _candidate_tip(pkg: Package, cand: dict, base: str) -> dict:
+    """An adopted candidate as `its status` shows it: its commits, its last one, and its conflicts with the base."""
+    ref = cand["ref"]
+    there = cl.ref_exists(pkg.root, ref)
+    ahead = cl.ahead(pkg.root, ref, base) if there else 0
+    log = cl.git(pkg.root, "log", "-1", "--format=%h%x00%cI%x00%s", ref, check=False).split("\0") if there else []
+    return {**cand, "ahead": ahead, "exists": there,
+            "last_commit": {"commit": log[0], "date": log[1], "subject": log[2]} if len(log) == 3 else None,
+            "conflicts_with_base": (cl.conflicting_files(pkg.root, base, ref) or []) if ahead else []}
 
 
 def _ref(claim: cl.Claim) -> str:
@@ -939,18 +1003,49 @@ def done(
         payload = _done(pkg, ident, verify=verify, check_only=check_only, on_check=on_check)
     except WorkError as err:
         target = err.details.get("id") or ident
-        if target and err.code in ("check_failed", "gate_error", "no_fork_point", *gate.REFUSALS):
-            kinds = sorted({f["kind"] for f in err.details.get("findings", [])})
-            ledger.record(pkg, target, "done", err.code, findings=kinds, check_only=check_only or None,
+        if target and err.code in ledger.FAILURES:
+            findings = err.details.get("findings", [])
+            kinds = sorted({f["kind"] for f in findings})
+            head = _head_of(pkg)
+            block = retry_block(pkg, target, err.details.get("checks"), findings, head=head, run=extra)
+            ledger.record(pkg, target, "done", err.code, findings=kinds, check_only=check_only or None, head=head,
                           checks=[c["name"] for c in err.details.get("checks", []) if not c["passed"]] or None,
                           touches=_touch_count(pkg, target), gate_ms=int((time.monotonic() - started) * 1000),
-                          **extra)
+                          attempt=None if check_only else block["attempt"],
+                          **ledger.failure_fields(err.details.get("checks"), findings), **extra)
+            err.details["retry"] = block
         raise
+    attempt = None if check_only else len(ledger.failures(pkg, payload["id"])) + 1
     ledger.record(pkg, payload["id"], "done", "passed", check_only=check_only or None,
                   warnings=sorted({f["kind"] for f in payload.get("warnings", [])}) or None,
                   touches=_touch_count(pkg, payload["id"]), gate_ms=int((time.monotonic() - started) * 1000),
-                  **extra)
+                  attempt=attempt, **extra)
+    if attempt is not None:
+        payload["attempt"] = attempt
     return payload
+
+
+def _head_of(pkg: Package) -> str | None:
+    if not cl.in_git(pkg.root):
+        return None
+    return gitx.out(pkg.root, "rev-parse", "--verify", "--quiet", "HEAD", check=False).strip() or None
+
+
+def retry_block(pkg: Package, ident: str, checks: list[dict] | None, findings: list[dict] | None, *,
+                head: str | None = None, run: dict | None = None) -> dict:
+    """What a failed attempt tells whoever runs the next one: its number, how many the integration branch allows
+    (`gate.max_attempts`), and the failing checks and tests. A failure of the same run or commit as an earlier one
+    is the same attempt (ledger.failures)."""
+    base = base_ref(pkg) if cl.in_git(pkg.root) else None
+    allowed = gate.Policy.of((gate.manifest_at(pkg, base) if base else pkg.manifest) or {}, base or "").max_attempts
+    key = str((run or {}).get("session_id") or head or "")
+    earlier = ledger.failures(pkg, ident)
+    attempt = len(earlier) + (0 if key and any(str(e.get("session_id") or e.get("head") or "") == key
+                                               for e in earlier) else 1)
+    fields = ledger.failure_fields(checks, findings)
+    return {"attempt": attempt, "max_attempts": allowed, "retries_left": max(allowed - attempt, 0),
+            "failing_checks": fields["failing_checks"] or [], "failing_tests": fields["failing_tests"] or [],
+            "command": f"its brief --retry {ident}" if attempt < allowed else None}
 
 
 def _touch_count(pkg: Package, ident: str) -> int | None:

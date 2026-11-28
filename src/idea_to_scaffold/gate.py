@@ -124,6 +124,9 @@ class Policy:
     acceptance: str = DEFAULT_ACCEPTANCE   # held-out tests: run by land, hidden from agents' worktrees
     run: Settings = field(default_factory=Settings)  # how checks run: gate.env and gate.timeout
     require_review: bool = False  # gate.require_review: land needs an approving review of what it merges
+    max_unreviewed: int | None = None  # gate.max_unreviewed: next and start warn when this many wait for the lead
+    max_attempts: int = 2  # gate.max_attempts: how many tries an item gets before its brief --retry stops
+    stale_days: int = 3  # gate.stale_days: a claim with no commit for this long shows as stale in its status
 
     @classmethod
     def of(cls, manifest: dict, source: str) -> Policy:
@@ -141,10 +144,17 @@ class Policy:
                     modes[str(kind)] = str(mode)
         acceptance = gate.get("acceptance_path")
         acceptance = str(acceptance).strip().strip("/") + "/" if acceptance else DEFAULT_ACCEPTANCE
-        return cls(cmds, globs, source, modes, acceptance, Settings.of(gate), gate.get("require_review") is True)
+        return cls(cmds, globs, source, modes, acceptance, Settings.of(gate), gate.get("require_review") is True,
+                   max_unreviewed=_count(gate.get("max_unreviewed")), max_attempts=_count(gate.get("max_attempts")) or 2,
+                   stale_days=_count(gate.get("stale_days")) or 3)
 
     def mode(self, kind: str) -> str:
         return self.modes.get(kind, "enforce")
+
+
+def _count(value: object) -> int | None:
+    """A positive whole number from package.yaml, or None (`true` is not a number)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 @dataclass(frozen=True)
