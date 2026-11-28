@@ -32,9 +32,9 @@ Every command except `new`, `import` and `scaffold` also works inside a scaffold
 `docs/planning/package.yaml`), so you can add `its link --check .` to CI or a pre-commit hook to stop the docs
 drifting. Like git, `its -C DIR <command>` runs a command as if it were started in `DIR`.
 
-For a small project, `its new DIR --profile lite` starts a lighter plan: idea, vision, requirements (with features
-folded in) and backlog. Architecture, design and a project plan are optional, and only the requirements need
-approval before scaffolding.
+`its new DIR` starts a lite plan: idea, vision, requirements (with features folded in) and backlog. Architecture,
+design and a project plan are optional, and only the requirements need approval before scaffolding. For a larger
+project, `its new DIR --profile full` starts a plan with every doc.
 
 ## Working the backlog
 
@@ -65,7 +65,7 @@ The branch is the claim, so a pushed branch is visible to every machine and clou
 statuses from `main`, so a dependency counts as done only once it is merged. Items run side by side only when
 their Touches confirm they change different files: `its start` refuses an item that might overlap one already
 running (exit 6), and an item with no Touches never runs alongside another
-([spec section 17](spec/PACKAGE_SPEC.md#17-parallel-work)).
+([workflow spec, section 17](spec/WORKFLOW_SPEC.md#17-parallel-work)).
 
 Other tools run agents in parallel too: Claude Code, GitHub's issue assignment to Copilot, Claude or Codex,
 Codex's queue, Cursor. Their agents push branches under their own names and usually never run `its`, so `its`
@@ -81,10 +81,10 @@ its brief --retry T-2.1       # one more attempt, with only what failed (gate.ma
 
 Locally, the same flow is `its start T-2.1 --worktree`, then `claude --bg` in the worktree with the brief (or the
 command `its start` prints). Hooks and `its done` are checks an agent can skip; `its land`, and CI running
-`its gate`, are the gate every surface goes through ([spec section 17](spec/PACKAGE_SPEC.md#17-parallel-work)).
+`its gate`, are the gate every surface goes through ([workflow spec, section 17](spec/WORKFLOW_SPEC.md#17-parallel-work)).
 
 Add `--json` to any of them, or to `its backlog`, for a structured answer in a versioned format
-([spec section 16](spec/PACKAGE_SPEC.md#16-json-output), which also lists the exit codes). A usage error with
+([workflow spec, section 16](spec/WORKFLOW_SPEC.md#16-json-output), which also lists the exit codes). A usage error with
 `--json` is JSON too. `its backlog --write` writes `backlog.json` next to the
 backlog for tools that want a file; it is generated and gitignored, never committed.
 
@@ -130,7 +130,7 @@ its scaffold /tmp/streak-plan --out /tmp
 
 | Command | What it does |
 | ------- | ------------ |
-| `its new DIR [--profile lite]` | Create a blank planning package to fill in by hand |
+| `its new DIR [--profile full]` | Create a blank planning package to fill in by hand (lite unless `--profile full`) |
 | `its import EXPORT.md --into DIR [--overwrite]` | Extract `<!-- file: … -->` blocks from a chat export, add default playbooks, cross-link, validate. Refuses to replace files you've edited unless `--overwrite` (originals kept as `.orig`) |
 | `its link [DIR] [--check] [--json]` | Link every ID reference to its definition, refresh nav blocks (upstream, next, backlinks) and `planning/README.md`, and rewrite the commands blocks from `package.yaml`: the lists between `<!-- its:commands -->` markers in `AGENTS.md` and `HANDOFF.md`, and the steps between `# its:commands` markers in the CI workflow. `package.yaml` is the one place to change a command. An unmarked command list gets the markers when every line in it is a `package.yaml` command. In a claim's checkout the commands blocks are left to the lead. `--check` exits 8 if anything drifted (for CI; `link_outdated` with `--json`) |
 | `its validate [DIR] [--trace] [--sizing] [--json]` | Check required files, front matter, ID definitions, traceability, backlog rules, broken links and anchors, `AGENTS.md` sections, readiness. `--trace` also lists Must acceptance criteria that no test names (`test_fr_001_ac2_...`), and exits 1 if there are any. `--sizing` warns about todo and proposed items too big or vague for one agent run (more than 3 Touches, more than 2 requirements or 5 Must criteria, no Verify command, "improve X" with no Done when); it never fails |
@@ -164,7 +164,8 @@ its scaffold /tmp/streak-plan --out /tmp
 ## Repository layout
 
 ```text
-spec/PACKAGE_SPEC.md                    the planning package contract
+spec/PACKAGE_SPEC.md                    the planning package: files, manifest, backlog, IDs, profiles
+spec/WORKFLOW_SPEC.md                   what `its` does with it: JSON and exit codes, parallel work, drift
 prompts/stages/                         copy-paste prompts for Claude or ChatGPT
 prompts/claude-skill/plan-project/      the same flow as a Claude skill
 src/idea_to_scaffold/                   the `its` package; service.py has one function per command
@@ -186,7 +187,7 @@ pytest
 CI runs lint, and the tests on Linux (Python 3.10 to 3.13), macOS (3.12) and Windows (3.10 and 3.12). `its` supports all three.
 
 Error codes and exit codes live in `src/idea_to_scaffold/contract.py`. Add a new code there, then regenerate the
-spec's tables with `python -m idea_to_scaffold.contract spec/PACKAGE_SPEC.md`; a test fails until the spec and the
+workflow spec's tables with `python -m idea_to_scaffold.contract spec/WORKFLOW_SPEC.md`; a test fails until the spec and the
 registry match.
 
 Adding a command: put what it does and how it exits in `src/idea_to_scaffold/service.py`, its options in

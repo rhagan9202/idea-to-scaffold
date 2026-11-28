@@ -7,8 +7,8 @@ output and let it try again), 12 is "the gate refused the change itself" (tests 
 decides), and 1 is "something is wrong with the setup, the input or `its`". A refusal is never a 5, so a retry loop
 can't spend attempts on a change that no attempt makes acceptable.
 
-Section 16 of spec/PACKAGE_SPEC.md shows the error codes and the exit codes as two tables generated from this
-module: `python -m idea_to_scaffold.contract spec/PACKAGE_SPEC.md` rewrites them between their markers, and
+Section 16 of spec/WORKFLOW_SPEC.md shows the error codes and the exit codes as two tables generated from this
+module: `python -m idea_to_scaffold.contract spec/WORKFLOW_SPEC.md` rewrites them between their markers, and
 `--check` fails when they are out of date. tests/test_contract.py checks that the spec matches, and that every code
 the source raises is registered here with the exit codes it is raised with. So a new error code starts here.
 """

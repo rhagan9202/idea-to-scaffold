@@ -2,7 +2,7 @@
 `waive`.
 
 Agents and people change items through these commands instead of editing Markdown, so every change is one small,
-locked, predictable edit. Each returns a dict in the versioned JSON contract (spec section 16).
+locked, predictable edit. Each returns a dict in the versioned JSON contract (the workflow spec, section 16).
 """
 from __future__ import annotations
 

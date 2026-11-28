@@ -97,7 +97,7 @@ LITE_DROPPED = ["planning/02-features.md", "planning/04-architecture.md", "plann
                 "planning/06-project-plan.md"]
 
 
-def new_package(dest: Path, profile: str = "full") -> None:
+def new_package(dest: Path, profile: str = "lite") -> None:
     """Copy the blank package into `dest`. The lite profile drops the optional docs and swaps in lighter templates."""
     shutil.copytree(blank_package_dir(), dest, dirs_exist_ok=True)
     if profile != "lite":
@@ -243,7 +243,8 @@ class Package:
 
     @property
     def profile(self) -> str:
-        """`full` (the default) or `lite`. An unknown value is treated as `full`; validate reports it."""
+        """`full` or `lite`. A manifest without `profile` is full, as every package was before `its new` made lite
+        the default; an unknown value is treated as `full`, and validate reports it."""
         value = str(self.get("profile") or "full").strip().lower()
         return value if value in PROFILES else "full"
 

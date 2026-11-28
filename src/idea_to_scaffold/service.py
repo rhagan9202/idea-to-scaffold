@@ -1,7 +1,7 @@
 """The service layer: one function for each `its` command, between the command line and the modules that do the work.
 
 A service function takes plain values (a folder, an ID, options), never parsed arguments, and returns an `Outcome`:
-the JSON payload (spec section 16) and the exit code. A failure raises `WorkError`, with its stable code and exit.
+the JSON payload (the workflow spec, section 16) and the exit code. A failure raises `WorkError`, with its stable code and exit.
 The rules that decide what a command does and how it exits live here, so the CLI (`cli/`) only parses arguments and
 renders payloads, and anything else that drives `its` gets the same behaviour from the same call.
 
@@ -465,7 +465,7 @@ def verify(where: str | Path, ident: str | None = None, *, drifted: bool = False
             ids = [i.id for i in load_backlog(pkg) if i.status == "done" and i.touches]
         verified, failed = verify_many(pkg, ids, on_check=on_check, on_item=on_item)
         payload = {"schema": SCHEMA, "ok": not failed, "verified": verified, "failed": failed}
-        if failed:  # an ok: false object always has an error (section 16)
+        if failed:  # an ok: false object always has an error (workflow spec, section 16)
             payload["error"] = WorkError("not_verified", f"{len(failed)} item(s) failed their checks again: "
                                          + ", ".join(f["id"] for f in failed), EXIT_CHECK_FAILED,
                                          {"failed": [f["id"] for f in failed]}).to_dict()["error"]
@@ -489,7 +489,7 @@ def gate_audit(where: str | Path, ident: str | None = None, *, run: bool = True,
     payload = audit_gate(package(where), ident, run=run)
     ok = payload["ok"] or (allow_warn and not payload["missed"])
     payload["ok"] = ok
-    if not ok:  # an ok: false object always has an error (section 16)
+    if not ok:  # an ok: false object always has an error (workflow spec, section 16)
         missed = payload["missed"] or payload["warned"]
         payload["error"] = WorkError("audit_missed", f"the gate {'missed' if payload['missed'] else 'only warned about'} "
                                      f"{len(missed)} seeded cheat(s): {', '.join(missed)}", EXIT_AUDIT_MISSED,

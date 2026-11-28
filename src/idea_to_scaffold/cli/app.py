@@ -1,7 +1,7 @@
 """Running `its`: parse the command line, run the command, and keep the output contract whatever happens.
 
 Output is UTF-8 on pipes and files, a reader that goes away (`its status | head`) ends the command quietly, and with
-`--json` even a bug in `its` comes out as the JSON error envelope (spec section 16).
+`--json` even a bug in `its` comes out as the JSON error envelope (the workflow spec, section 16).
 """
 from __future__ import annotations
 

@@ -67,8 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = add("new", "create a blank planning package")
     s.add_argument("dir")
     s.add_argument(
-        "--profile", choices=PROFILES, default="full",
-        help="lite: idea, vision, requirements and backlog only; architecture, design and plan are optional",
+        "--profile", choices=PROFILES, default="lite",
+        help="lite (the default): idea, vision, requirements and backlog, with architecture, design and plan "
+             "optional; full: every doc",
     )
     s.set_defaults(func=commands.cmd_new)
 

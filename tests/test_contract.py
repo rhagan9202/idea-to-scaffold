@@ -10,7 +10,7 @@ from idea_to_scaffold.contract import ERRORS, EXIT_CODES, EXIT_REFUSED
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "idea_to_scaffold"
-SPEC = ROOT / "spec" / "PACKAGE_SPEC.md"
+SPEC = ROOT / "spec" / "WORKFLOW_SPEC.md"
 EXIT_NAMES = {name: value for name, value in vars(contract).items() if name.startswith("EXIT_") and name != "EXIT_CODES"}
 # Raises whose code isn't a literal: gate_error() returns one of gate.REFUSALS, and apply_result re-raises a
 # ResultError's code.
@@ -89,7 +89,7 @@ def test_the_spec_tables_are_generated_from_the_contract():
     assert None not in regions.values(), f"the spec is missing a table's markers: {regions}"
     assert regions["errors"] == contract.error_table()
     assert regions["exit-codes"] == contract.exit_table()
-    assert contract.render_spec(text) == text, "run python -m idea_to_scaffold.contract spec/PACKAGE_SPEC.md"
+    assert contract.render_spec(text) == text, "run python -m idea_to_scaffold.contract spec/WORKFLOW_SPEC.md"
 
 
 def test_the_generator_rewrites_and_checks(tmp_path):

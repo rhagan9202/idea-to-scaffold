@@ -23,7 +23,7 @@ Work through the stages in `references/stages/` in order. Read each stage file w
 | 7 | `07-agents.md` | `AGENTS.md`, `package.yaml`, extra playbooks |
 | 8 | `08-export.md` | consistency report and full export |
 
-For a small project, the primer offers a **lite** plan (idea, vision, requirements with features folded in, and backlog); its lighter templates are in `references/templates-lite/`. Follow the primer's per-stage notes for it.
+The primer starts with a **lite** plan unless the user wants a full one (idea, vision, requirements with features folded in, and backlog), and suggests a full plan for a larger project. Lite's lighter templates are in `references/templates-lite/`; follow the primer's per-stage notes for it.
 
 Start by reading `00-primer.md` and adopting its rules (treat it as if the user had pasted it). Then ask for the idea and begin Stage 1. Don't advance to the next stage until the user approves the current stage's files. Tell the user which stage you are on and what comes next.
 

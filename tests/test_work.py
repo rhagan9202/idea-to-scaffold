@@ -201,6 +201,19 @@ def test_scaffold_never_copies_the_mirror(plan: Path, tmp_path: Path):
 
 # --- lite profile ---------------------------------------------------------------------------------------------
 
+def test_new_is_lite_unless_asked_for_full(tmp_path: Path, capsys):
+    assert main(["new", str(tmp_path / "plain")]) == 0
+    assert Package.load(tmp_path / "plain").profile == "lite"
+    assert not (tmp_path / "plain/planning/06-project-plan.md").exists()
+
+
+def test_a_manifest_without_a_profile_is_full(tmp_path: Path, capsys):
+    assert main(["new", str(tmp_path / "old"), "--profile", "full"]) == 0
+    manifest = tmp_path / "old/package.yaml"
+    manifest.write_text("\n".join(line for line in manifest.read_text().split("\n") if not line.startswith("profile:")))
+    assert Package.load(tmp_path / "old").profile == "full"
+
+
 def test_new_lite_package_has_only_the_lite_docs(tmp_path: Path, capsys):
     dest = tmp_path / "lite"
     assert main(["new", str(dest), "--profile", "lite"]) == 0

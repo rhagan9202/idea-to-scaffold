@@ -86,7 +86,7 @@ def test_scaffold_refuses_unready_and_existing(plan: Path, tmp_path: Path):
 
 def test_new_creates_blank_package(tmp_path: Path):
     dest = tmp_path / "blank"
-    assert main(["new", str(dest)]) == 0
+    assert main(["new", str(dest), "--profile", "full"]) == 0
     assert (dest / "planning/06-project-plan.md").is_file()
     assert (dest / "playbooks/implement-task.md").is_file()
 

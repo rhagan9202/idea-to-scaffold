@@ -1,7 +1,7 @@
 """What the backlog and the claims say, read-only: the backlog and next payloads, `its show`, the integration
 branch and its remote, and which checkout this is.
 
-Every function returns a plain dict in the versioned JSON contract (spec section 16), so the CLI can print it as
+Every function returns a plain dict in the versioned JSON contract (the workflow spec, section 16), so the CLI can print it as
 JSON for agents or as text for people. Failures raise `WorkError`, with a stable error code.
 """
 from __future__ import annotations
