@@ -46,15 +46,17 @@ def add_verify(backlog: Path, value: str) -> None:
 
 
 @pytest.fixture
-def repo(plan: Path, tmp_path: Path) -> Path:
+def repo(plan: Path, tmp_path: Path, golden) -> Path:
     """A scaffolded Streak repo whose test and lint commands are cheap Python one-liners."""
-    root = scaffold(plan, tmp_path / "out", git=False).path
-    manifest = root / "docs/planning/package.yaml"
-    text = manifest.read_text()
-    text = text.replace('test: "uv run pytest"', f"test: {json.dumps(py('print(1)'))}")
-    text = text.replace('lint: "uv run ruff check ."', f"lint: {json.dumps(py('print(2)'))}")
-    manifest.write_text(text)
-    return root
+    def build(folder: Path) -> Path:
+        root = scaffold(plan, folder / "out", git=False).path
+        manifest = root / "docs/planning/package.yaml"
+        text = manifest.read_text()
+        text = text.replace('test: "uv run pytest"', f"test: {json.dumps(py('print(1)'))}")
+        text = text.replace('lint: "uv run ruff check ."', f"lint: {json.dumps(py('print(2)'))}")
+        manifest.write_text(text)
+        return root
+    return golden("work-repo", build, tmp_path)
 
 
 # --- next -----------------------------------------------------------------------------------------------------

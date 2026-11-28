@@ -34,20 +34,22 @@ def py(code: str) -> str:
 
 
 @pytest.fixture
-def repo(plan: Path, tmp_path: Path) -> Path:
+def repo(plan: Path, tmp_path: Path, golden) -> Path:
     """A scaffolded Streak repo on main whose test and lint commands are cheap, with T-1.1 done."""
-    root = scaffold(plan, tmp_path / "out", git=True).path
-    manifest = root / "docs/planning/package.yaml"
-    text = manifest.read_text()
-    text = text.replace('test: "uv run pytest"', f"test: {json.dumps(py('print(1)'))}")
-    text = text.replace('lint: "uv run ruff check ."', f"lint: {json.dumps(py('print(2)'))}")
-    text = text.replace('setup: "uv sync"', f"setup: {json.dumps(py('print(0)'))}")
-    manifest.write_text(text)
-    git(root, "commit", "-qam", "cheap checks")
-    set_field(root, "T-1.1", "Status", "done")
-    set_field(root, "T-2.1", "Touches", "`src/streak/store.py`")
-    set_field(root, "T-2.2", "Touches", "`src/streak/streak.py`")
-    return root
+    def build(folder: Path) -> Path:
+        root = scaffold(plan, folder / "out", git=True).path
+        manifest = root / "docs/planning/package.yaml"
+        text = manifest.read_text()
+        text = text.replace('test: "uv run pytest"', f"test: {json.dumps(py('print(1)'))}")
+        text = text.replace('lint: "uv run ruff check ."', f"lint: {json.dumps(py('print(2)'))}")
+        text = text.replace('setup: "uv sync"', f"setup: {json.dumps(py('print(0)'))}")
+        manifest.write_text(text)
+        git(root, "commit", "-qam", "cheap checks")
+        set_field(root, "T-1.1", "Status", "done")
+        set_field(root, "T-2.1", "Touches", "`src/streak/store.py`")
+        set_field(root, "T-2.2", "Touches", "`src/streak/streak.py`")
+        return root
+    return golden("landing-repo", build, tmp_path)
 
 
 @pytest.fixture

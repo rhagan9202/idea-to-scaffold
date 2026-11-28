@@ -28,8 +28,8 @@ def git_identity(monkeypatch):
 
 
 @pytest.fixture
-def repo(plan: Path, tmp_path: Path) -> Path:
-    return scaffold(plan, tmp_path / "out", git=True).path
+def repo(plan: Path, tmp_path: Path, golden) -> Path:
+    return golden("scaffolded-repo", lambda folder: scaffold(plan, folder / "out", git=True).path, tmp_path)
 
 
 def its(*argv: str, cwd: Path | None = None) -> subprocess.Popen:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -20,12 +22,38 @@ def state_home(tmp_path_factory, monkeypatch) -> Path:
     return folder
 
 
+Golden = Callable[[str, Callable[[Path], Path], Path], Path]
+
+
+@pytest.fixture(scope="session")
+def golden(tmp_path_factory) -> Golden:
+    """Starting points that are slow to make (an imported plan, a scaffolded repo with commits), made once per
+    session and copied for each test: `golden(key, build, tmp_path)` runs `build(folder)` the first time `key` is
+    asked for, keeps what it made in `folder`, and copies all of it into `tmp_path`, returning the copy of the path
+    `build` returned. Each test gets its own copy, so what one test changes never reaches another. A build must not
+    depend on anything a test changed, nor leave state outside its folder."""
+    base = tmp_path_factory.mktemp("golden")
+    made: dict[str, Path] = {}
+
+    def copy(key: str, build: Callable[[Path], Path], into: Path) -> Path:
+        if key not in made:
+            folder = base / key
+            folder.mkdir()
+            made[key] = build(folder).relative_to(folder)
+        shutil.copytree(base / key, into, dirs_exist_ok=True, symlinks=True)
+        return into / made[key]
+
+    return copy
+
+
 @pytest.fixture
-def plan(tmp_path: Path) -> Path:
+def plan(tmp_path: Path, golden: Golden) -> Path:
     """The Streak example, imported (and therefore cross-linked) into a fresh package folder."""
-    dest = tmp_path / "streak-plan"
-    assert main(["import", str(EXAMPLE), "--into", str(dest)]) == 0
-    return dest
+    def build(folder: Path) -> Path:
+        dest = folder / "streak-plan"
+        assert main(["import", str(EXAMPLE), "--into", str(dest)]) == 0
+        return dest
+    return golden("plan", build, tmp_path)
 
 
 FM = "---\nid: {id}\ntitle: {title}\nstatus: approved\nversion: 1.0\ndepends_on: [{deps}]\n---\n\n"
