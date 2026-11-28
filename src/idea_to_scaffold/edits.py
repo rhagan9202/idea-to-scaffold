@@ -22,7 +22,7 @@ from .backlog import (
 from .ids import is_placeholder
 from .locking import LockTimeout, package_lock
 from .package import BACKLOG_STATUSES, Package
-from .work import SCHEMA, WorkError, _find, _refresh_mirror, item_payload, renumber, shown
+from .work import EXIT_CHECK_FAILED, SCHEMA, WorkError, _find, _refresh_mirror, item_payload, renumber, shown
 
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -169,6 +169,14 @@ def apply_result(pkg: Package, ident: str | None, result_file: str, **done_optio
         raise WorkError("result_mismatch", f"the result is for {result['id']}, not {ident}; nothing was marked",
                         details={"id": ident, "result_id": result["id"], "result_file": result_file})
     ident = result["id"]
+    tampered = results.launch_changes(pkg)
+    if tampered:
+        ledger.record(pkg, ident, "done", "launch_settings_changed", **run)
+        raise WorkError("launch_settings_changed",
+                        f"the headless launch files were changed ({', '.join(tampered)}), so this run may have had "
+                        "no Stop hook or no sandbox; nothing was marked. Check the run's work by hand; its start "
+                        "writes the files again", EXIT_CHECK_FAILED,
+                        details={"id": ident, "files": tampered, "result_file": result_file})
     if result["status"] == "done":
         from .work import done
         payload = done(pkg, ident, run=run, **done_options)

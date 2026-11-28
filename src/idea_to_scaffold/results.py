@@ -3,8 +3,10 @@
 `its` never launches an agent. It prints commands that do it safely:
 
 - **The Stop hook runs anyway.** `claude --bare -p` (soon the default for `-p`) skips the project's hooks, so the
-  command passes `--settings` with a settings file `its` writes outside the worktree, holding the Stop hook and the
-  sandbox setting. The agent can't edit it from inside its sandbox.
+  command passes `--settings` with a settings file `its` writes to the repository's state folder, outside the
+  repository and its git folder (`locking.state_dir`), holding the Stop hook and the sandbox settings. Claude's
+  sandbox doesn't let the agent write there, and `its done --result` refuses a run whose launch files no longer
+  match what `its` wrote (`launch_settings_changed`).
 - **The sandbox is on and credentials stay out.** Claude runs with its OS sandbox enabled (network denied by
   default); Codex runs with `--sandbox workspace-write`. Push and registry tokens (`GH_TOKEN`, `GITHUB_TOKEN`, ...)
   are unset for the agent, since `its` does every push itself. Nothing printed skips permissions.
@@ -23,7 +25,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
-from .locking import git_store_dir
+from .locking import state_dir
 from .package import Package
 
 RESULT_SCHEMA = {
@@ -76,23 +78,58 @@ def prompt(ident: str) -> str:
             f"finish honestly, run `its block {ident} --reason '...'`. End with the result JSON.")
 
 
+HOOK_TIMEOUT = 900  # seconds: the test suite runs inside the Stop hook
+LAUNCH_FILES = {"settings": "claude-settings.json", "schema": "result.schema.json"}
+
+
+def claude_settings() -> dict:
+    """The settings file the headless Claude line passes: the Stop hook, and the sandbox, which must start or the
+    run stops instead of running unsandboxed (`failIfUnavailable`), with no way for a command to step outside it
+    (`allowUnsandboxedCommands: false`)."""
+    return {
+        "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "its hook stop", "timeout": HOOK_TIMEOUT}]}]},
+        "sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True, "failIfUnavailable": True,
+                    "allowUnsandboxedCommands": False},
+    }
+
+
+def _launch_texts() -> dict[str, str]:
+    return {"settings": json.dumps(claude_settings(), indent=2) + "\n",
+            "schema": json.dumps(RESULT_SCHEMA, indent=2) + "\n"}
+
+
 def agent_files(pkg: Package) -> dict[str, Path] | None:
-    """Write the settings and schema files the headless commands use, in `<git common dir>/its/launch/`: outside
-    every worktree, so an agent can't rewrite its own hook or schema. None outside git."""
-    store = git_store_dir(pkg.root)
+    """Write the settings and schema files the headless commands use, in the state folder's `launch/`, outside the
+    repository and its git folder. None outside git."""
+    store = state_dir(pkg.root)
     if store is None:
         return None
     folder = store / "launch"
     folder.mkdir(parents=True, exist_ok=True)
-    settings = {
-        "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "its hook stop", "timeout": 900}]}]},
-        "sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True},
-    }
-    files = {"settings": folder / "claude-settings.json", "schema": folder / "result.schema.json"}
-    files["settings"].write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8", newline="\n")
-    files["schema"].write_text(json.dumps(RESULT_SCHEMA, indent=2) + "\n", encoding="utf-8", newline="\n")
+    files = {key: folder / name for key, name in LAUNCH_FILES.items()}
+    for key, text in _launch_texts().items():
+        files[key].write_text(text, encoding="utf-8", newline="\n")
     files["results"] = store / "runs"
     return files
+
+
+def launch_changes(pkg: Package) -> list[str]:
+    """The launch files whose content isn't what `its` writes: an agent rewrote its own Stop hook or sandbox
+    setting, for this run or the next one. [] when they are intact, or were never written."""
+    store = state_dir(pkg.root)
+    if store is None:
+        return []
+    changed = []
+    for key, text in _launch_texts().items():
+        path = store / "launch" / LAUNCH_FILES[key]
+        try:
+            if path.read_text(encoding="utf-8") != text:
+                changed.append(str(path))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            changed.append(str(path))
+    return changed
 
 
 def headless_commands(pkg: Package, ident: str, worktree: str | None) -> dict | None:

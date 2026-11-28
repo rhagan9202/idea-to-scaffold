@@ -4,10 +4,10 @@ An item is claimed when a local or remote branch named ``its/<ID>`` or ``its/<ID
 travel to every place agents run (other worktrees, other machines once pushed, cloud agents), so they need no extra
 state store, and an abandoned claim is just a branch to delete.
 
-On one machine, ``its start`` holds an OS file lock in git's shared directory
-(``$(git rev-parse --git-common-dir)/its/``, see ``locking.py``) while it checks readiness, claims and overlap and
-creates the branch, so two agents starting at the same moment can't both win. The same directory keeps
-``claims.json``: who started each claim, where its worktree is, and when.
+On one machine, ``its start`` holds an OS file lock (see ``locking.py``) while it checks readiness, claims and overlap
+and creates the branch, so two agents starting at the same moment can't both win. The repository's state folder,
+outside the repository (``locking.state_dir``), keeps ``claims.json``: who started each claim, where its worktree
+is, and when, and which integration branch it lands on.
 
 Readiness comes from the integration branch (``main`` unless ``integration_branch`` in ``package.yaml`` says
 otherwise): an item's dependency counts as done when it is done there, that is, merged.
@@ -161,7 +161,7 @@ def branch_name(ident: str, title: str) -> str:
 # --- the claims store ------------------------------------------------------------------------------------------
 
 def _store_dir(cwd: Path) -> Path:
-    store = locking.git_store_dir(cwd)
+    store = locking.state_dir(cwd)
     if store is None:
         raise GitError(f"{cwd} is not in a git repository")
     return store
@@ -172,7 +172,7 @@ def claims_lock(cwd: Path, wait: float | None = None):
     """The repository's lock (shared by every worktree), yielding the claims store folder."""
     store = _store_dir(cwd)
     try:
-        with locking.locked(store / locking.LOCK_NAME, wait):
+        with locking.locked(locking.lock_path(cwd), wait):
             yield store
     except locking.LockTimeout as exc:
         raise GitError(str(exc)) from None
@@ -210,6 +210,7 @@ def _load_store(store: Path) -> dict[str, dict]:
 
 
 def _save_store(store: Path, data: dict[str, dict]) -> None:
+    store.mkdir(parents=True, exist_ok=True)
     tmp = store / "claims.json.tmp"
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     os.replace(tmp, store / "claims.json")
@@ -410,8 +411,8 @@ def claim_entry(cwd: Path, ident: str) -> dict:
 
 # --- fork points for items started on the integration branch ---------------------------------------------------
 # A plain `its start` (no claim branch) works on the integration branch itself, where a merge base can't say what
-# the item changed. So start records the commit it began from, outside the working tree where the agent can't edit
-# it, and the gate diffs from there.
+# the item changed. So start records the commit it began from in the state folder, outside the repository, and the
+# gate diffs from there.
 
 def _load_forks(store: Path) -> dict[str, str]:
     try:
@@ -422,6 +423,7 @@ def _load_forks(store: Path) -> dict[str, str]:
 
 
 def _save_forks(store: Path, data: dict[str, str]) -> None:
+    store.mkdir(parents=True, exist_ok=True)
     tmp = store / "forks.json.tmp"
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     os.replace(tmp, store / "forks.json")
@@ -442,13 +444,17 @@ def fork_of(cwd: Path, ident: str) -> str | None:
 
 
 def clear_fork(cwd: Path, ident: str) -> None:
+    """Forget an item's fork point. Best effort: an agent's sandbox may not let it write the state folder."""
     try:
         store = _store_dir(cwd)
     except GitError:
         return
     data = _load_forks(store)
     if data.pop(ident, None) is not None:
-        _save_forks(store, data)
+        try:
+            _save_forks(store, data)
+        except OSError:
+            pass
 
 
 # --- Touches overlap ------------------------------------------------------------------------------------------

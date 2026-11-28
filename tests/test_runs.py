@@ -33,7 +33,7 @@ def write(tmp_path: Path, text: str) -> str:
 
 # -- launch commands ---------------------------------------------------------------------------------------------
 
-def test_start_prints_headless_commands_that_keep_the_guards(repo: Path, capsys):  # noqa: F811
+def test_start_prints_headless_commands_that_keep_the_guards(repo: Path, capsys, state_home: Path):  # noqa: F811
     code, out = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
     assert code == 0
     h = out["commands"]["headless"]
@@ -56,12 +56,15 @@ def test_start_prints_headless_commands_that_keep_the_guards(repo: Path, capsys)
         assert "dangerously" not in line and "danger-full-access" not in line and "bypassPermissions" not in line
     assert h["claude"].endswith(f"its done T-2.1 --result {h['result_file']}")
 
-    settings = Path(h["settings"])
+    settings = Path(h["settings"]).resolve()
     worktree = Path(out["claim"]["worktree"]).resolve()
-    assert not settings.resolve().is_relative_to(worktree) and ".git" in settings.parts  # out of the agent's reach
+    common = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    for folder in (worktree, repo.resolve(), common):  # out of the agent's reach: not in the repo or its git folder
+        assert not settings.is_relative_to(folder)
+    assert settings.is_relative_to(state_home.resolve())
     data = json.loads(settings.read_text())
     assert data["hooks"]["Stop"][0]["hooks"][0]["command"] == "its hook stop"
-    assert data["sandbox"]["enabled"] is True
+    assert data["sandbox"]["enabled"] is True and data["sandbox"]["failIfUnavailable"] is True
     assert git(repo, "status", "--porcelain") == ""  # nothing written into the checkout
 
 

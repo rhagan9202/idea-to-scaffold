@@ -10,6 +10,14 @@ ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "examples" / "streak" / "chat-export.md"
 
 
+@pytest.fixture(autouse=True)
+def state_home(tmp_path_factory, monkeypatch) -> Path:
+    """Keep each test's `its` state (claims, fork points, ledger, launch files) out of the real home folder."""
+    folder = tmp_path_factory.mktemp("state")
+    monkeypatch.setenv("XDG_STATE_HOME", str(folder))
+    return folder
+
+
 @pytest.fixture
 def plan(tmp_path: Path) -> Path:
     """The Streak example, imported (and therefore cross-linked) into a fresh package folder."""

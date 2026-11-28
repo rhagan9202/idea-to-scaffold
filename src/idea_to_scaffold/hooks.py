@@ -14,10 +14,10 @@ from pathlib import Path
 from . import ledger
 from .backlog import load_backlog
 from .package import Package
+from .results import HOOK_TIMEOUT
 from .work import SCHEMA, WorkError, done, failure_report, item_here
 
 HOOK_COMMAND = "its hook stop"
-HOOK_TIMEOUT = 900  # seconds: the test suite runs inside the hook
 HOOK_FILES = {"claude": ".claude/settings.json", "codex": ".codex/hooks.json"}
 
 

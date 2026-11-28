@@ -1,8 +1,9 @@
 """The run ledger: one JSON line per attempt at an item, so `its stats` can say what works.
 
 `start`, `done`, `block`, `land` and the Stop hook each append a record to `runs/<ID>.jsonl` in the repository's
-shared git folder (`$(git rev-parse --git-common-dir)/its/runs/`). That is on the lead's machine, shared by every
-worktree, never committed and never part of a diff, so writing it can't trip the done gate or conflict at land.
+state folder, outside the repository (`locking.state_dir`). That is on the lead's machine, shared by every worktree,
+never committed and never part of a diff, so writing it can't trip the done gate or conflict at land. An agent whose
+sandbox can't write there records nothing; the lead's `&& its done --result` and `its land` still do.
 
 A record is `{ts, item, event, outcome, ...}`. `done` records the checks and the gate's findings; with `--result`
 it adds what the agent reported (`agent`, `cost_usd`, `turns`, `duration_ms`, `session_id`). Nothing here is ever
@@ -16,14 +17,14 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .locking import git_store_dir
+from .locking import state_dir
 from .package import Package
 
 EVENTS = ("start", "done", "block", "land", "hook")
 
 
 def runs_dir(pkg: Package) -> Path | None:
-    store = git_store_dir(pkg.root)
+    store = state_dir(pkg.root)
     return store / "runs" if store is not None else None
 
 
