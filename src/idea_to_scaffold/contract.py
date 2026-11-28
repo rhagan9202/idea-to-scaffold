@@ -80,7 +80,9 @@ ERRORS: dict[str, Code] = {
                           "stale; pull first", fields=("branch", "base", "behind")),
     "blocked": Code("`start`: a dependency isn't done", (EXIT_BLOCKED,), ("blocked_by",)),
     "check_failed": Code("`done`: a check failed", (EXIT_CHECK_FAILED,), ("checks",)),
-    "claimed": Code("`start`: another branch holds the item's claim", fields=("claim",)),
+    "claim_branch": Code("`adopt`: the branch is an `its` claim branch already, which `its land` takes as it is",
+                         fields=("branch",)),
+    "claimed": Code("`start`, `adopt`: another branch holds the item's claim", fields=("claim",)),
     "dependency_changes": Code(_REFUSAL + "dependency changes (`dependency_added` enforced); the lead waives them "
                                "with `its waive <ID> --dependencies`", (EXIT_CHECK_FAILED,), ("findings", "warnings")),
     "dirty": Code("`land`, `waive`: uncommitted or staged changes are in the way"),
@@ -99,6 +101,8 @@ ERRORS: dict[str, Code] = {
     "link_outdated": Code("`link --check`: generated links, the index or the commands blocks are out of date",
                           fields=("changed",)),
     "locked": Code("another `its` command holds the package lock"),
+    "no_branch": Code("`adopt`: there is no such branch or pull request, here or on the remote",
+                      fields=("branch",)),
     "no_base": Code("`start --claim`, `gate-audit`: there is no integration branch"),
     "no_changes": Code("`done`: the branch changes nothing outside the planning folder, so nothing shows the item "
                        "was implemented", (EXIT_CHECK_FAILED,), ("findings", "warnings")),
@@ -120,6 +124,8 @@ ERRORS: dict[str, Code] = {
                          "re-verified", (EXIT_CHECK_FAILED,), ("failed",)),
     "not_placeholder": Code("`renumber`: the ID is permanent already"),
     "not_utf8": Code("`link`: a planning file isn't valid UTF-8 text"),
+    "nothing_to_adopt": Code("`adopt`: the branch has no commits the integration branch lacks",
+                             fields=("branch",)),
     "nothing_ready": Code("`start --next`: nothing can start, and `reason` says why; exit 9 when every item is done",
                           (EXIT_NOTHING_READY, EXIT_COMPLETE), ("reason",)),
     "nothing_to_review": Code("`review`: the branch only changes the backlog"),

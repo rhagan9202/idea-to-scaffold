@@ -27,6 +27,7 @@ from .contract import (
     SCHEMA,
     WorkError,
 )
+from .dispatch import adopt
 from .drift import drift
 from .edits import apply_result, block, drop, promote, propose, set_item_status, unblock, waive
 from .hooks import hook_agents, hook_dir, install_hooks, parse_event, stop_hook
@@ -594,6 +595,34 @@ def cmd_release(args: argparse.Namespace) -> int:
         print(f"deleted pushed branch {b}")
     for b in payload["remote_branches"]:
         print(f"still on the remote: {b} (add --remote to delete it)")
+    return 0
+
+
+def cmd_adopt(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+    try:
+        payload = adopt(pkg, args.ref, args.id, push=False if args.no_push else None, fetch=args.fetch,
+                        agent=args.agent)
+    except WorkError as err:
+        return _fail(args, err)
+    if args.json:
+        _emit(payload)
+        return 0
+    cand = payload["candidate"]
+    if payload["created"]:
+        where = f", pushed to {payload['remote']}" if payload["pushed"] else ""
+        print(f"claimed {payload['id']} with {payload['claim']['branch']}{where}")
+    if payload["push_error"]:
+        print(f"warning: the claim wasn't pushed: {payload['push_error']}", file=sys.stderr)
+    verb = "adopted" if payload["added"] else "already adopted"
+    print(f"{verb} {cand['name']} ({cand['tip'][:10]}) for {payload['id']}: {payload['title']}")
+    if len(payload["candidates"]) > 1:
+        print(f"candidates, tried in this order: {', '.join(c['name'] for c in payload['candidates'])}")
+    for other in payload["overlaps"]:
+        print(f"note: {payload['id']} may change the same files as {other}, which is running")
+    print(f"next: {payload['commands']['land']}  (runs the done gate and the held-out tests on each candidate)")
     return 0
 
 
@@ -1260,6 +1289,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true", help="also if the worktree has changes or a branch isn't merged")
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_release)
+
+    s = sub.add_parser("adopt", help="claim an item for a branch a vendor's agent made (claude/..., copilot/..., a "
+                       "pull request), so its land gates and merges it")
+    s.add_argument("ref", help="the branch (claude/x or origin/claude/x) or pull request (pr:12, or its URL)")
+    s.add_argument("id", help="the item the branch implements")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--agent", help="who made the branch, for the run ledger (default: from its name, e.g. claude)")
+    s.add_argument("--no-push", action="store_true",
+                   help="keep the claim local (by default it is pushed to the remote, if there is one)")
+    s.add_argument("--fetch", action="store_true", help=fetch_help)
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_adopt)
 
     s = sub.add_parser("renumber", help="give placeholder items (T-new-...) permanent IDs, after merging")
     s.add_argument("ids", nargs="*", metavar="ID", help="only these placeholders (default: all that aren't dropped)")

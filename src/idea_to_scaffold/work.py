@@ -678,10 +678,17 @@ def _tip(pkg: Package, claim: cl.Claim, entry: dict, v: View) -> dict:
     last = {"commit": log[0], "date": log[1], "subject": log[2]} if len(log) == 3 else None
     planned = next((i for i in v.items if i.id == claim.id), None)
     waiting = blocked_by(planned, v.items) if planned else []
+    candidates = [_candidate_tip(pkg, c, v.base) for c in claim.candidates] if v.base else []
     if claim.orphaned:
         state = "orphaned"
     elif claim.finished:
         state = "finished"
+    elif claim.candidates:  # adopted: land runs the done gate on the vendor's branches, so they are what counts
+        ahead = [c for c in candidates if c["ahead"]]
+        state = ("no_commits" if not ahead else "waiting" if waiting
+                 else "conflicts" if all(c["conflicts_with_base"] for c in ahead) else "ready_to_land")
+        if ahead and not entry.get("ahead"):
+            last = ahead[0]["last_commit"]
     elif status == "blocked":
         state = "blocked"
     elif status != "done":
@@ -695,7 +702,18 @@ def _tip(pkg: Package, claim: cl.Claim, entry: dict, v: View) -> dict:
     else:
         state = "ready_to_land"
     return {"tip_status": status, "blocked_reason": (item.get("Blocked") or None) if item else None,
-            "last_commit": last, "state": state, "waiting_on": waiting}
+            "last_commit": last, "state": state, "waiting_on": waiting, "candidates": candidates}
+
+
+def _candidate_tip(pkg: Package, cand: dict, base: str) -> dict:
+    """An adopted candidate as `its status` shows it: its commits, its last one, and its conflicts with the base."""
+    ref = cand["ref"]
+    there = cl.ref_exists(pkg.root, ref)
+    ahead = cl.ahead(pkg.root, ref, base) if there else 0
+    log = cl.git(pkg.root, "log", "-1", "--format=%h%x00%cI%x00%s", ref, check=False).split("\0") if there else []
+    return {**cand, "ahead": ahead, "exists": there,
+            "last_commit": {"commit": log[0], "date": log[1], "subject": log[2]} if len(log) == 3 else None,
+            "conflicts_with_base": (cl.conflicting_files(pkg.root, base, ref) or []) if ahead else []}
 
 
 def _ref(claim: cl.Claim) -> str:

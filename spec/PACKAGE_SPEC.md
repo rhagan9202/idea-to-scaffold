@@ -694,7 +694,8 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `behind_remote` | 1 | `start` on the integration branch: it is behind its remote copy, so its backlog is stale; pull first | `branch`, `base`, `behind` |
 | `blocked` | 4 | `start`: a dependency isn't done | `blocked_by` |
 | `check_failed` | 5 | `done`: a check failed | `checks` |
-| `claimed` | 1 | `start`: another branch holds the item's claim | `claim` |
+| `claim_branch` | 1 | `adopt`: the branch is an `its` claim branch already, which `its land` takes as it is | `branch` |
+| `claimed` | 1 | `start`, `adopt`: another branch holds the item's claim | `claim` |
 | `dependency_changes` | 5 | `done`: the done gate refused the branch's dependency changes (`dependency_added` enforced); the lead waives them with `its waive <ID> --dependencies` | `findings`, `warnings` |
 | `dirty` | 1 | `land`, `waive`: uncommitted or staged changes are in the way |  |
 | `diverged` | 1 | `land --fetch`: the integration branch and its remote copy have diverged |  |
@@ -709,6 +710,7 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `link_outdated` | 1 | `link --check`: generated links, the index or the commands blocks are out of date | `changed` |
 | `locked` | 1 | another `its` command holds the package lock |  |
 | `no_base` | 1 | `start --claim`, `gate-audit`: there is no integration branch |  |
+| `no_branch` | 1 | `adopt`: there is no such branch or pull request, here or on the remote | `branch` |
 | `no_changes` | 5 | `done`: the branch changes nothing outside the planning folder, so nothing shows the item was implemented | `findings`, `warnings` |
 | `no_fork_point` | 5 | `done` on the integration branch: no start was recorded for the item, so the gate can't tell which commits are its work; `its start <ID> --force` records one |  |
 | `no_package` | 1 | no planning package was found |  |
@@ -724,6 +726,7 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `not_utf8` | 1 | `link`: a planning file isn't valid UTF-8 text |  |
 | `not_verified` | 5 | `verify --drifted`, `verify --all`: some items failed their checks again; the rest were re-verified | `failed` |
 | `nothing_ready` | 3, 9 | `start --next`: nothing can start, and `reason` says why; exit 9 when every item is done | `reason` |
+| `nothing_to_adopt` | 1 | `adopt`: the branch has no commits the integration branch lacks | `branch` |
 | `nothing_to_review` | 1 | `review`: the branch only changes the backlog |  |
 | `outside_touches` | 5 | `done`: the done gate refused the branch's scope changes (files outside Touches, or Touches changed); the lead waives them with `its waive <ID> --outside-touches` | `findings`, `warnings` |
 | `overlap` | 6 | `start`: the item may change the same files as one already running | `overlaps`, `touches_listed`, `overlapping_touches` |
