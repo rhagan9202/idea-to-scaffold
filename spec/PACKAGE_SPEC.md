@@ -1377,7 +1377,7 @@ or Codex in each; it never launches an agent itself.
     read from the remote when there is no local copy; `no_base`), in a
     throwaway worktree at REF (default `HEAD`), so the checkout is never
     changed. The item is `--id`, else the first of: a claim branch, a branch
-    adopted here, a T-n.m in the branch name (`GITHUB_HEAD_REF` in CI), the
+    adopted here, a T-n.m in the branch name (`GITHUB_HEAD_REF` for `HEAD` in CI), the
     item whose status the branch changes, or `[T-n.m]` in its commit
     messages; several is `which_item` (with `candidates`). A branch that
     names no item passes with `reason: no_item`, unless `--require-item`. A

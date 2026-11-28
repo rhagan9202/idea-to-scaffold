@@ -15,6 +15,8 @@ def state_home(tmp_path_factory, monkeypatch) -> Path:
     """Keep each test's `its` state (claims, fork points, ledger, launch files) out of the real home folder."""
     folder = tmp_path_factory.mktemp("state")
     monkeypatch.setenv("XDG_STATE_HOME", str(folder))
+    for name in ("GITHUB_BASE_REF", "GITHUB_HEAD_REF"):  # set when this suite runs in a pull request's CI
+        monkeypatch.delenv(name, raising=False)
     return folder
 
 

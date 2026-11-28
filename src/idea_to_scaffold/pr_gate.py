@@ -9,7 +9,7 @@ the item's Verify, the test and lint commands, the item's held-out tests and red
 
 The checks run in a throwaway worktree at REF, so the checkout `its gate` runs in is never changed. The item comes
 from `--id`, else the branch: a claim branch (`its/T-2.1-...`), a branch adopted here (`its adopt`), a T-n.m in the
-branch name (`GITHUB_HEAD_REF` in a pull request's CI), the item whose status the branch changes, or `[T-n.m]` in
+branch name (for HEAD in a pull request's CI, `GITHUB_HEAD_REF`), the item whose status the branch changes, or `[T-n.m]` in
 its commit messages. A branch that names no item has nothing to gate and passes, unless `--require-item`. In a pull
 request's CI the base is the branch it targets (`GITHUB_BASE_REF`), read from the remote when there is no local copy.
 """
@@ -61,12 +61,11 @@ def base_of(pkg: Package, base: str | None) -> str:
 
 
 def branch_of(pkg: Package, ref: str) -> str | None:
-    """The branch name REF stands for: a pull request's source branch in CI, the branch itself, or the branch
-    checked out when REF is HEAD."""
-    if os.environ.get("GITHUB_HEAD_REF"):
-        return os.environ["GITHUB_HEAD_REF"]
+    """The branch name REF stands for: the branch itself, or for HEAD the pull request's source branch in CI
+    (`GITHUB_HEAD_REF`, since the checkout there is detached), else the branch checked out. A ref named outright is
+    never renamed by the environment."""
     if ref == "HEAD":
-        return cl.current_branch(pkg.root)
+        return os.environ.get("GITHUB_HEAD_REF") or cl.current_branch(pkg.root)
     for prefix in ("refs/heads/", "refs/remotes/"):
         if ref.startswith(prefix):
             return ref[len(prefix):]
