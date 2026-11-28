@@ -7,7 +7,7 @@ from pathlib import Path
 
 from idea_to_scaffold.cli import main
 
-from .test_landing import git_identity, remote, repo  # noqa: F401 - fixtures
+from .test_landing import git_identity, py, remote, repo  # noqa: F401 - fixtures
 from .test_loop import held_out
 from .test_parallel import git, run_json, set_field
 
@@ -57,15 +57,19 @@ def test_land_keeps_the_candidate_that_passes_the_held_out_tests(repo: Path, rem
     assert git(remote, "branch", "--list", "copilot/*").strip() == "copilot/store"  # the vendor's branch stays
 
 
-def reply(tmp_path: Path, name: str, verdict: str) -> str:
-    """A reviewer's answer: approve with every requirement met, or changes requested with a blocker."""
+ADD_IS_2 = py("import sys; sys.path.insert(0, 'src'); from streak.store import add; sys.exit(add() != 2)")
+
+
+def reply(tmp_path: Path, name: str, verdict: str, repro: str | None = ADD_IS_2) -> str:
+    """A reviewer's answer: approve with every requirement met, or changes requested with a blocker whose repro
+    is `repro` (a command that fails when add() doesn't return 2)."""
     reqs = ("FR-001", "FR-002", "NFR-002", "FR-003", "FR-004", "FR-005", "NFR-001", "NFR-003")
     ok = verdict == "approve"
     path = tmp_path / f"{name}.json"
+    blocker = {"severity": "blocker", "file": "src/streak/store.py", "line": 1, "message": "add returns the wrong value"}
     path.write_text(json.dumps({
         "verdict": verdict, "requirements": [{"id": r, "status": "met", "evidence": "read it"} for r in reqs],
-        "findings": [] if ok else [{"severity": "blocker", "file": "src/streak/store.py", "line": 1,
-                                    "message": "add returns the wrong value"}]}))
+        "findings": [] if ok else [{**blocker, **({"repro": {"command": repro}} if repro else {})}]}))
     return str(path)
 
 
@@ -82,6 +86,7 @@ def test_each_candidate_gets_its_own_review_and_land_respects_it(repo: Path, rem
     assert "--branch claude/store" in first["commands"]["claude"]
     code, out = run_json(capsys, "review", "T-2.1", str(repo), "--reply", reply(tmp_path, "claude", "changes_requested"))
     assert code == 5 and out["reviewed_branch"] == "claude/store" and out["current"], out
+    assert out["outcome"] == "changes_requested" and [e["reproduced"] for e in out["evidence"]] == [True], out
     code, second = run_json(capsys, "review", "T-2.1", str(repo), "--branch", "origin/codex/store")
     assert code == 0 and second["reviewed_branch"] == "codex/store" and "return 2" in second["diff"]
     code, out = run_json(capsys, "review", "T-2.1", str(repo), "--branch", "codex/store",
@@ -184,3 +189,39 @@ def test_gate_passes_a_good_pull_request_and_refuses_a_bad_one(repo: Path, remot
     assert main(["gate", str(ci)]) == 0
     text = capsys.readouterr().out
     assert "gate T-2.1 (branch name) on copilot/T-2.1-store against origin/main: passed" in text, text
+
+
+def test_a_blocking_claim_that_doesnt_reproduce_is_downgraded(repo: Path, remote: Path, tmp_path: Path,  # noqa: F811
+                                                               capsys):
+    git(repo, "push", "-q", "origin", "main")
+    vendor_branch(remote, tmp_path, "codex/store", {"src/streak/store.py": "def add():\n    return 2\n"})
+    assert run_json(capsys, "adopt", "codex/store", "T-2.1", str(repo))[0] == 0
+    run_json(capsys, "review", "T-2.1", str(repo))
+    code, out = run_json(capsys, "review", "T-2.1", str(repo), "--reply", reply(tmp_path, "a", "changes_requested"))
+    assert code == 5 and out["outcome"] == "changes_requested"  # a major still blocks at the default cut-off
+    assert out["findings"][0]["severity"] == "major" and out["findings"][0]["downgraded_from"] == "blocker"
+    assert out["evidence"][0]["why"] == "the command passed on the change"
+    code, out = run_json(capsys, "review", "T-2.1", str(repo), "--reply", reply(tmp_path, "b", "changes_requested"),
+                         "--min-severity", "blocker")
+    assert code == 5 and out["outcome"] == "inconclusive" and out["blocking"] == [], out
+
+    unshown = tmp_path / "unshown.json"
+    reqs = [{"id": r, "status": "met", "evidence": "read it"} for r in ("FR-002", "NFR-002")]
+    unshown.write_text(json.dumps({"verdict": "changes_requested", "findings": [], "requirements": [
+        {"id": "FR-001", "status": "not_met", "evidence": "I think add is wrong"}, *reqs]}))
+    code, out = run_json(capsys, "review", "T-2.1", str(repo), "--reply", str(unshown))
+    assert code == 5 and out["outcome"] == "inconclusive" and out["requirements"][0]["status"] == "cant_tell", out
+    assert out["evidence"][0]["why"] == "no repro given"
+    shown = tmp_path / "shown.json"
+    shown.write_text(json.dumps({"verdict": "changes_requested", "findings": [], "requirements": [
+        {"id": "FR-001", "status": "not_met", "evidence": "no CLI", "repro": {
+            "command": py("import sys; sys.path.insert(0, 'src'); from streak import cli"),
+            "files": {"tests/test_cli_missing.py": "def test_cli():\n    import streak.cli\n"}}}, *reqs]}))
+    code, out = run_json(capsys, "review", "T-2.1", str(repo), "--reply", str(shown))
+    assert code == 5 and out["outcome"] == "changes_requested" and out["requirements"][0]["status"] == "not_met"
+    assert not (repo / "tests/test_cli_missing.py").exists()  # the repro's files went in a throwaway worktree
+
+    run_json(capsys, "review", "T-2.1", str(repo))
+    assert run_json(capsys, "review", "T-2.1", str(repo), "--reply", str(unshown))[1]["outcome"] == "inconclusive"
+    code, landed = run_json(capsys, "land", "--dir", str(repo))  # an inconclusive review doesn't hold it back
+    assert code == 0 and [x["branch"] for x in landed["landed"]] == ["codex/store"], landed

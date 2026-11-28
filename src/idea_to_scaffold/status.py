@@ -91,7 +91,8 @@ def status_payload(pkg: Package, base: str | None = None) -> dict:
         claims = claims_payload(pkg, base)["claims"]
         for c in claims:  # what its land would say about the review of what it would merge
             c["review"] = claim_review(pkg, c, v.base) if v.base and c["state"] in REVIEWED else None
-            if c["state"] == "ready_to_land" and c["review"] and c["review"]["current"] and not c["review"]["passed"]:
+            if c["state"] == "ready_to_land" and c["review"] and c["review"]["current"] \
+                    and c["review"]["outcome"] == "changes_requested":
                 c["state"] = "changes_requested"
             elif c["state"] == "ready_to_land" and c["review"] and c["review"]["required"] and not c["review"]["current"]:
                 c["state"] = "not_reviewed"
@@ -190,7 +191,8 @@ def _candidate_line(cand: dict) -> str:
     review = cand.get("review")
     if review:
         line += f"; review: {review['label']}"
-        why = [*review.get("unmet", []), *review.get("blocking", [])] if review.get("current") and not review["passed"] else []
+        why = [*review.get("unmet", []), *review.get("blocking", [])] if review.get("current") \
+            and review.get("outcome") == "changes_requested" else []
         line += f" ({', '.join(why)})" if why else ""
     return line
 

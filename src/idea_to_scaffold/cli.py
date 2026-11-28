@@ -1024,7 +1024,8 @@ def cmd_review(args: argparse.Namespace) -> int:
             return 1
         try:
             text = sys.stdin.read() if args.reply == "-" else Path(args.reply).read_text(encoding="utf-8")
-            payload = judge(pkg, args.id, text, min_severity=args.min_severity, base=args.base, branch=args.branch)
+            payload = judge(pkg, args.id, text, min_severity=args.min_severity, base=args.base, branch=args.branch,
+                            run_evidence=not args.no_evidence)
         except OSError as exc:
             return _fail(args, WorkError("not_found", f"can't read {args.reply}: {exc}"))
         except WorkError as err:
@@ -1033,7 +1034,12 @@ def cmd_review(args: argparse.Namespace) -> int:
         if args.json:
             _emit(payload)
             return code
-        print(f"review of {payload['id']}: {payload['verdict']}" + ("" if payload["passed"] else " (not passed)"))
+        print(f"review of {payload['id']}: {payload['outcome'].replace('_', ' ')}"
+              + (f" (the reviewer said {payload['verdict'].replace('_', ' ')})" if payload["verdict"] != "approve"
+                 and payload["outcome"] != "changes_requested" else ""))
+        for e in payload["evidence"]:
+            print(f"  {'reproduced' if e['reproduced'] else 'not reproduced, downgraded'}: {e['kind']} {e['of']}: "
+                  f"{e['why']}" + (f" ({e['command']})" if e.get("command") else ""))
         for ident in payload["unmet"]:
             print(f"  {ident}: " + ("not in the reply" if ident in payload["missing"] else "not met"))
         for f in payload["findings"]:
@@ -1045,7 +1051,9 @@ def cmd_review(args: argparse.Namespace) -> int:
                   "reviewer saw")
         elif payload["recorded"]:
             print("recorded: its land " + ("will take it" if payload["passed"] else
-                                           "refuses this version until it changes and is reviewed again"))
+                                           "refuses this version until it changes and is reviewed again"
+                                           if payload["outcome"] == "changes_requested" else
+                                           "takes it, unless it needs an approving review"))
         return code
     pkg = _load(args)
     if pkg is None:
@@ -1461,6 +1469,8 @@ def build_parser() -> argparse.ArgumentParser:
                                                    "record the verdict, and say if it passes (exit 5 if not)")
     s.add_argument("--min-severity", default="major", choices=["blocker", "major", "minor"],
                    help="with --reply: the lowest severity that fails the review (default: major)")
+    s.add_argument("--no-evidence", action="store_true",
+                   help="with --reply: don't run the reviewer's repro commands (their claims are then downgraded)")
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_review)
 

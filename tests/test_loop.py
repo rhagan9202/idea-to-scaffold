@@ -494,7 +494,9 @@ def test_changes_requested_keeps_that_version_from_landing(claim: Path, repo: Pa
                                                            capsys):
     _done_and_committed(claim, capsys)
     _, prompt = run_json(capsys, "review", "T-2.1", str(repo))  # from main: it reviews the claim branch
-    blocker = {"severity": "blocker", "file": "src/streak/store.py", "line": 1, "message": "add() stores nothing"}
+    stores = py("import sys; sys.path.insert(0, 'src'); from streak.store import add; sys.exit(add() != 'stored')")
+    blocker = {"severity": "blocker", "file": "src/streak/store.py", "line": 1, "message": "add() stores nothing",
+               "repro": {"command": stores}}  # a blocker stands only if its repro fails on the change
     reply = _reply(tmp_path / "review.json", "changes_requested", findings=(blocker,))
     code, out = run_json(capsys, "review", "T-2.1", str(repo), "--reply", str(reply))
     assert code == 5 and out["recorded"] and out["current"] and out["digest"] == prompt["digest"], out
