@@ -20,6 +20,8 @@ def verified(root: Path, ident: str) -> str:
 
 
 def done_on_main(repo: Path, ident: str, path: str, content: str) -> None:  # noqa: F811
+    if git(repo, "branch", "--show-current") == "main":  # a claim's worktree was started already
+        assert main(["start", ident, str(repo)]) == 0
     (repo / path).write_text(content)
     assert main(["done", ident, str(repo)]) == 0
     git(repo, "add", "-A")

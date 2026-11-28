@@ -8,6 +8,11 @@ ever advances to a state that was tested as a whole.
 
 A branch is ready to land when its item is `done` on the branch (its agent ran `its done`). Branches land in
 backlog order, and an item lands only once its dependencies are done on the integration branch.
+
+Land is where the gate is enforced, so it first checks that the integration branch itself holds only commits `its`
+trusts (`trust.py`): an agent can move main from its worktree, and main holds the gate's rules. While it holds a
+commit that is neither pushed nor made by `its`, land refuses (`base_untrusted`) until a person accepts it
+(`--accept-base`). Findings are waived only by a Waiver on the integration branch's copy of the item (`its waive`).
 """
 from __future__ import annotations
 
@@ -18,7 +23,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import claims as cl
-from . import gate, gitx, ledger
+from . import gate, gitx, ledger, trust
 from .backlog import BacklogItem, blocked_by, load_backlog, load_proposals, parse_backlog
 from .checks import RESULT_KINDS, Check, checks_for, result_findings, run_check
 from .ids import META_FILES
@@ -27,12 +32,12 @@ from .package import Package
 from .work import (
     BACKLOG,
     BACKLOG_JSON,
+    EXIT_NOT_LANDED,
     SCHEMA,
     WorkError,
     _locked,
     _refresh_mirror,
     changed_tests,
-    check_override,
     integration_branch,
     remote_of,
     shown,
@@ -95,18 +100,14 @@ def land(
     push: bool = False,
     release: bool = False,
     dry_run: bool = False,
-    allow_test_changes: str | None = None,
-    allow_outside_touches: str | None = None,
+    accept_base: bool = False,
     on_check: Callable[[str, Check], None] | None = None,
 ) -> dict:
-    """Land finished claim branches on the integration branch, one at a time, testing each merged result."""
+    """Land finished claim branches on the integration branch, one at a time, testing each merged result.
+    `accept_base` trusts the commits on the integration branch that `its` didn't make (a person has looked)."""
     if not cl.in_git(pkg.root):
         raise WorkError("not_git", "landing needs a git repository")
     root = pkg.root
-    if allow_test_changes is not None:
-        check_override("--allow-test-changes", allow_test_changes)
-    if allow_outside_touches is not None:
-        check_override("--allow-outside-touches", allow_outside_touches)
     base = integration_branch(pkg)
     if cl.current_branch(root) != base:
         raise WorkError("not_integration_branch", f"run its land on {base}, in the main checkout",
@@ -122,6 +123,7 @@ def land(
         tracking = f"{remote}/{base}"
         if cl.ref_exists(root, tracking) and _git(root, "merge", "--ff-only", "--quiet", tracking).returncode != 0:
             raise WorkError("diverged", f"{base} and {tracking} have diverged; reconcile them first")
+    trusted = check_base(pkg, base, remote, accept=accept_base, write=not dry_run)
 
     landed: list[dict] = []
     skipped: list[dict] = []
@@ -139,8 +141,7 @@ def land(
                 continue
             pending.remove((claim, ref))
             progress = True
-            outcome = _land_one(pkg, claim, ref, verify=verify, dry_run=dry_run, on_check=on_check,
-                                allow=(allow_test_changes is not None, allow_outside_touches is not None))
+            outcome = _land_one(pkg, claim, ref, verify=verify, dry_run=dry_run, on_check=on_check, remote=remote)
             (landed if outcome["landed"] else skipped).append(outcome)
             if not dry_run:
                 ledger.record(pkg, claim.id, "land", "landed" if outcome["landed"] else outcome.get("reason", "skipped"),
@@ -170,12 +171,37 @@ def land(
                 outcome["release_error"] = str(exc)
     return {
         "schema": SCHEMA, "ok": True, "base": base, "dry_run": dry_run, "landed": landed, "skipped": skipped,
-        "released": released, "pushed": pushed, "proposals": [shown(pkg, pkg.rel(p)) for p, _ in load_proposals(pkg)],
+        "released": released, "pushed": pushed, "base_trust": trusted,
+        "proposals": [shown(pkg, pkg.rel(p)) for p, _ in load_proposals(pkg)],
     }
 
 
+def check_base(pkg: Package, base: str, remote: str | None, *, accept: bool = False, write: bool = True) -> str:
+    """Refuse (`base_untrusted`) while the integration branch holds commits `its` doesn't trust, unless `accept`.
+    Returns how it is trusted: "trusted", "first_use" (nothing was recorded yet) or "accepted". Without `write`
+    (a dry run) nothing is recorded."""
+    root = pkg.root
+    try:
+        left = trust.untrusted(root, base, "HEAD", remote)
+    except gitx.GitError as exc:
+        raise WorkError("git_error", f"couldn't read {base}'s history: {exc}") from exc
+    if left is None or (left and accept):
+        if write:
+            trust.record(root, base, "HEAD")
+        return "first_use" if left is None else "accepted"
+    if not left:
+        return "trusted"
+    where = f"on {remote}/{base} " if remote else ""
+    raise WorkError(
+        "base_untrusted",
+        f"{base} has {len(left)} commit(s) that its didn't make and that aren't {where or 'pushed '}"
+        f"({left[0]}{', ...' if len(left) > 1 else ''}). An agent's worktree shares {base}'s ref and can move it, "
+        f"and {base} holds the gate's rules; look at them (git log {base}), then run its land --accept-base if they "
+        "are yours", EXIT_NOT_LANDED, {"integration_branch": base, "commits": left})
+
+
 def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run: bool,
-              on_check: Callable[[str, Check], None] | None, allow: tuple[bool, bool] = (False, False)) -> dict:
+              on_check: Callable[[str, Check], None] | None, remote: str | None = None) -> dict:
     """Merge one claim in a throwaway worktree, check the merged result there, and only then fast-forward the
     integration branch to it. The user's checkout is never merged into, reset or cleaned, so nothing in it (untracked
     notes included) can be lost, and a status written there while the checks run survives."""
@@ -185,7 +211,7 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
         inspection = gate.inspect(pkg, claim.id, "HEAD", head=ref)
     except gate.GateError as exc:
         return {**result, "reason": "gate_error", "message": f"{claim.id} can't be checked: {exc}"}
-    blocking = inspection.blocking(allow_test_changes=allow[0], allow_outside_touches=allow[1])
+    blocking = inspection.blocking()
     if blocking:
         tests = [f for f in blocking if f["kind"] in gate.TEST_KINDS]
         return {**result, "reason": "test_changes" if tests else "outside_touches", "findings": blocking,
@@ -200,6 +226,10 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
     if dry_run:
         return {**result, "reason": "dry_run", "message": "would land"}
     before = _git(root, "rev-parse", "HEAD").stdout.strip()
+    if trust.untrusted(root, integration_branch(pkg), before, remote):  # moved since land checked it
+        return {**result, "reason": "base_untrusted",
+                "message": f"{integration_branch(pkg)} moved to a commit its didn't make while landing; run its land "
+                           "again to see it"}
     prefix = _git(root, "rev-parse", "--show-prefix").stdout.strip()
     item_title = (_item_at(pkg, ref, claim.id) or BacklogItem(claim.id, "", 3, 0, 0)).title
     scratch = Path(tempfile.mkdtemp(prefix="its-land-"))
@@ -235,7 +265,7 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
                     "message": f"{', '.join(failed)} failed on the merged result; {claim.id} was not landed"}
         for finding in result_findings(checks, changed_tests(pkg, inspection)):
             inspection.add(finding)
-        refused = [f for f in inspection.blocking(allow_test_changes=allow[0]) if f["kind"] in RESULT_KINDS]
+        refused = [f for f in inspection.blocking() if f["kind"] in RESULT_KINDS]
         if refused:
             return {**result, "reason": "test_changes", "findings": refused, "checks": checks,
                     "message": f"{refused[0]['message']}; {claim.id} was not landed"}
@@ -249,6 +279,7 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
                 return {**result, "reason": "checkout_blocked", "checks": checks,
                         "message": "the merged result passed, but your checkout couldn't be moved to it: "
                                    f"{ff.stderr.strip() or ff.stdout.strip()}"}
+            trust.record(root, integration_branch(pkg), commit)
         _refresh_mirror(pkg)
         return {**result, "landed": True, "commit": commit, "checks": checks, "warnings": inspection.warnings,
                 "checks_skipped": None if (verify and pkg.repo_layout) else

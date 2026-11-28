@@ -6,12 +6,41 @@ replays one way the round 4 review found to do one of those (the IDs are the rev
 """
 from __future__ import annotations
 
+import json
+import os
+import stat
 import sys
 import time
 from pathlib import Path
 
-from idea_to_scaffold import checks
+import pytest
+
+from idea_to_scaffold import checks, gitx, locking
 from idea_to_scaffold.checks import Check, Settings, check_env, run_check
+from idea_to_scaffold.cli import main
+
+from .test_gate import TEST, claim, finish, status_line  # noqa: F401 - fixtures
+from .test_landing import git_identity, py, remote, repo  # noqa: F401 - fixtures
+from .test_parallel import git, run_json, set_field, waive
+
+
+def commit(root: Path, message: str = "wip") -> None:
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", message)
+
+
+def kinds(out: dict) -> set[str]:
+    return {f["kind"] for f in out.get("error", {}).get("findings", out.get("findings", []))}
+
+
+def common_dir(root: Path) -> Path:
+    return Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+
+
+def landed_once(repo: Path, capsys) -> None:  # noqa: F811
+    """A land with nothing to land: the first one trusts main as it is."""
+    code, out = run_json(capsys, "land", "--dir", str(repo))
+    assert code == 3 and out["base_trust"] == "first_use"
 
 # --- D1: a check never sees the lead's token; a check that hangs is killed with everything it started ------------
 
@@ -89,3 +118,165 @@ def test_a_failed_check_keeps_the_end_of_its_output(tmp_path: Path, monkeypatch)
     result = run_check(Check("test", f'"{sys.executable}" -c "{code}"'), tmp_path)
     lines = result["output"].split("\n")
     assert result["exit_code"] == 2 and len(lines) == checks.OUTPUT_TAIL and lines[-1] == "line 4999"
+
+
+# --- S1: a hook the agent plants in the shared git folder never runs in the lead's land -----------------------------
+
+HOOK = """#!/bin/sh
+echo "ran with ${GH_TOKEN:-no token}" >> "{marker}"
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="git for Windows runs hooks through sh too, but chmod is a no-op there")
+def test_s1_a_planted_hook_doesnt_run_in_land(claim: Path, repo: Path, tmp_path: Path, capsys, monkeypatch):  # noqa: F811
+    marker = tmp_path / "marker"
+    hooks = common_dir(claim) / "hooks"
+    for name in ("post-checkout", "post-merge", "reference-transaction", "pre-commit", "post-commit"):
+        hook = hooks / name
+        hook.write_text(HOOK.replace("{marker}", str(marker)))
+        hook.chmod(hook.stat().st_mode | stat.S_IXUSR)
+    assert finish(claim, capsys=capsys)[0] == 0
+    commit(claim, "feat: store")  # plain git, as the agent uses it: the planted hooks run
+    assert marker.exists()
+    marker.unlink()
+    monkeypatch.setenv("GH_TOKEN", "ghp_lead")
+    code, out = run_json(capsys, "land", "--dir", str(repo))
+    assert code == 0 and [x["id"] for x in out["landed"]] == ["T-2.1"]
+    waive(repo, "T-2.2", "outside-touches", reason="a commit its makes")
+    assert not marker.exists()
+
+
+def test_gitx_drops_the_callers_git_variables_and_turns_hooks_off():
+    env = gitx.env({"GIT_DIR": "/elsewhere", "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                    "GIT_AUTHOR_NAME": "Lead", "GIT_SSH_COMMAND": "ssh -i k", "PATH": "/bin"})
+    assert set(env) == {"GIT_AUTHOR_NAME", "GIT_SSH_COMMAND", "PATH", "GIT_TERMINAL_PROMPT"}
+    argv = gitx.argv("status")
+    assert "core.fsmonitor=false" in argv and any(a.startswith("core.hooksPath=") for a in argv)
+    assert not os.listdir(argv[argv.index("-c") + 1].split("=", 1)[1])  # the hooks folder is empty
+
+
+# --- S2: a main the agent moved from its worktree is refused until the lead accepts it -------------------------------
+
+def test_s2_land_refuses_a_main_that_moved_without_its(claim: Path, repo: Path, capsys):  # noqa: F811
+    landed_once(repo, capsys)
+    (claim / "src/streak/store.py").write_text("def add(): ...\n")
+    (claim / TEST).unlink()
+    commit(claim, "skip the gate")
+    git(claim, "update-ref", "refs/heads/main", "HEAD")  # no its land, no gate
+    git(repo, "reset", "-q", "--hard")  # the lead's checkout simply follows
+    code, out = run_json(capsys, "land", "--dir", str(repo))
+    assert code == 7 and out["error"]["code"] == "base_untrusted"
+    assert [c.split(" ", 1)[1] for c in out["error"]["commits"]] == ["skip the gate"]
+    _, status = run_json(capsys, "status", str(repo))
+    assert [w["kind"] for w in status["warnings"]] == ["main_moved"]
+    code, out = run_json(capsys, "land", "--dir", str(repo), "--accept-base")  # the lead looked and accepts it
+    assert code != 1 and out["base_trust"] == "accepted"
+    assert run_json(capsys, "status", str(repo))[1]["warnings"] == []
+
+
+def test_s2_commits_its_makes_or_that_were_pushed_stay_trusted(repo: Path, remote: Path, capsys):  # noqa: F811
+    landed_once(repo, capsys)
+    assert main(["block", "T-2.2", str(repo), "--reason", "waiting on design", "--commit"]) == 0  # its commits
+    waive(repo, "T-2.1", "dependencies", reason="adds sqlite")
+    (repo / "README.md").write_text("by hand\n")
+    commit(repo, "docs by hand")
+    code, out = run_json(capsys, "land", "--dir", str(repo))
+    assert code == 7 and [c.split(" ", 1)[1] for c in out["error"]["commits"]] == ["docs by hand"]
+    git(repo, "push", "-q", "origin", "main")  # pushed work is trusted: the remote's branch guards it
+    code, out = run_json(capsys, "land", "--dir", str(repo))
+    assert code == 3 and out["base_trust"] == "trusted"
+
+
+def test_s2_an_its_commit_on_top_of_untrusted_work_doesnt_vouch_for_it(repo: Path, capsys):  # noqa: F811
+    landed_once(repo, capsys)
+    (repo / "README.md").write_text("by someone\n")
+    commit(repo, "unknown")
+    waive(repo, "T-2.1", "test-changes", reason="later")
+    code, out = run_json(capsys, "land", "--dir", str(repo))
+    assert code == 7 and {c.split(" ", 1)[1] for c in out["error"]["commits"]} == {"unknown", "Waive test-changes for T-2.1"}
+
+
+# --- B2: fork points live outside the shared git folder -------------------------------------------------------------
+
+def test_b2_an_edited_forks_file_in_the_git_folder_changes_nothing(repo: Path, capsys):  # noqa: F811
+    assert main(["start", "T-2.1", str(repo)]) == 0
+    (repo / "tests/test_smoke.py").unlink()
+    commit(repo, "drop a test")
+    old = common_dir(repo) / "its"
+    old.mkdir(exist_ok=True)
+    (old / "forks.json").write_text(json.dumps({"T-2.1": git(repo, "rev-parse", "HEAD")}))
+    code, out = run_json(capsys, "done", "T-2.1", str(repo), "--no-verify")
+    assert code == 5 and "test_deleted" in kinds(out)
+    assert not locking.state_dir(repo).is_relative_to(common_dir(repo))
+
+
+# --- B1: done on main needs the start recorded ----------------------------------------------------------------------
+
+def test_b1_done_on_main_needs_a_recorded_start(repo: Path, capsys):  # noqa: F811
+    assert main(["set-status", "T-2.1", "in-progress", str(repo)]) == 0  # no its start: no fork point
+    (repo / "tests/test_smoke.py").unlink()
+    commit(repo, "drop a test")
+    code, out = run_json(capsys, "done", "T-2.1", str(repo), "--no-verify")
+    assert code == 5 and out["error"]["code"] == "no_fork_point"
+    assert main(["start", "T-2.1", str(repo), "--force"]) == 0  # the lead records where it starts from
+    (repo / "src/streak/store.py").write_text("x = 1\n")
+    code, out = run_json(capsys, "done", "T-2.1", str(repo), "--no-verify")
+    assert code == 0, out
+
+
+# --- A9: --no-verify never writes Verified ----------------------------------------------------------------------------
+
+def test_a9_no_verify_says_the_checks_were_skipped(repo: Path, capsys):  # noqa: F811
+    set_field(repo, "T-2.1", "Verify", f"`{py('import sys; sys.exit(1)')}`")  # the work is broken
+    _, out = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
+    wt = Path(out["claim"]["worktree"])
+    (wt / "src/streak/store.py").write_text("x = 1\n")
+    code, out = run_json(capsys, "done", "T-2.1", str(wt), "--no-verify")
+    assert code == 0 and out["verified"] == "skipped (--no-verify)" and out["checks_skipped"] == "--no-verify"
+    assert status_line(wt, "T-2.1", "Verified").endswith("skipped (--no-verify)")
+    commit(wt, "feat")
+    _, out = run_json(capsys, "drift", str(wt))
+    assert out["unknown"] == [{"id": "T-2.1", "reason": "not_verified", "message": out["unknown"][0]["message"]}]
+    code, out = run_json(capsys, "land", "--dir", str(repo))  # land still runs the checks
+    assert code == 7 and out["skipped"][0]["reason"] == "check_failed"
+
+
+# --- A7, A7b: a waiver is the lead's, written on main; no variable or terminal stands in for it ---------------------
+
+def test_a7_no_environment_or_terminal_waives_the_gate(claim: Path, repo: Path, capsys, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("ITS_ALLOW_OVERRIDES", "1")
+    monkeypatch.setattr("idea_to_scaffold.work.is_terminal", lambda fd: True)  # what `script` gives an agent
+    (claim / TEST).unlink()
+    code, out = finish(claim, capsys=capsys)
+    assert code == 5 and out["error"]["code"] == "test_changes"
+    code, out = finish(claim, "--allow-test-changes=cleanup", capsys=capsys)
+    assert code == 1 and out["error"]["code"] == "use_waive"
+
+
+def test_a_waiver_merges_cleanly_with_the_branchs_done(claim: Path, repo: Path, capsys):  # noqa: F811
+    waive(repo, "T-2.1", "test-changes", reason="the old test checked removed behaviour")
+    (claim / TEST).unlink()
+    code, out = finish(claim, capsys=capsys)
+    assert code == 0 and out["override"]["waived"] == ["test_deleted"]
+    commit(claim, "feat: store")
+    code, out = run_json(capsys, "land", "--dir", str(repo))
+    assert code == 0 and [x["id"] for x in out["landed"]] == ["T-2.1"], out
+    assert "the old test checked removed behaviour" in status_line(repo, "T-2.1", "Waiver")
+
+
+# --- the launch settings: an agent that rewrites them gets nothing marked done -------------------------------------
+
+def test_rewritten_launch_settings_refuse_the_result(claim: Path, repo: Path, tmp_path: Path, capsys):  # noqa: F811
+    _, out = run_json(capsys, "start", "T-2.2", str(repo), "--worktree")
+    settings = Path(out["commands"]["headless"]["settings"])
+    data = json.loads(settings.read_text())
+    data["hooks"] = {}
+    data["sandbox"]["enabled"] = False
+    settings.write_text(json.dumps(data))
+    (claim / "src/streak/store.py").write_text("def add(): ...\n")
+    result = tmp_path / "result.json"
+    result.write_text(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                                  "structured_output": {"id": "T-2.1", "status": "done", "summary": "ok"}}))
+    code, out = run_json(capsys, "done", "T-2.1", str(claim), "--result", str(result))
+    assert code == 5 and out["error"]["code"] == "launch_settings_changed"
+    assert status_line(claim, "T-2.1", "Status").endswith("todo")

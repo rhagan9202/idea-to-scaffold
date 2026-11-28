@@ -276,9 +276,11 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def set_field(pkg: Package, item_id: str, name: str, value: str, *, add: bool = False,
-              path: Path | None = None) -> str:
+              path: Path | None = None, apart: bool = False) -> str:
     """Replace one field's value in place, keeping the rest of the file byte for byte. Returns the old value ("" if
-    the field was added). With `add`, a missing field is added on a new line after the item's Status.
+    the field was added). With `add`, a missing field is added on a new line after the item's Status, or with
+    `apart` at the end of the item (or its start), away from the fields a branch changes on its own item, so a field
+    the lead adds on the integration branch merges cleanly with a branch's `its done`.
 
     The read, change and write happen under the package lock, so two commands changing different items at the same
     moment can't lose either change. `path` names another file holding the item (a proposal)."""
@@ -287,7 +289,7 @@ def set_field(pkg: Package, item_id: str, name: str, value: str, *, add: bool = 
         raise BacklogError(f"{pkg.rel(path) if path.is_relative_to(pkg.root) else path} not found")
     try:
         with package_lock(pkg.root):
-            return _set_field(path, item_id, name, value, add)
+            return _set_field(path, item_id, name, value, add, apart)
     except LockTimeout as exc:
         raise BacklogError(str(exc)) from None
 
@@ -323,7 +325,10 @@ def _one(text: str, item_id: str) -> BacklogItem:
     return items[0]
 
 
-def _set_field(path: Path, item_id: str, name: str, value: str, add: bool = False) -> str:
+BRANCH_FIELDS = ("status", "verified", "blocked", "override")  # what `its done` and `its block` change
+
+
+def _set_field(path: Path, item_id: str, name: str, value: str, add: bool = False, apart: bool = False) -> str:
     text = _read(path)
     item = _one(text, item_id)
     lines = text.split("\n")  # keeps any "\r" at line ends, so line endings are preserved
@@ -332,10 +337,15 @@ def _set_field(path: Path, item_id: str, name: str, value: str, add: bool = Fals
         anchor = item.fields.get("status")
         if not add or anchor is None:
             raise BacklogError(f"{item_id} has no **{name}:** field")
-        status_line = lines[anchor.line]
-        prefix = status_line[: status_line.index("**")] if "**" in status_line else "- "
-        eol = "\r" if status_line.endswith("\r") else ""
-        lines.insert(anchor.line + 1, f"{prefix}**{name}:** {value}{eol}")
+        at = anchor.line + 1
+        if apart:
+            used = sorted({f.line for f in item.fields.values()})
+            own = {item.fields[k].line for k in BRANCH_FIELDS if k in item.fields}
+            at = used[-1] + 1 if used[-1] not in own or used[0] in own else used[0]
+        neighbour = lines[anchor.line]
+        prefix = neighbour[: neighbour.index("**")] if "**" in neighbour else "- "
+        eol = "\r" if neighbour.endswith("\r") else ""
+        lines.insert(at, f"{prefix}**{name}:** {value}{eol}")
         _atomic_write(path, "\n".join(lines))
         return ""
     line = lines[span.line]

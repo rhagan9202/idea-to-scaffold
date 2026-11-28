@@ -55,9 +55,3 @@ def mini(tmp_path: Path) -> Path:
         "### T-1.1 — First\n- **Milestone:** M1\n- **Status:** todo\n- **Satisfies:** FR-001\n- **Depends on:** —\n"
     ), "project-plan")
     return root
-
-
-@pytest.fixture(autouse=True)
-def overrides_allowed(monkeypatch):
-    """Tests run without a terminal, so they stand in for the person who may waive the gate."""
-    monkeypatch.setenv("ITS_ALLOW_OVERRIDES", "1")

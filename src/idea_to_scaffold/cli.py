@@ -8,12 +8,12 @@ import re
 import sys
 from pathlib import Path
 
-from . import __version__
+from . import __version__, trust
 from . import claims as cl
 from .audit import gate_audit
 from .backlog import BacklogError
 from .drift import drift
-from .edits import apply_result, block, drop, promote, propose, set_item_status, unblock
+from .edits import apply_result, block, drop, promote, propose, set_item_status, unblock, waive
 from .hooks import hook_agents, hook_dir, install_hooks, parse_event, stop_hook
 from .ids import TASK_PATTERN
 from .importer import ImportConflict, import_export
@@ -36,15 +36,18 @@ from .work import (
     EXIT_NOTHING_READY,
     SCHEMA,
     WorkError,
+    _on_base_checkout,
     backlog_payload,
     claims_payload,
     done,
     failure_report,
     fetch,
+    integration_branch,
     is_terminal,
     next_payload,
     release,
     remote_freshness,
+    remote_of,
     renumber,
     show_payload,
     shown,
@@ -591,8 +594,10 @@ def cmd_done(args: argparse.Namespace) -> int:
         if not args.json:
             print(f"running {check.name}: {check.command}", flush=True)
 
-    options = {"verify": not args.no_verify, "check_only": args.check, "allow_test_changes": args.allow_test_changes,
-               "allow_outside_touches": args.allow_outside_touches, "on_check": announce}
+    gone = _waiver_flags(args)
+    if gone:
+        return _fail(args, gone)
+    options = {"verify": not args.no_verify, "check_only": args.check, "on_check": announce}
     try:
         if args.result:
             payload = apply_result(pkg, args.id, args.result, **options)
@@ -669,9 +674,17 @@ def cmd_land(args: argparse.Namespace) -> int:
         if not args.json:
             print(f"{ident}: running {check.name}: {check.command}", flush=True)
 
-    payload = land(pkg, args.ids or None, verify=not args.no_verify, fetch=args.fetch, push=args.push,
-                   release=args.release, dry_run=args.dry_run, allow_test_changes=args.allow_test_changes,
-                   allow_outside_touches=args.allow_outside_touches, on_check=announce)
+    gone = _waiver_flags(args)
+    if gone:
+        return _fail(args, gone)
+    try:
+        payload = land(pkg, args.ids or None, verify=not args.no_verify, fetch=args.fetch, push=args.push,
+                       release=args.release, dry_run=args.dry_run, accept_base=args.accept_base, on_check=announce)
+    except WorkError as err:
+        if err.code == "base_untrusted" and not args.json:
+            for line in err.details["commits"]:
+                print(f"  {line}", file=sys.stderr)
+        return _fail(args, err)
     stuck = [s for s in payload["skipped"] if s["reason"] not in ("waiting", "dry_run")]
     if not payload["landed"] and not stuck and not any(s["reason"] == "dry_run" for s in payload["skipped"]):
         code = EXIT_NOTHING_READY  # nothing was ready, or only items still waiting on dependencies
@@ -705,17 +718,53 @@ def cmd_land(args: argparse.Namespace) -> int:
     return code
 
 
+def _waiver_flags(args: argparse.Namespace) -> WorkError | None:
+    """The error for the --allow-* flags, which phase 10 replaced with `its waive`."""
+    for flag in ("allow_test_changes", "allow_outside_touches"):
+        if getattr(args, flag, None) is not None:
+            option = "--" + flag.replace("_", "-")
+            group = "--test-changes" if flag == "allow_test_changes" else "--outside-touches"
+            return WorkError("use_waive", f"{option} is gone: the lead waives on the integration branch with its waive "
+                             f"<ID> {group} --reason '...', and done and land honour that waiver",
+                             details={"flag": option})
+    return None
+
+
 def _commit(args: argparse.Namespace, pkg: Package, payload: dict, message: str) -> dict:
-    """Commit the planning folder when asked (`--commit`, or by default for promote and renumber)."""
+    """Commit the planning folder when asked (`--commit`, or by default for promote and renumber). A commit made in
+    the lead's checkout of the integration branch is recorded as trusted (`trust.py`), so land doesn't take it for
+    an agent's."""
     if not getattr(args, "commit", False) or payload.get("dry_run") or not cl.in_git(pkg.root):
         return payload
     folder = str(pkg.planning_dir)
     cl.git(pkg.root, "add", "--all", "--", folder)
     staged = cl.git(pkg.root, "diff", "--cached", "--name-only", "--", folder, check=False)
     if staged:
+        before = cl.git(pkg.root, "rev-parse", "--verify", "--quiet", "HEAD", check=False)
         cl.git(pkg.root, "commit", "--quiet", "-m", message, "--", folder)
         payload["committed"] = cl.git(pkg.root, "rev-parse", "--short", "HEAD")
+        if _on_base_checkout(pkg):
+            trust.record(pkg.root, integration_branch(pkg), "HEAD", after=before or None, remote=remote_of(pkg))
     return payload
+
+
+def cmd_waive(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+    groups = [g for g, on in (("test-changes", args.test_changes), ("outside-touches", args.outside_touches),
+                              ("dependencies", args.dependencies)) if on]
+    try:
+        payload = waive(pkg, args.id, groups, args.reason)
+    except WorkError as err:
+        return _fail(args, err)
+    if args.json:
+        _emit(payload)
+        return 0
+    w = payload["waiver"]
+    print(f"{payload['id']}: waived {', '.join(w['groups'])} ({w['reason']})")
+    print(f"  committed {payload['committed']}; its done and its land honour it from now on")
+    return 0
 
 
 def _edited(args: argparse.Namespace, payload: dict, pkg: Package | None = None) -> int:
@@ -966,11 +1015,7 @@ def build_parser() -> argparse.ArgumentParser:
     dir_help = "package folder or scaffolded repo (default: .)"
     json_help = f"print JSON (schema {SCHEMA}) instead of text"
     fetch_help = "fetch the integration branch and claim branches from the remote first"
-    allow_tests_help = ("waive deleted tests, removed assertions, new skips, agent-config changes and changes to "
-                        "the plan (a person only: needs a terminal or ITS_ALLOW_OVERRIDES=1; the reason is recorded)")
-    allow_touches_help = ("waive changes to files outside the item's Touches, or to its Touches (a person only, "
-                          "like --allow-test-changes)")
-    allow = {"nargs": "?", "const": "", "default": None, "metavar": "REASON"}
+    allow = {"nargs": "?", "const": "", "default": None, "metavar": "REASON", "help": argparse.SUPPRESS}  # gone
     base_help = "integration branch to read readiness from (default: integration_branch in package.yaml, or main)"
 
     s = sub.add_parser("backlog", help="list backlog items")
@@ -1046,8 +1091,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--release", action="store_true",
                    help="release each landed claim (with --push, its pushed branch too)")
     s.add_argument("--dry-run", action="store_true", help="show what would land, changing nothing")
-    s.add_argument("--allow-test-changes", help=allow_tests_help, **allow)
-    s.add_argument("--allow-outside-touches", help=allow_touches_help, **allow)
+    s.add_argument("--accept-base", action="store_true",
+                   help="trust the integration branch's commits that its didn't make, after you have looked at them")
+    s.add_argument("--allow-test-changes", **allow)
+    s.add_argument("--allow-outside-touches", **allow)
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_land)
 
@@ -1108,6 +1155,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_set_status)
 
+    s = sub.add_parser("waive", help="let one item through part of the gate: the lead, on the integration branch "
+                       "(the waiver is committed there, and done and land honour only that)")
+    s.add_argument("id")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--test-changes", action="store_true",
+                   help="deleted or weakened tests, new skips, test config, agent config and changes to the plan")
+    s.add_argument("--outside-touches", action="store_true",
+                   help="changes to files outside the item's Touches, or to its Touches")
+    s.add_argument("--dependencies", action="store_true", help="added or changed dependencies and lockfiles")
+    s.add_argument("--reason", required=True, help="why; recorded on the item and in the commit")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_waive)
+
     s = sub.add_parser("release", help="drop a claim: remove its worktree and delete its local branch")
     s.add_argument("id")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
@@ -1133,8 +1193,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--check", action="store_true", help="run every check but leave the status alone (exit 5 if any fails)")
     s.add_argument("--result", metavar="FILE",
                    help="act on a headless agent's result JSON: done runs the checks, blocked or needs_human blocks it")
-    s.add_argument("--allow-test-changes", help=allow_tests_help, **allow)
-    s.add_argument("--allow-outside-touches", help=allow_touches_help, **allow)
+    s.add_argument("--allow-test-changes", **allow)
+    s.add_argument("--allow-outside-touches", **allow)
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_done)
 

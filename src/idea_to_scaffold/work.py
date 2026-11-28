@@ -48,7 +48,7 @@ from .checks import (  # noqa: F401 - re-exported: check running lived here befo
 )
 from .ids import KIND_LABELS, META_FILES, definition_on_line, id_kind, is_placeholder, scan_lines, strip_links
 from .linker import NAV_BLOCK_RE, Doc, Target, _load_docs, link_package, scan_package
-from .locking import LockTimeout, git_store_dir, package_lock
+from .locking import LockTimeout, git_common_dir, git_store_dir, package_lock
 from .package import Package
 from .touches import covered
 
@@ -521,9 +521,9 @@ def _start(
         where = f" in {claim.worktree}" if claim.worktree else ""
         raise WorkError("claimed", f"{ident} is already claimed by branch {claim.branch}{where}",
                         details={"id": ident, "claim": claim.to_dict()})
-    if item.status == "in-progress":
+    if item.status == "in-progress" and (claiming or not force):  # --force here records the start again
         raise WorkError("already_started", f"{ident} is already in-progress", details={"id": ident})
-    if item.status != "todo" and not (force and item.status == "blocked"):
+    if item.status not in ("todo", "in-progress") and not (force and item.status == "blocked"):
         raise WorkError("bad_status", f"{ident} is {item.status or 'missing a status'}; only todo items can be started",
                         details={"id": ident, "status": item.status})
     base_item = next((i for i in v.items if i.id == ident), item)
@@ -799,23 +799,6 @@ def inspect_item(pkg: Package, ident: str) -> gate.Inspection:
         raise WorkError("gate_error", f"{ident} can't be checked: {exc}", EXIT_CHECK_FAILED, {"id": ident}) from exc
 
 
-OVERRIDE_ENV = "ITS_ALLOW_OVERRIDES"
-
-
-def check_override(flag: str, reason: str | None) -> str:
-    """A waiver of the gate needs a reason and a person: an interactive terminal, or ITS_ALLOW_OVERRIDES=1 set by
-    whoever runs the agent. It returns the reason, which is recorded on the item."""
-    reason = (reason or "").strip()
-    if not reason:
-        raise WorkError("override_reason", f"{flag} needs a reason, e.g. {flag}='the old test checked removed "
-                        "behaviour'; it is recorded on the item", details={"flag": flag})
-    if os.environ.get(OVERRIDE_ENV) != "1" and not is_terminal(0):
-        raise WorkError("override_needs_person", f"{flag} waives the done gate, so a person has to run it: from a "
-                        f"terminal, or with {OVERRIDE_ENV}=1 set by whoever runs the agent. An agent that can't "
-                        "finish honestly should run its block <ID> --reason '...' instead", details={"flag": flag})
-    return reason
-
-
 def is_terminal(fd: int) -> bool:
     """Whether `fd` is a terminal that a person types at. On Windows `isatty` is true of any character device,
     NUL included, and NUL is what a tool usually gives a command as its stdin, so there the handle must also be a
@@ -876,8 +859,6 @@ def done(
     *,
     verify: bool = True,
     check_only: bool = False,
-    allow_test_changes: str | None = None,
-    allow_outside_touches: str | None = None,
     on_check: Callable[[Check], None] | None = None,
     run: dict | None = None,
 ) -> dict:
@@ -886,11 +867,10 @@ def done(
     started = time.monotonic()
     extra = dict(run or {})
     try:
-        payload = _done(pkg, ident, verify=verify, check_only=check_only, allow_test_changes=allow_test_changes,
-                        allow_outside_touches=allow_outside_touches, on_check=on_check)
+        payload = _done(pkg, ident, verify=verify, check_only=check_only, on_check=on_check)
     except WorkError as err:
         target = err.details.get("id") or ident
-        if target and err.code in ("check_failed", "test_changes", "outside_touches", "gate_error"):
+        if target and err.code in ("check_failed", "test_changes", "outside_touches", "gate_error", "no_fork_point"):
             kinds = sorted({f["kind"] for f in err.details.get("findings", [])})
             ledger.record(pkg, target, "done", err.code, findings=kinds, check_only=check_only or None,
                           checks=[c["name"] for c in err.details.get("checks", []) if not c["passed"]] or None,
@@ -918,17 +898,17 @@ def _done(
     *,
     verify: bool = True,
     check_only: bool = False,
-    allow_test_changes: str | None = None,
-    allow_outside_touches: str | None = None,
     on_check: Callable[[Check], None] | None = None,
 ) -> dict:
     """Check the item and, if it passes, set it `done`. With no ID, uses the item of the claim branch that is
     checked out, else the only `in-progress` item.
 
     First the branch is compared with the integration branch (`gate.inspect`): the Verify command comes from there,
-    and test tampering or changes outside Touches refuse the item unless allowed. Then Verify, test and lint run,
-    only in a scaffolded repo (a planning package has no code to test). `check_only` does all of that but leaves
-    the status alone, so it can run again on a done item (the Stop hook does).
+    and test tampering or changes outside Touches refuse the item unless the integration branch's copy of the item
+    has a Waiver that covers them (`its waive`). Then Verify, test and lint run, only in a scaffolded repo (a
+    planning package has no code to test). `check_only` does all of that but leaves the status alone, so it can run
+    again on a done item (the Stop hook does). Without `verify` the item is set done unchecked, and its Verified
+    field says so: `its drift` can't vouch for it, and `its land` still runs the checks.
     """
     items = load_backlog(pkg)
     if ident is None:
@@ -947,16 +927,15 @@ def _done(
     if "status" not in item.fields:
         raise WorkError("no_status", f"{ident} has no **Status:** field; add one, then run its done again",
                         details={"id": ident})
-    waivers = {}
-    if allow_test_changes is not None:
-        waivers["test and plan changes"] = check_override("--allow-test-changes", allow_test_changes)
-    if allow_outside_touches is not None:
-        waivers["changes outside Touches"] = check_override("--allow-outside-touches", allow_outside_touches)
     inspection = inspect_item(pkg, ident)
+    if item.status != "done" and _on_base_checkout(pkg) and cl.fork_of(pkg.root, ident) is None:
+        raise WorkError(
+            "no_fork_point", f"{ident} is {item.status} on {integration_branch(pkg)}, but no start was recorded for "
+            f"it, so the gate can't tell which commits are its work; run its start {ident} --force to record where "
+            "it starts from, or work on it in a claim (its start --worktree)", EXIT_CHECK_FAILED, {"id": ident})
     if item.status == "done":  # re-checking finished work (its verify, the Stop hook): it needn't change anything
         inspection.findings = [f for f in inspection.findings if f["kind"] != "no_changes"]
-    blocking = inspection.blocking(allow_test_changes=allow_test_changes is not None,
-                                   allow_outside_touches=allow_outside_touches is not None)
+    blocking = inspection.blocking()
     if blocking:
         raise gate_error(ident, blocking, inspection)
     verify_command = inspection.verify_command  # always the integration branch's, even when changes are waived
@@ -979,15 +958,13 @@ def _done(
             )
         for finding in result_findings(results, changed_tests(pkg, inspection)):
             inspection.add(finding)
-        blocking = [f for f in inspection.blocking(allow_test_changes=allow_test_changes is not None)
-                    if f["kind"] in RESULT_KINDS]
+        blocking = [f for f in inspection.blocking() if f["kind"] in RESULT_KINDS]
         if blocking:
             raise gate_error(ident, blocking, inspection, checks=results)
     red = None
     if not skipped and item.status != "done":
         red = red_on_parent(pkg, ident, inspection, verify_command)
-        blocking = [f for f in inspection.blocking(allow_test_changes=allow_test_changes is not None)
-                    if f["kind"] == "tests_pass_on_parent"]
+        blocking = [f for f in inspection.blocking() if f["kind"] == "tests_pass_on_parent"]
         if blocking:
             raise gate_error(ident, blocking, inspection)
     manual = item.verify if item.verify and not item.verify_command else None
@@ -1004,19 +981,20 @@ def _done(
         "red_on_parent": red,
     }
     common["warnings"] = inspection.warnings  # checks in warn mode: reported, never refusing
-    waived = [f for f in inspection.findings if f.get("mode") != "warn"]  # any other finding refused the item above
+    waived = inspection.waived  # every other enforced finding refused the item above
+    if waived:
+        common["override"] = {"waived": sorted({f["kind"] for f in waived}), "waiver": inspection.waiver.to_dict()}
     if check_only:
         return {**common, "checked_only": True, "status": item.status, "previous_status": item.status}
     try:
         with _locked(pkg):
             previous = set_status(pkg, ident, "done")
-            verified = mark_verified(pkg, ident, inspection)
+            verified = mark_verified(pkg, ident, inspection, skipped=skipped == "--no-verify")
             if waived:
-                kinds = sorted({f["kind"] for f in waived})
-                note = "; ".join(f"{what}: {why}" for what, why in waivers.items())
-                set_field(pkg, ident, "Override", f"{date.today().isoformat()}, waived {', '.join(kinds)} ({note})",
+                waiver = inspection.waiver
+                set_field(pkg, ident, "Override", f"{date.today().isoformat()}, waived "
+                          f"{', '.join(common['override']['waived'])} (waiver of {waiver.date}: {waiver.reason})",
                           add=True)
-                common["override"] = {"waived": kinds, "reasons": waivers}
     except BacklogError as exc:
         raise WorkError("bad_backlog", str(exc), details={"id": ident}) from exc
     if cl.in_git(pkg.root):
@@ -1033,10 +1011,17 @@ def _done(
     }
 
 
-def mark_verified(pkg: Package, ident: str, inspection: gate.Inspection) -> str:
+SKIPPED_MARK = "skipped (--no-verify)"
+
+
+def mark_verified(pkg: Package, ident: str, inspection: gate.Inspection, *, skipped: bool = False) -> str:
     """Write the item's `Verified` field: the date its checks passed, the integration-branch commit the work was
     built on, and a hash of the files in its Touches as they were checked. `its drift` compares that hash with the
-    files now, so it needs no history, and re-verifying changed code always writes a new value."""
+    files now, so it needs no history, and re-verifying changed code always writes a new value. When the checks were
+    skipped, it says that instead, so nothing reads the item as checked."""
+    if skipped:
+        set_field(pkg, ident, "Verified", SKIPPED_MARK, add=True)
+        return SKIPPED_MARK
     base = inspection.merge_base
     value = date.today().isoformat() + (f", base {base[:10]}" if base else "")
     tree = touches_hash(pkg, inspection.touches)
@@ -1088,6 +1073,18 @@ def touches_hash(pkg: Package, touches: list[str]) -> str | None:
     for path, blob in zip(files, blobs, strict=False):
         digest.update(f"{path}\0{blob}\n".encode())
     return digest.hexdigest()[:12]
+
+
+def _on_base_checkout(pkg: Package) -> bool:
+    """Whether this is the lead's checkout of the integration branch: on that branch, in the repository's main
+    worktree (not a linked one, where agents work), and not a claim's."""
+    if not cl.in_git(pkg.root) or cl.current_branch(pkg.root) != integration_branch(pkg):
+        return False
+    if cl.claim_of_worktree(pkg.root):
+        return False
+    git_dir = gitx.out(pkg.root, "rev-parse", "--absolute-git-dir", check=False)
+    common = git_common_dir(pkg.root)
+    return bool(git_dir) and common is not None and Path(git_dir).resolve() == common.resolve()
 
 
 def _off_integration_branch(pkg: Package) -> bool:

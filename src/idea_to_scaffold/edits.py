@@ -1,4 +1,5 @@
-"""Changing the backlog from the CLI: `its propose`, `promote`, `block`, `unblock`, `drop` and `set-status`.
+"""Changing the backlog from the CLI: `its propose`, `promote`, `block`, `unblock`, `drop`, `set-status` and
+`waive`.
 
 Agents and people change items through these commands instead of editing Markdown, so every change is one small,
 locked, predictable edit. Each returns a dict in the versioned JSON contract (spec section 16).
@@ -6,9 +7,11 @@ locked, predictable edit. Each returns a dict in the versioned JSON contract (sp
 from __future__ import annotations
 
 import re
+from datetime import date
 from pathlib import Path
 
-from . import ledger, results, sizing
+from . import claims as cl
+from . import gitx, ledger, results, sizing, trust
 from .backlog import (
     NO_VALUE,
     BacklogError,
@@ -19,10 +22,25 @@ from .backlog import (
     set_field,
     set_status,
 )
+from .gate import WAIVER_FIELD, WAIVER_GROUPS, Waiver
 from .ids import is_placeholder
 from .locking import LockTimeout, package_lock
 from .package import BACKLOG_STATUSES, Package
-from .work import EXIT_CHECK_FAILED, SCHEMA, WorkError, _find, _refresh_mirror, item_payload, renumber, shown
+from .work import (
+    BACKLOG,
+    EXIT_CHECK_FAILED,
+    SCHEMA,
+    WorkError,
+    _find,
+    _locked,
+    _on_base_checkout,
+    _refresh_mirror,
+    integration_branch,
+    item_payload,
+    remote_of,
+    renumber,
+    shown,
+)
 
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -148,6 +166,56 @@ def block(pkg: Package, ident: str, reason: str, *, run: dict | None = None) -> 
     payload = set_item_status(pkg, ident, "blocked", reason=reason)
     ledger.record(pkg, ident, "block", "blocked", reason=reason, **(run or {}))
     return payload
+
+
+def waive(pkg: Package, ident: str, groups: list[str], reason: str) -> dict:
+    """`its waive`: let one item through the parts of the gate named by `groups` (WAIVER_GROUPS), for `reason`.
+
+    The waiver is written as the item's Waiver field and committed on the integration branch, in the repository's
+    main checkout: done and land read waivers only from there, where an agent's worktree can't write. That makes a
+    waiver the lead's alone, where the old `--allow-*` flags and their terminal check were advisory. A new waiver
+    replaces the item's old one, so name every group it needs."""
+    reason = _clean(reason)
+    if not reason:
+        raise WorkError("no_reason", "say why: its waive <ID> --test-changes --reason '...' (it is recorded)",
+                        details={"id": ident})
+    chosen = tuple(g for g in WAIVER_GROUPS if g in groups)
+    if not chosen:
+        raise WorkError("no_waiver_group", "name what to waive: --test-changes, --outside-touches or --dependencies",
+                        details={"id": ident})
+    if not cl.in_git(pkg.root):
+        raise WorkError("not_git", "a waiver is committed on the integration branch, so it needs a git repository",
+                        details={"id": ident})
+    base = integration_branch(pkg)
+    if not _on_base_checkout(pkg):
+        raise WorkError(
+            "not_on_base", f"run its waive on {base}, in the repository's main checkout: done and land honour a waiver "
+            "only on the integration branch, where an agent's worktree can't write it",
+            details={"id": ident, "branch": cl.current_branch(pkg.root), "integration_branch": base})
+    item = _find(load_backlog(pkg), ident)
+    if item.status in ("done", "dropped"):
+        raise WorkError("bad_status", f"{ident} is {item.status}; there is nothing left to waive",
+                        details={"id": ident, "status": item.status})
+    backlog = pkg.path_of(BACKLOG)
+    if gitx.out(pkg.root, "status", "--porcelain", "--", str(backlog), check=False):
+        raise WorkError("dirty", f"{shown(pkg, pkg.rel(backlog))} has uncommitted changes; commit or stash them "
+                        "first, so the waiver's commit holds only the waiver", details={"id": ident})
+    waiver = Waiver(date.today().isoformat(), chosen, reason)
+    before = gitx.out(pkg.root, "rev-parse", "HEAD", check=False)
+    try:
+        with _locked(pkg):
+            set_field(pkg, ident, WAIVER_FIELD, waiver.render(), add=True, apart=True)
+            cl.git(pkg.root, "commit", "--quiet", "-m", f"Waive {', '.join(chosen)} for {ident}\n\n{reason}", "--",
+                   str(backlog))
+    except BacklogError as exc:
+        raise WorkError("bad_backlog", str(exc), details={"id": ident}) from exc
+    except cl.GitError as exc:
+        raise WorkError("git_error", f"the waiver was written but couldn't be committed: {exc}",
+                        details={"id": ident}) from exc
+    trusted = trust.record(pkg.root, base, "HEAD", after=before or None, remote=remote_of(pkg))
+    _refresh_mirror(pkg)
+    return {"schema": SCHEMA, "ok": True, "id": ident, "waiver": waiver.to_dict(),
+            "committed": gitx.out(pkg.root, "rev-parse", "--short", "HEAD", check=False), "trusted": trusted}
 
 
 def apply_result(pkg: Package, ident: str | None, result_file: str, **done_options) -> dict:

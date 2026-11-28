@@ -12,7 +12,7 @@ from idea_to_scaffold.package import Package
 from idea_to_scaffold.scaffold import scaffold
 
 from .test_landing import git_identity, py, repo  # noqa: F401 - fixtures
-from .test_parallel import git, run_json, set_field, status_in
+from .test_parallel import git, run_json, set_field, status_in, waive
 
 
 def status_line(root: Path, ident: str, name: str) -> str:
@@ -50,14 +50,16 @@ def finish(worktree: Path, *flags: str, capsys) -> tuple[int, dict]:
 
 # --- the phase gate: a branch that edits its own Verify or deletes a test is refused ---------------------------
 
-def test_a_branch_that_edits_its_own_verify_is_refused(claim: Path, capsys):
+def test_a_branch_that_edits_its_own_verify_is_refused(claim: Path, repo: Path, capsys):  # noqa: F811
     set_field(claim, "T-2.1", "Verify", "`true`")
     code, out = finish(claim, capsys=capsys)
     assert code == 5 and out["error"]["code"] == "test_changes"
     assert [f["kind"] for f in out["error"]["findings"]] == ["verify_changed"]
     assert status_in(claim, "T-2.1") == "todo"
-    code, out = finish(claim, "--allow-test-changes=planned test rewrite", capsys=capsys)
+    waive(repo, "T-2.1", "test-changes", reason="planned test rewrite")
+    code, out = finish(claim, capsys=capsys)
     assert code == 0 and out["findings"][0]["kind"] == "verify_changed"
+    assert out["override"]["waiver"]["groups"] == ["test-changes"]
     assert [c["name"] for c in out["checks"]] == ["verify", "test", "lint"]  # main's Verify ran, not the branch's
     assert "planned test rewrite" in status_line(claim, "T-2.1", "Override")  # the waiver and its reason are kept
 
@@ -233,13 +235,14 @@ def test_verify_is_read_from_the_integration_branch(claim: Path, repo: Path, cap
     assert out["error"]["checks"][0]["exit_code"] == 9
 
 
-def test_changes_outside_touches_are_refused_but_planning_files_are_not(claim: Path, capsys):
+def test_changes_outside_touches_are_refused_but_planning_files_are_not(claim: Path, repo: Path, capsys):  # noqa: F811
     assert main(["propose", "Follow-up", "--dir", str(claim), "--satisfies", "FR-001"]) == 0  # planning: exempt
     (claim / "src/streak/other.py").write_text("x = 1\n")
     code, out = finish(claim, capsys=capsys)
     assert code == 5 and out["error"]["code"] == "outside_touches"
     assert out["error"]["findings"][0]["files"] == ["src/streak/other.py"]
-    code, out = finish(claim, "--allow-outside-touches=shared file", capsys=capsys)
+    waive(repo, "T-2.1", "outside-touches", reason="shared file")
+    code, out = finish(claim, capsys=capsys)
     assert code == 0 and out["touches_checked"] and out["verify_source"] == "main"
 
 
@@ -260,7 +263,8 @@ def test_land_refuses_a_branch_that_edits_its_verify_after_done(claim: Path, rep
     code, out = run_json(capsys, "land", "--dir", str(repo))
     assert code == 7 and out["landed"] == []
     assert out["skipped"][0]["reason"] == "test_changes"
-    code, out = run_json(capsys, "land", "--dir", str(repo), "--allow-test-changes=planned test rewrite")
+    waive(repo, "T-2.1", "test-changes", reason="planned test rewrite")
+    code, out = run_json(capsys, "land", "--dir", str(repo))
     assert code == 0 and [x["id"] for x in out["landed"]] == ["T-2.1"]
 
 

@@ -28,7 +28,10 @@ there is still checked.
 The gate fails closed: if git can't answer (no integration branch, a missing commit, a shallow clone), it raises
 `GateError` instead of passing.
 
-Findings fall in two groups, so each can be waived on its own: test and plan changes, and scope changes.
+Findings fall in groups (`WAIVER_GROUPS`) so that each can be waived on its own: test and plan changes, scope
+changes, and dependency changes. Only the lead can waive: `its waive` writes a `Waiver` field on the item on the
+integration branch, and the gate honours only the integration branch's copy (`Inspection.waiver`). A branch that
+writes a Waiver on its own item changes the item (`item_changed`).
 """
 from __future__ import annotations
 
@@ -41,7 +44,7 @@ import yaml
 
 from . import claims as cl
 from . import gitx, tamper
-from .backlog import BACKLOG, BacklogItem, parse_backlog
+from .backlog import BACKLOG, BRANCH_FIELDS, BacklogItem, parse_backlog
 from .checks import Settings
 from .ids import META_FILES, line_fields
 from .package import Package
@@ -52,7 +55,11 @@ TEST_KINDS = ("test_deleted", "assertions_removed", "skip_added", "verify_change
               "test_config_changed", "acceptance_changed", "tests_pass_on_parent", "test_removed",
               "no_test_report", "failures_hidden", "no_tests_ran", "tests_skipped")
 SCOPE_KINDS = ("outside_touches", "touches_changed", "no_changes")
-OWN_FIELDS = {"status", "verified", "blocked", "override"}  # what a branch may change on its own item
+DEPENDENCY_KINDS = ("dependency_added",)
+# What `its waive --<group>` waives.
+WAIVER_GROUPS = {"test-changes": TEST_KINDS, "outside-touches": SCOPE_KINDS, "dependencies": DEPENDENCY_KINDS}
+WAIVER_FIELD = "Waiver"
+OWN_FIELDS = set(BRANCH_FIELDS)  # what a branch may change on its own item
 MODES = ("enforce", "warn", "off")
 # Checks that can misfire on honest work start in warn mode: they are reported but don't refuse the item until a
 # person sets `gate: {checks: {<kind>: enforce}}` in package.yaml (a new scaffold sets that for all of them). Every
@@ -123,6 +130,32 @@ class Policy:
         return self.modes.get(kind, "enforce")
 
 
+@dataclass(frozen=True)
+class Waiver:
+    """A waiver the lead recorded with `its waive`: `- **Waiver:** 2026-11-28; test-changes, dependencies; why`."""
+    date: str
+    groups: tuple[str, ...]
+    reason: str
+
+    @property
+    def kinds(self) -> frozenset[str]:
+        return frozenset(kind for group in self.groups for kind in WAIVER_GROUPS.get(group, ()))
+
+    def render(self) -> str:
+        return f"{self.date}; {', '.join(self.groups)}; {self.reason}"
+
+    @classmethod
+    def parse(cls, text: str | None) -> Waiver | None:
+        parts = [p.strip() for p in (text or "").split(";", 2)]
+        if len(parts) != 3 or not parts[2]:
+            return None
+        groups = tuple(g for g in re.split(r"[\s,]+", parts[1]) if g in WAIVER_GROUPS)
+        return cls(parts[0], groups, parts[2]) if groups else None
+
+    def to_dict(self) -> dict:
+        return {"date": self.date, "groups": list(self.groups), "reason": self.reason}
+
+
 @dataclass
 class Inspection:
     base: str | None = None            # the integration branch ref compared against
@@ -137,9 +170,21 @@ class Inspection:
     policy: Policy = field(default_factory=Policy)
     planned: BacklogItem | None = None  # the item as the integration branch has it
 
-    def blocking(self, *, allow_test_changes: bool = False, allow_outside_touches: bool = False) -> list[dict]:
-        allowed = (TEST_KINDS if allow_test_changes else ()) + (SCOPE_KINDS if allow_outside_touches else ())
-        return [f for f in self.findings if f["kind"] not in allowed and f.get("mode") != "warn"]
+    @property
+    def waiver(self) -> Waiver | None:
+        """The lead's waiver for the item: only ever read from the integration branch's copy of it."""
+        return Waiver.parse(self.planned.get(WAIVER_FIELD)) if self.planned else None
+
+    def blocking(self) -> list[dict]:
+        """The findings that refuse the item: every enforced finding the integration branch's waiver doesn't cover."""
+        waived = self.waiver.kinds if self.waiver else frozenset()
+        return [f for f in self.findings if f["kind"] not in waived and f.get("mode") != "warn"]
+
+    @property
+    def waived(self) -> list[dict]:
+        """The enforced findings the waiver lets through."""
+        waived = self.waiver.kinds if self.waiver else frozenset()
+        return [f for f in self.findings if f["kind"] in waived and f.get("mode") != "warn"]
 
     @property
     def warnings(self) -> list[dict]:

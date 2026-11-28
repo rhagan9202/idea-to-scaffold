@@ -79,6 +79,11 @@ def drift(pkg: Package) -> dict:
     for item in items:
         if item.status != "done":
             continue
+        if (item.get("Verified") or "").startswith("skipped"):
+            unknown.append({"id": item.id, "reason": "not_verified",
+                            "message": "it was set done without its checks (its done --no-verify); run its verify "
+                                       f"{item.id} to check it"})
+            continue
         if not item.touches:
             no_touches.append(item.id)
             continue

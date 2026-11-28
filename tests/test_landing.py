@@ -18,7 +18,7 @@ from idea_to_scaffold.package import Package
 from idea_to_scaffold.scaffold import scaffold
 from idea_to_scaffold.validate import validate
 
-from .test_parallel import IDENTITY, git, run_json, set_field, status_in
+from .test_parallel import IDENTITY, git, run_json, set_field, status_in, waive
 
 
 @pytest.fixture(autouse=True)
@@ -179,9 +179,10 @@ def test_start_next_picks_and_claims_in_one_step(repo: Path, capsys):
 def test_claims_report_conflicts_before_anyone_merges(repo: Path, capsys):
     _, a = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
     _, b = run_json(capsys, "start", "T-2.2", str(repo), "--worktree")
-    work_on(Path(a["claim"]["worktree"]), "T-2.1", "src/streak/shared.py", "a = 1\n", None, "--allow-outside-touches=shared file")
-    work_on(Path(b["claim"]["worktree"]), "T-2.2", "src/streak/shared.py", "b = 2\n", None,
-            "--allow-outside-touches=shared file")  # Touches lied
+    waive(repo, "T-2.1", "outside-touches", reason="shared file")
+    waive(repo, "T-2.2", "outside-touches", reason="shared file")
+    work_on(Path(a["claim"]["worktree"]), "T-2.1", "src/streak/shared.py", "a = 1\n")
+    work_on(Path(b["claim"]["worktree"]), "T-2.2", "src/streak/shared.py", "b = 2\n")  # Touches lied
     _, out = run_json(capsys, "claims", str(repo))
     by_id = {c["id"]: c for c in out["claims"]}
     assert by_id["T-2.1"]["conflicts_with"] == [{"id": "T-2.2", "files": ["src/streak/shared.py"]}]
@@ -219,7 +220,7 @@ def test_land_undoes_a_merge_whose_checks_fail(repo: Path, capsys):
     _, a = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
     worktree = Path(a["claim"]["worktree"])
     set_field(repo, "T-2.1", "Verify", f"`{py('import sys; sys.exit(4)')}`")  # main's Verify fails once merged
-    work_on(worktree, "T-2.1", "src/streak/store.py", "x\n", None, "--allow-test-changes=planned test rewrite")
+    work_on(worktree, "T-2.1", "src/streak/store.py", "x\n")
     before = git(repo, "rev-parse", "HEAD")
     code, out = run_json(capsys, "land", "--dir", str(repo))
     assert code == 7 and out["landed"] == []
@@ -230,9 +231,11 @@ def test_land_undoes_a_merge_whose_checks_fail(repo: Path, capsys):
 def test_land_refuses_real_conflicts_and_lands_the_rest(repo: Path, capsys):
     _, a = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
     _, b = run_json(capsys, "start", "T-2.2", str(repo), "--worktree")
-    work_on(Path(a["claim"]["worktree"]), "T-2.1", "src/streak/shared.py", "a = 1\n", None, "--allow-outside-touches=shared file")
-    work_on(Path(b["claim"]["worktree"]), "T-2.2", "src/streak/shared.py", "b = 2\n", None, "--allow-outside-touches=shared file")
-    code, out = run_json(capsys, "land", "--dir", str(repo), "--allow-outside-touches=shared file")
+    waive(repo, "T-2.1", "outside-touches", reason="shared file")
+    waive(repo, "T-2.2", "outside-touches", reason="shared file")
+    work_on(Path(a["claim"]["worktree"]), "T-2.1", "src/streak/shared.py", "a = 1\n")
+    work_on(Path(b["claim"]["worktree"]), "T-2.2", "src/streak/shared.py", "b = 2\n")
+    code, out = run_json(capsys, "land", "--dir", str(repo))
     assert code == 7 and [x["id"] for x in out["landed"]] == ["T-2.1"]
     skipped = out["skipped"][0]
     assert skipped["id"] == "T-2.2" and skipped["reason"] == "conflict" and skipped["files"] == ["src/streak/shared.py"]
@@ -261,6 +264,8 @@ def test_land_runs_on_the_integration_branch_only(repo: Path, capsys):
 def test_land_regenerates_the_planning_index_when_only_it_conflicts(repo: Path, capsys):
     _, a = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
     _, b = run_json(capsys, "start", "T-2.2", str(repo), "--worktree")
+    for ident in ("T-2.1", "T-2.2"):
+        waive(repo, ident, "outside-touches", reason="adds its requirement")  # requirement text is outside Touches
     for worktree, ident, fr, title, where in ((Path(a["claim"]["worktree"]), "T-2.1", "FR-101", "Backups", "end"),
                                               (Path(b["claim"]["worktree"]), "T-2.2", "FR-102", "Weekly", "### FR-002")):
         req = worktree / "docs/planning/03-requirements.md"
@@ -268,12 +273,11 @@ def test_land_regenerates_the_planning_index_when_only_it_conflicts(repo: Path, 
         block = f"### {fr} — {title}\n**Feature:** F-01 · **Priority:** Could\n\n"
         req.write_text(text + "\n" + block if where == "end" else text.replace(where, block + where, 1))
         assert main(["link", str(worktree)]) == 0
-        work_on(worktree, ident, {"T-2.1": "src/streak/store.py", "T-2.2": "src/streak/streak.py"}[ident], "x = 1\n",
-                None, "--allow-outside-touches=adds its requirement")  # requirement text is outside Touches
+        work_on(worktree, ident, {"T-2.1": "src/streak/store.py", "T-2.2": "src/streak/streak.py"}[ident], "x = 1\n")
     _, claims = run_json(capsys, "claims", str(repo))
     files = {f for c in claims["claims"] for other in c["conflicts_with"] for f in other["files"]}
     assert files == {"docs/planning/README.md"}  # only the generated index collides
-    code, out = run_json(capsys, "land", "--dir", str(repo), "--allow-outside-touches=new requirements")
+    code, out = run_json(capsys, "land", "--dir", str(repo))
     assert code == 0 and [x["id"] for x in out["landed"]] == ["T-2.1", "T-2.2"], out
     assert git(repo, "status", "--porcelain") == ""
     pkg = Package.load(repo)
