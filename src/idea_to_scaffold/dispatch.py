@@ -150,13 +150,14 @@ def adopt(pkg: Package, ref: str, ident: str, *, push: bool | None = None, fetch
                             details={"id": ident, "remote": remote, "claim": theirs}) from exc
         except cl.GitError as exc:
             push_error = str(exc)
+    run = ledger.new_run(pkg, ident) if created else ledger.run_of(pkg, ident)
     ledger.record(pkg, ident, "adopt", "claimed" if created else "candidate_added", branch=cand["name"],
-                  agent=cand["agent"], pr=cand.get("pr"))
+                  agent=cand["agent"], pr=cand.get("pr"), run=run)
     claim_dict = {**claim.to_dict(), "candidates": candidates}
     return {
         "schema": SCHEMA, "ok": True, "id": ident, "title": item.title, "claim": claim_dict, "created": created,
         "candidate": cand, "added": added, "candidates": candidates, "pushed": pushed, "push_error": push_error,
-        "remote": remote if pushed else None, "overlaps": overlaps,
+        "remote": remote if pushed else None, "overlaps": overlaps, "run": run,
         "commands": {"land": f"its land {ident}", "review": f"its review {ident} --branch {cand['name']}",
                      "release": f"its release {ident}" + (" --remote" if pushed else "")},
     }

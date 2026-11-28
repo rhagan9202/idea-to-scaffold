@@ -462,6 +462,8 @@ def start(pkg: Package, ident: str | None, *, setup: bool = True, **kwargs) -> d
         payload["setup"] = run_setup(pkg, payload["id"], Path(claim["worktree"])) if setup else None
     elif not claim and cl.in_git(pkg.root):
         record_setup_output(pkg, payload["id"], cl.toplevel(pkg.root))  # the plain flow: setup ran here already
+    if not payload.get("claim_held_here"):
+        payload["run"] = ledger.new_run(pkg, payload["id"])
     ledger.record(pkg, payload["id"], "start", "claimed" if claim else "in-progress", agent=kwargs.get("agent"),
                   branch=claim.get("branch"), worktree=claim.get("worktree"),
                   touches=len(payload["item"]["touches"]) if payload.get("item", {}).get("touches") else None)

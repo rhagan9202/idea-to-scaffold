@@ -755,11 +755,21 @@ def cmd_stats(args: argparse.Namespace) -> int:
         print("the run ledger is empty: start, done, block and land record to it" if out["ledger"] else
               "the run ledger needs a git repository")
         return 0
-    rate = f"{out['first_try_rate']:.0%}" if out["first_try_rate"] is not None else "n/a"
-    print(f"{out['attempted']} item(s) attempted, {out['first_try']} passed done first time ({rate})")
+    def rate(value: float | None, interval: list[float] | None) -> str:
+        if value is None:
+            return "n/a"
+        return f"{value:.0%}" + (f", 95% interval {interval[0]:.0%}-{interval[1]:.0%}" if interval else "")
+
+    print(f"{out['attempted']} item(s) attempted, {out['first_try']} passed first time "
+          f"({rate(out['first_try_rate'], out['first_try_interval'])})")
+    few = False
     for name, label in (("by_size", "size"), ("by_agent", "agent")):
         for key, g in out[name].items():
-            print(f"  {label} {key}: {g['first_try']} of {g['items']} first time")
+            few = few or not g["comparable"]
+            print(f"  {label} {key}: {g['first_try']} of {g['items']} first time "
+                  f"({rate(g['first_try_rate'], g['interval'])})")
+    if few:
+        print(f"  (groups under {out['comparable_from']} items are too few to compare: their intervals overlap)")
     if out["refusals"]:
         print("refused for: " + ", ".join(f"{k} {v}" for k, v in out["refusals"].items()))
     if out["land"]:
