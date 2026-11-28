@@ -167,7 +167,7 @@ def run_check(check: Check, cwd: Path, settings: Settings | None = None, *, igno
                 "(gate.timeout in package.yaml sets the limit)")
             return result
         if runner is not None:
-            result["results"] = read_report(runner.report_path(check.command, cwd, report), runner)
+            result["results"] = read_report(runner.report_path(check.command, cwd, report), runner, cwd)
         return result
     finally:
         if folder is not None:
@@ -235,8 +235,9 @@ def _tail(sink) -> str:
     return "\n".join(lines[-OUTPUT_TAIL:])
 
 
-def read_report(path: Path, runner: Runner = PYTEST) -> dict:
-    """A summary of the JUnit XML report `runner` wrote: counts, plus the failed and skipped tests by name."""
+def read_report(path: Path, runner: Runner = PYTEST, cwd: Path | None = None) -> dict:
+    """A summary of the JUnit XML report `runner` wrote: counts, plus the failed and skipped tests by name. `cwd` is
+    where the check ran."""
     head = {"runner": runner.name}
     try:
         if path.stat().st_size > REPORT_LIMIT:
@@ -260,9 +261,9 @@ def read_report(path: Path, runner: Runner = PYTEST) -> dict:
         if file:
             files.add(file)
         tags = {child.tag for child in case}
-        if ended_early(runner, case):  # node: the file ran as one test, because it ended before its own tests ran
+        if ended_early(runner, case, cwd):  # node: the file ran as one test, because it ended before its tests ran
             counts["errors"] += 1
-            failed.append(f"{ident} (ended before its tests ran)")
+            failed.append(ident.replace("\\", "/") + " (ended before its tests ran)")  # the path, as on POSIX
         elif "failure" in tags or "error" in tags:
             counts["failed" if "failure" in tags else "errors"] += 1
             failed.append(ident)

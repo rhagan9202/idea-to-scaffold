@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from idea_to_scaffold.checks import Check, run_check
+from idea_to_scaffold.checks import Check, read_report, run_check
 from idea_to_scaffold.scaffold import scaffold
 from idea_to_scaffold.stacks import NODE_TEST, PYTEST, runner_for
 
@@ -101,6 +101,19 @@ def test_which_commands_run_node_test(tmp_path: Path):
     for command in ("node script.js --testing", "npx jest", "npm install", "nodemon --test"):
         assert runner_for(command, tmp_path) is None, command
     assert runner_for("uv run pytest", tmp_path) is PYTEST
+
+
+def test_only_a_test_named_for_a_file_that_exists_ended_early(tmp_path: Path):
+    """Node names the stand-in for a file that ended early by its path, with `\\` on Windows; a test whose name
+    only ends in `.js` is a test."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/store.test.js").write_text("")
+    report = tmp_path / "report.xml"
+    report.write_text('<testsuites><testcase name="tests\\store.test.js"/><testcase name="loads config.js"/>'
+                      '<testcase name="tests/gone.test.js"/></testsuites>')
+    summary = read_report(report, NODE_TEST, tmp_path)
+    assert summary["failed_tests"] == ["tests/store.test.js (ended before its tests ran)"], summary
+    assert summary["errors"] == 1 and summary["passed"] == 2
 
 
 @needs_node

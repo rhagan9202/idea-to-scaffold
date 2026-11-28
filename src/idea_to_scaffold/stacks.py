@@ -10,8 +10,9 @@ it back after the check:
   `NODE_OPTIONS` adds a JUnit reporter beside the usual spec output. Node's report doesn't say which file a test is
   in, so a skip counts only when the Verify command ran it, and held-out folders aren't left out (`its land` leaves
   them out with a sparse checkout, which works for any runner). A test file that ends before its tests run
-  (`process.exit(0)` in the code it imports) shows in the report as a test named for the file with nothing in it,
-  which counts as an error.
+  (`process.exit(0)` in the code it imports) shows in the report as a passing test named for the file, which counts
+  as an error. A test only counts as that when its name is the path of a file in the check's folder, so a test
+  called "loads config.js" is still a test.
 
 Any other runner (Jest, Vitest, `go test`, `cargo test`) is gated on its exit code, and on the static checks of
 `tamper.py`, which read test files and test settings in every language.
@@ -140,6 +141,10 @@ def package_scripts(cwd: Path) -> dict[str, str]:
     return {str(k): str(v) for k, v in scripts.items()} if isinstance(scripts, dict) else {}
 
 
-def ended_early(runner: Runner, case: ET.Element) -> bool:
-    """Whether a testcase is node's stand-in for a test file that ended before its own tests ran."""
-    return runner is NODE_TEST and len(case) == 0 and bool(NODE_FILE_RE.search(case.get("name", "")))
+def ended_early(runner: Runner, case: ET.Element, cwd: Path | None = None) -> bool:
+    """Whether a testcase is node's stand-in for a test file that ended before its own tests ran: a passing test
+    whose name is the file's path, relative to the folder node ran in (with `\\` on Windows) or absolute."""
+    name = case.get("name", "").replace("\\", "/")
+    if runner is not NODE_TEST or len(case) or not NODE_FILE_RE.search(name):
+        return False
+    return cwd is None or (cwd / name).is_file()  # `cwd / name` is `name` when it is absolute
