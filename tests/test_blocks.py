@@ -43,7 +43,7 @@ def test_a_scaffold_carries_the_commands_between_markers(plan: Path, tmp_path: P
 def test_one_change_in_package_yaml_reaches_every_copy(plan: Path, tmp_path: Path, capsys):
     root = repo_of(plan, tmp_path)
     agents = root / "AGENTS.md"
-    agents.write_text(agents.read_text().replace("\r\n", "\n").replace("\n", "\r\n"))  # a Windows checkout
+    agents.write_bytes(agents.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))  # a Windows checkout
     set_test_command(root, "node --test js/*.test.js")
     code, out = run_json(capsys, "link", "--check", str(root))
     assert code == 1 and out["error"]["code"] == "link_outdated"
