@@ -284,7 +284,7 @@ def test_a_lockfile_the_agent_changed_is_still_a_dependency_change(repo: Path, c
     (wt / "src/streak/store.py").write_text("def add(): ...\n")
     (wt / "uv.lock").write_text("version = 1\n[[package]]\nname = 'evil'\n")
     code, out = run_json(capsys, "done", "T-2.1", str(wt))
-    assert code == 5 and out["error"]["code"] == "outside_touches" and out["error"]["setup_files"] == [], out
+    assert code == 12 and out["error"]["code"] == "outside_touches" and out["error"]["setup_files"] == [], out
     assert "uv.lock" in out["error"]["findings"][0]["files"]
     assert any(f["kind"] == "dependency_added" for f in out["error"]["warnings"])  # warn mode until it is committed
 
@@ -429,7 +429,7 @@ def test_a_merge_that_breaks_a_done_items_verify_doesnt_land(repo: Path, capsys)
 
 
 def test_the_committed_hash_matches_the_disk_hash_on_a_clean_checkout(repo: Path):  # noqa: F811
-    from idea_to_scaffold.work import touches_hash, touches_hash_at
+    from idea_to_scaffold.verified import touches_hash, touches_hash_at
     pkg = Package.load(repo)
     for touches in (["src/"], ["tests/"], ["src/streak/"]):
         assert touches_hash(pkg, touches) == touches_hash_at(pkg, touches, "HEAD")
@@ -439,8 +439,8 @@ def test_the_committed_hash_matches_the_disk_hash_on_a_clean_checkout(repo: Path
 
 def test_a_block_written_while_the_checks_run_is_kept(claim: Path):  # noqa: F811
     from idea_to_scaffold.contract import WorkError
+    from idea_to_scaffold.done import done
     from idea_to_scaffold.edits import block
-    from idea_to_scaffold.work import done
     pkg = Package.load(claim)
     (claim / "src/streak/store.py").write_text("def add(): ...\n")
     blocked = []
@@ -578,9 +578,9 @@ def test_start_next_takes_the_next_item_when_another_machine_won_the_race(repo: 
 
 def test_a_closed_pipe_ends_quietly(tmp_path: Path):  # B12: `its status | head`
     script = tmp_path / "flood.py"
-    script.write_text("import sys\nfrom idea_to_scaffold import cli\n"
+    script.write_text("import sys\nfrom idea_to_scaffold import cli\nfrom idea_to_scaffold.cli import commands\n"
                       "def flood(args):\n    for _ in range(200000):\n        print('x' * 80)\n    return 0\n"
-                      "cli.cmd_stats = flood\nsys.exit(cli.main(['stats', '.']))\n")
+                      "commands.cmd_stats = flood\nsys.exit(cli.main(['stats', '.']))\n")
     env = {**os.environ, "PYTHONPATH": str(Path(idea_to_scaffold.__file__).parent.parent)}
     writer = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               env=env, cwd=tmp_path)

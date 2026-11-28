@@ -129,7 +129,7 @@ def test_retired_ids_stay_defined(mini: Path):
 
 
 def test_blank_template_only_reports_its_placeholders(tmp_path: Path, capsys):
-    main(["new", str(tmp_path / "blank")])
+    main(["new", str(tmp_path / "blank"), "--profile", "full"])
     errors = errors_of(tmp_path / "blank")
     assert not any("never defined" in e or "broken link" in e for e in errors), errors
 

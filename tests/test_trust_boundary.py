@@ -206,7 +206,7 @@ def test_b2_an_edited_forks_file_in_the_git_folder_changes_nothing(repo: Path, c
     old.mkdir(exist_ok=True)
     (old / "forks.json").write_text(json.dumps({"T-2.1": git(repo, "rev-parse", "HEAD")}))
     code, out = run_json(capsys, "done", "T-2.1", str(repo), "--no-verify")
-    assert code == 5 and "test_deleted" in kinds(out)
+    assert code == 12 and "test_deleted" in kinds(out)
     assert not locking.state_dir(repo).is_relative_to(common_dir(repo))
 
 
@@ -217,7 +217,7 @@ def test_b1_done_on_main_needs_a_recorded_start(repo: Path, capsys):  # noqa: F8
     (repo / "tests/test_smoke.py").unlink()
     commit(repo, "drop a test")
     code, out = run_json(capsys, "done", "T-2.1", str(repo), "--no-verify")
-    assert code == 5 and out["error"]["code"] == "no_fork_point"
+    assert code == 12 and out["error"]["code"] == "no_fork_point"
     assert main(["start", "T-2.1", str(repo), "--force"]) == 0  # the lead records where it starts from
     (repo / "src/streak/store.py").write_text("x = 1\n")
     code, out = run_json(capsys, "done", "T-2.1", str(repo), "--no-verify")
@@ -245,10 +245,10 @@ def test_a9_no_verify_says_the_checks_were_skipped(repo: Path, capsys):  # noqa:
 
 def test_a7_no_environment_or_terminal_waives_the_gate(claim: Path, repo: Path, capsys, monkeypatch):  # noqa: F811
     monkeypatch.setenv("ITS_ALLOW_OVERRIDES", "1")
-    monkeypatch.setattr("idea_to_scaffold.work.is_terminal", lambda fd: True)  # what `script` gives an agent
+    monkeypatch.setattr("idea_to_scaffold.terminal.is_terminal", lambda fd: True)  # what `script` gives an agent
     (claim / TEST).unlink()
     code, out = finish(claim, capsys=capsys)
-    assert code == 5 and out["error"]["code"] == "test_changes"
+    assert code == 12 and out["error"]["code"] == "test_changes"
     code, out = finish(claim, "--allow-test-changes=cleanup", capsys=capsys)
     assert code == 1 and out["error"]["code"] == "use_waive"
 
@@ -278,7 +278,7 @@ def test_rewritten_launch_settings_refuse_the_result(claim: Path, repo: Path, tm
     result.write_text(json.dumps({"type": "result", "subtype": "success", "is_error": False,
                                   "structured_output": {"id": "T-2.1", "status": "done", "summary": "ok"}}))
     code, out = run_json(capsys, "done", "T-2.1", str(claim), "--result", str(result))
-    assert code == 5 and out["error"]["code"] == "launch_settings_changed"
+    assert code == 12 and out["error"]["code"] == "launch_settings_changed"
     assert status_line(claim, "T-2.1", "Status").endswith("todo")
 
 
@@ -287,7 +287,7 @@ def test_a_waiver_on_the_plain_flow_counts_from_the_waive_on(repo: Path, capsys)
     (repo / "tests/test_smoke.py").unlink()
     (repo / "src/streak/store.py").write_text("x = 1\n")
     code, out = run_json(capsys, "done", "T-2.1", str(repo), "--no-verify")
-    assert code == 5 and "test_deleted" in kinds(out)
+    assert code == 12 and "test_deleted" in kinds(out)
     waive(repo, "T-2.2", "outside-touches", reason="another item's waiver")  # not a change T-2.1's work made
     waive(repo, "T-2.1", "test-changes", reason="the smoke test is replaced")
     code, out = run_json(capsys, "done", "T-2.1", str(repo), "--no-verify")
@@ -305,7 +305,7 @@ def test_a8_a_conftest_hidden_through_info_exclude_is_found(claim: Path, capsys)
     (claim / ".venv/lib/site-packages/conftest.py").write_text("")  # an installed package's: left alone
     assert "conftest" not in git(claim, "status", "--porcelain")  # git doesn't show it
     code, out = finish(claim, capsys=capsys)
-    assert code == 5 and "test_config_changed" in kinds(out)
+    assert code == 12 and "test_config_changed" in kinds(out)
     hidden = [f for f in out["error"]["findings"] if f.get("hidden")]
     assert [f["file"] for f in hidden] == ["tests/conftest.py"]
 
@@ -322,7 +322,7 @@ def test_c1_a_proposal_marked_done_is_refused_by_done_validate_and_renumber(clai
     folder.mkdir(exist_ok=True)
     (folder / "T-new-evil.md").write_text(proposal("T-new-evil", status="done", extra="- **Verified:** never\n"))
     code, out = finish(claim, capsys=capsys)
-    assert code == 5 and "proposal_invalid" in kinds(out)
+    assert code == 12 and "proposal_invalid" in kinds(out)
     messages = [f["message"] for f in out["error"]["findings"] if f["kind"] == "proposal_invalid"]
     assert any("is done" in m for m in messages) and any("Verified" in m for m in messages)
     code, out = run_json(capsys, "validate", str(claim))
@@ -405,7 +405,7 @@ def test_a_branch_that_adds_a_dependency_needs_the_leads_waiver(claim: Path, rep
     set_field(repo, "T-2.1", "Touches", "`src/streak/store.py`, `tests/test_store.py`, `pyproject.toml`")
     git(claim, "merge", "-q", "main")
     code, out = finish(claim, capsys=capsys)
-    assert code == 5 and out["error"]["code"] == "dependency_changes", out
+    assert code == 12 and out["error"]["code"] == "dependency_changes", out
     assert [f["added"] for f in out["error"]["findings"]] == [['[project] "evil>=1"']]
     waive(repo, "T-2.1", "dependencies", reason="evil is fine, I checked")
     assert finish(claim, capsys=capsys)[0] == 0

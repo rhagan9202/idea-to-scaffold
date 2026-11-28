@@ -32,11 +32,12 @@ from datetime import datetime, timezone
 
 from . import claims as cl
 from . import evidence, gate, gitx, ledger
-from .backlog import BACKLOG, load_backlog, risk_of
+from .backlog import BACKLOG, find_item, load_backlog, risk_of
 from .contract import SCHEMA, WorkError
+from .gating import gate_target
 from .ids import ID_RE, sections, strip_links
 from .package import Package
-from .work import _find, _ref, base_ref, gate_target, item_here, remote_of, show_payload
+from .view import base_ref, item_here, remote_of, show_payload
 
 DIFF_LIMIT = 200_000  # characters of diff to include; the rest is cut and flagged
 AUTHOR_NOTES = re.compile(r"(^|/)(HANDOFF|NOTES|PROGRESS|SUMMARY|WORKLOG|CHANGES)(\.[\w-]+)?\.(md|txt)$|(^|/)\.its/", re.I)
@@ -165,7 +166,7 @@ def review(pkg: Package, ident: str | None = None, *, base: str | None = None, b
     ident = ident or item_here(pkg, items)
     if ident is None:
         raise WorkError("which_item", "name the item to review, e.g. `its review T-1.1`")
-    item = _find(items, ident)
+    item = find_item(items, ident)
     claim, ref, fork, inspection, omitted, name = _target(pkg, ident, base, branch)
     backlog = pkg.path_of(BACKLOG).resolve().relative_to(pkg.root.resolve()).as_posix()
     try:
@@ -208,7 +209,7 @@ def _target(pkg: Package, ident: str, base: str | None, branch: str | None = Non
         ref, fork = base or base_ref(pkg), None
         head, name = _candidate_head(pkg, claim, branch, ref)
     elif claim is not None:  # run from main (or another checkout): review the claim's branch, not this checkout
-        ref, fork, head = base or base_ref(pkg), None, _ref(claim)
+        ref, fork, head = base or base_ref(pkg), None, cl.claim_ref(claim)
     else:
         ref, fork = (base, None) if base else gate_target(pkg, ident)
     try:
@@ -238,7 +239,7 @@ def _candidate_head(pkg: Package, claim: cl.Claim | None, branch: str | None, ba
     for c in cands:
         if cl.ref_exists(pkg.root, c["ref"]) and cl.ahead(pkg.root, c["ref"], base):
             return c["ref"], c.get("name") or c["ref"]
-    return _ref(claim), None  # nothing to review yet: the claim branch, which has no commits
+    return cl.claim_ref(claim), None  # nothing to review yet: the claim branch, which has no commits
 
 
 def _validate(reply: object) -> list[str]:
@@ -440,7 +441,7 @@ def judge(pkg: Package, ident: str | None, text: str, *, min_severity: str = "ma
     ident = ident or item_here(pkg, items)
     if ident is None:
         raise WorkError("which_item", "name the item the review is of: `its review T-2.1 --reply review.json`")
-    item = _find(items, ident)
+    item = find_item(items, ident)
     _, _, _, inspection, omitted, name = _target(pkg, ident, base, branch)
     planned = inspection.planned or item
     reply = parse_reply(text, min_severity)

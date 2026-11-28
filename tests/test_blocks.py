@@ -46,7 +46,7 @@ def test_one_change_in_package_yaml_reaches_every_copy(plan: Path, tmp_path: Pat
     agents.write_bytes(agents.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))  # a Windows checkout
     set_test_command(root, "node --test js/*.test.js")
     code, out = run_json(capsys, "link", "--check", str(root))
-    assert code == 1 and out["error"]["code"] == "link_outdated"
+    assert code == 8 and out["error"]["code"] == "link_outdated"
     assert sorted(out["error"]["changed"]) == sorted(["AGENTS.md", "HANDOFF.md", CI])
     _, report = run_json(capsys, "validate", str(root))
     assert any("don't match package.yaml" in w for w in report["warnings"]), report["warnings"]
@@ -104,4 +104,4 @@ def test_link_in_a_claim_worktree_leaves_the_commands_to_the_lead(repo: Path, ca
     assert main(["link", str(wt)]) == 0
     assert (wt / "AGENTS.md").read_text() == before  # an agent's link never becomes an agent-config change
     code, out = run_json(capsys, "link", "--check", str(repo))  # on main the drift shows
-    assert code == 1 and "AGENTS.md" in out["error"]["changed"]
+    assert code == 8 and "AGENTS.md" in out["error"]["changed"]

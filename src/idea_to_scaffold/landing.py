@@ -32,26 +32,18 @@ from pathlib import Path
 from . import claims as cl
 from . import gate, gitx, heldout, ledger, trust
 from . import review as reviews
-from .backlog import BacklogItem, blocked_by, load_backlog, load_proposals, parse_backlog, set_field
+from .backlog import BACKLOG, BacklogItem, blocked_by, load_backlog, load_proposals, parse_backlog, set_field
 from .checks import RESULT_KINDS, Check, checks_for, result_findings, run_check
 from .contract import EXIT_NOT_LANDED, SCHEMA, WorkError
+from .gating import changed_tests, red_on_parent
 from .ids import META_FILES
 from .linker import link_package
+from .locking import holding_lock
+from .mirror import BACKLOG_JSON, refresh_mirror
 from .package import Package
 from .touches import covered
-from .work import (
-    BACKLOG,
-    BACKLOG_JSON,
-    SKIPPED_MARK,
-    _locked,
-    _refresh_mirror,
-    changed_tests,
-    integration_branch,
-    red_on_parent,
-    remote_of,
-    shown,
-    touches_hash_at,
-)
+from .verified import SKIPPED_MARK, touches_hash_at
+from .view import integration_branch, remote_of, shown
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
@@ -387,7 +379,7 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
             _mark_landed(tree / prefix if prefix else tree, tree, claim.id, before, [], set_done=True,
                          skipped=not verify)
         commit = _git(tree, "rev-parse", "HEAD").stdout.strip()
-        with _locked(pkg):
+        with holding_lock(pkg):
             if _git(root, "rev-parse", "HEAD").stdout.strip() != before:
                 return {**result, "reason": "base_moved", "checks": checks,
                         "message": "the integration branch moved while the checks ran; run its land again"}
@@ -397,7 +389,7 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
                         "message": "the merged result passed, but your checkout couldn't be moved to it: "
                                    f"{ff.stderr.strip() or ff.stdout.strip()}"}
             trust.record(root, integration_branch(pkg), commit)
-        _refresh_mirror(pkg)
+        refresh_mirror(pkg)
         return {**result, "landed": True, "commit": commit, "checks": checks, "warnings": inspection.warnings,
                 "held_out": held, "reverified": reverified, "review": approved,
                 "checks_skipped": None if (verify and pkg.repo_layout) else

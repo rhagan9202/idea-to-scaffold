@@ -2,11 +2,11 @@
 
 A check's exit code comes from the code under test, so on its own it proves little: `os._exit(0)` in a module the
 tests import ends pytest during collection with status 0, and a `conftest.py` can set the session's exit status
-after the tests fail. So when a check runs pytest, `run_check` asks pytest for a JUnit XML report (through
-`PYTEST_ADDOPTS`, into a fresh temporary folder) and reads it back. `result_findings` then compares the report with
-the exit code:
+after the tests fail. So when a check runs a test runner `its` knows (pytest, or Node's `node --test`: see
+`stacks.py`), `run_check` asks the runner for a JUnit XML report, into a fresh temporary folder, and reads it back.
+`result_findings` then compares the report with the exit code:
 
-- `no_test_report`: pytest ran but wrote no report. It stopped before the end of the session.
+- `no_test_report`: the runner ran but wrote no report. It stopped before the end of the session.
 - `failures_hidden`: the report has failed tests or errors, but the command exited 0.
 - `no_tests_ran`: the report has no tests, or every test was skipped.
 - `tests_skipped`: tests the item's Verify ran, or tests in test files the branch changed, were skipped.
@@ -14,8 +14,9 @@ the exit code:
 A check runs code from the branch, and `its land` runs it as the lead. So a check gets only the environment
 variables on an allow-list (`ALLOWED_ENV`: the path, the locale, temporary folders, the OS's own variables, proxies
 and certificate bundles, toolchain homes), plus the names the integration branch's `gate.env` adds. A token in the
-lead's shell, such as `GH_TOKEN`, never reaches the code under test. `PYTEST_ADDOPTS` and `PYTEST_PLUGINS` are never
-passed, so an agent can't switch pytest to `--collect-only` from its own shell.
+lead's shell, such as `GH_TOKEN`, never reaches the code under test. `PYTEST_ADDOPTS`, `PYTEST_PLUGINS` and
+`NODE_OPTIONS` are never passed, so an agent can't switch pytest to `--collect-only`, or load code into node, from
+its own shell.
 
 A check also has a time limit (`gate.timeout`, `DEFAULT_TIMEOUT` seconds by default). It runs in a process group of
 its own (a new session on POSIX, a new process group on Windows), and when the limit passes the whole group is
@@ -31,7 +32,6 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 import shutil
 import signal
 import subprocess
@@ -42,6 +42,7 @@ from pathlib import Path
 
 from .backlog import BacklogItem
 from .package import Package
+from .stacks import PYTEST, RUNNERS, Runner, ended_early, runner_for
 
 OUTPUT_TAIL = 40          # lines of a failed check's output to keep
 REPORT_LIMIT = 64 << 20   # bytes of JUnit XML read at most
@@ -50,7 +51,7 @@ OUTPUT_READ = 256 << 10   # bytes of a check's output read back (its end)
 DEFAULT_TIMEOUT = 1200    # seconds a check may run before its process tree is killed
 KILL_GRACE = 5            # seconds between asking a timed-out check to stop and killing it
 TIMED_OUT = 124           # the exit code a timed-out check reports
-NEVER_ENV = frozenset({"PYTEST_ADDOPTS", "PYTEST_PLUGINS"})  # set by run_check itself, never passed through
+NEVER_ENV = frozenset({"PYTEST_ADDOPTS", "PYTEST_PLUGINS", "NODE_OPTIONS"})  # set by run_check itself, never passed
 # The variables a check gets from the caller's environment. Names compare without case (Windows has no case in
 # them; on POSIX the lower-case proxy names are the usual ones).
 ALLOWED_ENV = frozenset(name.upper() for name in (
@@ -76,12 +77,7 @@ ALLOWED_ENV = frozenset(name.upper() for name in (
 ALLOWED_PREFIXES = ("LC_", "UV_")
 SECRET_RE = re.compile(r"TOKEN|SECRET|PASSW(?:OR)?D|CREDENTIAL|API_?KEY|ACCESS_KEY|PRIVATE_KEY|AUTH", re.I)
 RESULT_KINDS = ("no_test_report", "failures_hidden", "no_tests_ran", "tests_skipped")
-
-# A command that runs pytest: `pytest`, `py.test`, `uv run pytest`, `python -m pytest`, `.venv/bin/pytest`.
-PYTEST_RE = re.compile(r"(?:^|[\s/\\;&|(\"'])(?:py\.test|pytest)(?:\.exe)?(?=$|[\s;&|)\"'])|-m\s+pytest\b")
-# A report the command asks for itself; pytest keeps the last --junitxml it is given, so that one wins over ours.
-JUNIT_OPTION_RE = re.compile(r"--junit-?xml(?:=|\s+)(\"[^\"]+\"|'[^']+'|[^\s;&|]+)")
-
+RUNNER_NAMES = {r.name: r for r in RUNNERS}
 
 @dataclass
 class Check:
@@ -123,7 +119,7 @@ def checks_for(pkg: Package, item: BacklogItem, verify: str | None | bool = True
 
 
 def runs_pytest(command: str) -> bool:
-    return bool(PYTEST_RE.search(command))
+    return PYTEST.runs(command, Path("."))
 
 
 def check_env(base: dict[str, str] | None = None, extra: tuple[str, ...] | list[str] = ()) -> dict[str, str]:
@@ -143,18 +139,18 @@ def check_env(base: dict[str, str] | None = None, extra: tuple[str, ...] | list[
 
 def run_check(check: Check, cwd: Path, settings: Settings | None = None, *, ignore: list[str] = ()) -> dict:
     """Run one check in `cwd`, with the allow-listed environment and the time limit from `settings`. When the
-    command runs pytest, the result also carries `results`, the summary of the JUnit report it wrote
-    (`{"report": False}` when it wrote none), and pytest skips the `ignore` paths (held-out tests of items that
-    aren't done: `heldout.py`). A check that runs out of time has `timed_out: True` and fails."""
+    command runs a test runner `its` knows (`stacks.py`), the result also carries `results`, the summary of the
+    JUnit report it wrote (`{"report": False}` when it wrote none), and the runner skips the `ignore` paths (held-out
+    tests of items that aren't done: `heldout.py`) if it can. A check that runs out of time has `timed_out: True`
+    and fails."""
     settings = settings or Settings()
     env = check_env(extra=settings.env)
     folder = report = None
-    if runs_pytest(check.command):
+    runner = runner_for(check.command, cwd)
+    if runner is not None:
         folder = Path(tempfile.mkdtemp(prefix="its-report-"))
         report = folder / "junit.xml"
-        # pytest splits PYTEST_ADDOPTS with shlex, so the path is quoted for it and uses forward slashes on Windows
-        env["PYTEST_ADDOPTS"] = " ".join([f"--junitxml={shlex.quote(report.as_posix())} -o junit_family=xunit1",
-                                          *(f"--ignore={shlex.quote(p)}" for p in ignore)])
+        runner.prepare(env, report, list(ignore))
     try:
         code, output, timed_out = run_command(check.command, cwd, env, settings.timeout)
         result = {
@@ -170,8 +166,8 @@ def run_check(check: Check, cwd: Path, settings: Settings | None = None, *, igno
                 f"[its] {check.name} ran for more than {settings.timeout:g} s; its process tree was killed "
                 "(gate.timeout in package.yaml sets the limit)")
             return result
-        if report is not None:
-            result["results"] = read_report(_report_path(check.command, cwd, report))
+        if runner is not None:
+            result["results"] = read_report(runner.report_path(check.command, cwd, report), runner, cwd)
         return result
     finally:
         if folder is not None:
@@ -239,54 +235,36 @@ def _tail(sink) -> str:
     return "\n".join(lines[-OUTPUT_TAIL:])
 
 
-def _report_path(command: str, cwd: Path, ours: Path) -> Path:
-    """Our report, or the one the command names with its own --junitxml when pytest wrote that one instead."""
-    if ours.is_file():
-        return ours
-    named = JUNIT_OPTION_RE.findall(command)
-    if named:
-        path = Path(named[-1].strip("\"'"))
-        return path if path.is_absolute() else cwd / path
-    return ours
-
-
-def _test_id(case: ET.Element) -> tuple[str, str]:
-    """(test id, test file) for a JUnit testcase written by pytest with junit_family=xunit1."""
-    name = case.get("name", "")
-    file = (case.get("file") or "").replace("\\", "/")
-    classname = case.get("classname", "")
-    if not file:
-        return (f"{classname}::{name}" if classname else name), ""
-    module = file[:-3].replace("/", ".") if file.endswith(".py") else ""
-    cls = classname[len(module) + 1:] if module and classname.startswith(module + ".") else ""
-    return "::".join(p for p in (file, cls, name) if p), file
-
-
-def read_report(path: Path) -> dict:
-    """A summary of a JUnit XML report: counts, plus the failed and skipped tests by name."""
+def read_report(path: Path, runner: Runner = PYTEST, cwd: Path | None = None) -> dict:
+    """A summary of the JUnit XML report `runner` wrote: counts, plus the failed and skipped tests by name. `cwd` is
+    where the check ran."""
+    head = {"runner": runner.name}
     try:
         if path.stat().st_size > REPORT_LIMIT:
-            return {"report": False, "reason": f"the test report is larger than {REPORT_LIMIT >> 20} MB"}
+            return {**head, "report": False, "reason": f"the test report is larger than {REPORT_LIMIT >> 20} MB"}
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return {"report": False, "reason": "pytest wrote no test report"}
-    if "<!DOCTYPE" in text or "<!ENTITY" in text:  # pytest never writes either; a report that has one was forged
-        return {"report": False, "reason": "the test report declares a DOCTYPE or entities, which pytest never writes"}
+        return {**head, "report": False, "reason": f"{runner.label} wrote no test report"}
+    if "<!DOCTYPE" in text or "<!ENTITY" in text:  # no runner writes either; a report that has one was forged
+        return {**head, "report": False,
+                "reason": f"the test report declares a DOCTYPE or entities, which {runner.label} never writes"}
     try:
         root = ET.fromstring(text)
     except ET.ParseError as exc:
-        return {"report": False, "reason": f"the test report isn't valid XML ({exc})"}
+        return {**head, "report": False, "reason": f"the test report isn't valid XML ({exc})"}
     counts = {"tests": 0, "passed": 0, "failed": 0, "errors": 0, "skipped": 0}
     failed: list[str] = []
     skipped: list[dict] = []
     files: set[str] = set()
-    for case in root.iter("testcase"):
-        ident, file = _test_id(case)
+    for ident, file, case in runner.cases(root):
         counts["tests"] += 1
         if file:
             files.add(file)
         tags = {child.tag for child in case}
-        if "failure" in tags or "error" in tags:
+        if ended_early(runner, case, cwd):  # node: the file ran as one test, because it ended before its tests ran
+            counts["errors"] += 1
+            failed.append(ident.replace("\\", "/") + " (ended before its tests ran)")  # the path, as on POSIX
+        elif "failure" in tags or "error" in tags:
             counts["failed" if "failure" in tags else "errors"] += 1
             failed.append(ident)
         elif "skipped" in tags:
@@ -296,7 +274,7 @@ def read_report(path: Path) -> dict:
                             "reason": ((mark.get("message") if mark is not None else "") or "")[:200]})
         else:
             counts["passed"] += 1
-    return {"report": True, **counts, "failed_tests": failed[:LIST_LIMIT], "skipped_tests": skipped,
+    return {**head, "report": True, **counts, "failed_tests": failed[:LIST_LIMIT], "skipped_tests": skipped,
             "files": sorted(files)}
 
 
@@ -313,19 +291,20 @@ def result_findings(results: list[dict], changed_tests: set[str] | frozenset[str
         if summary is None or not r["passed"]:
             continue
         name, command = r["name"], r["command"]
+        runner = RUNNER_NAMES.get(summary.get("runner", ""), PYTEST)
         if not summary.get("report"):
             out.append({
                 "kind": "no_test_report", "check": name, "command": command,
-                "message": f"{name} ran pytest and exited {r['exit_code']}, but {summary.get('reason', 'wrote no report')}, "
-                           "so nothing shows the tests ran: the run stopped before pytest finished (for example "
-                           "os._exit in the code under test)"})
+                "message": f"{name} ran {runner.label} and exited {r['exit_code']}, but "
+                           f"{summary.get('reason', 'wrote no report')}, so nothing shows the tests ran: the run "
+                           f"stopped before {runner.label} finished (for example {runner.early_exit})"})
             continue
         bad = summary["failed"] + summary["errors"]
         if bad:
             names = summary["failed_tests"]
             out.append({
                 "kind": "failures_hidden", "check": name, "command": command, "tests": names,
-                "message": f"{name} exited 0, but pytest reported {summary['failed']} failed and {summary['errors']} "
+                "message": f"{name} exited 0, but {runner.label} reported {summary['failed']} failed and {summary['errors']} "
                            f"errored test(s) ({', '.join(names[:5])}); something changed the exit status"})
         if summary["passed"] == 0 and not bad:
             what = ("collected no tests" if summary["tests"] == 0

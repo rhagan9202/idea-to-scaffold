@@ -1,4 +1,5 @@
 spec_version: "0.1"
+profile: full        # every doc; lite has fewer (spec section 15)
 
 project:
   name: "<Project Name>"

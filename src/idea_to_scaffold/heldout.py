@@ -3,7 +3,7 @@
 The lead writes an item's held-out tests in `<acceptance_path>/<ID>/` (`tests/acceptance/T-2.1/` by default).
 Files elsewhere in the acceptance folder are shared: fixtures and helpers, or tests that hold for the whole project.
 
-- An agent's worktree never has the acceptance folder (`work.hide_acceptance`), and the gate refuses a branch that
+- An agent's worktree never has the acceptance folder (`start.hide_acceptance`), and the gate refuses a branch that
   changes it.
 - `its land` checks each merged result with the held-out tests of every item that is done on it, the landing item
   included, plus the shared files, and without the folders of items that aren't done yet. Two items landing in

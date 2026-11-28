@@ -6,7 +6,7 @@ Using the approved package:
 2. Write `package.yaml`:
    ```yaml
    spec_version: "0.1"
-   profile: full    # or lite, if we chose a lite plan
+   profile: lite    # or full, if we chose a full plan
    project: {name, slug, summary, license}
    stack: {language, runtime, framework, package_manager, test, lint}
    agents: [codex, claude, copilot, cursor]

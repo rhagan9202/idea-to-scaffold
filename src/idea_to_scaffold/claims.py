@@ -698,3 +698,8 @@ def record_brief(cwd: Path, ident: str, data: dict) -> None:
 def brief_of(cwd: Path, ident: str) -> dict:
     entry = _load_json(_store_dir(cwd) / "briefs.json").get(ident)
     return entry if isinstance(entry, dict) else {}
+
+
+def claim_ref(claim: Claim) -> str:
+    """The ref of a claim's branch: the remote's copy for a claim pushed from another machine."""
+    return f"refs/remotes/{claim.branch}" if claim.remote else f"refs/heads/{claim.branch}"

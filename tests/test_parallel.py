@@ -62,9 +62,9 @@ def set_field(root: Path, ident: str, name: str, value: str) -> None:
 
 
 @pytest.fixture
-def repo(plan: Path, tmp_path: Path) -> Path:
+def repo(plan: Path, tmp_path: Path, golden) -> Path:
     """A scaffolded Streak repo on main, with its initial commit."""
-    return scaffold(plan, tmp_path / "out", git=True).path
+    return golden("scaffolded-repo", lambda folder: scaffold(plan, folder / "out", git=True).path, tmp_path)
 
 
 # --- claims ---------------------------------------------------------------------------------------------------

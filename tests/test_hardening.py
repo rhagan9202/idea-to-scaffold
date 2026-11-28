@@ -28,8 +28,8 @@ def git_identity(monkeypatch):
 
 
 @pytest.fixture
-def repo(plan: Path, tmp_path: Path) -> Path:
-    return scaffold(plan, tmp_path / "out", git=True).path
+def repo(plan: Path, tmp_path: Path, golden) -> Path:
+    return golden("scaffolded-repo", lambda folder: scaffold(plan, folder / "out", git=True).path, tmp_path)
 
 
 def its(*argv: str, cwd: Path | None = None) -> subprocess.Popen:
@@ -121,14 +121,14 @@ def test_done_refuses_an_item_with_no_status_before_running_checks(mini: Path, c
 
 
 def test_unexpected_errors_still_return_json(mini: Path, capsys, monkeypatch):
-    from idea_to_scaffold import cli
-    monkeypatch.setattr(cli, "next_payload", lambda *a, **k: 1 / 0)
+    from idea_to_scaffold import service
+    monkeypatch.setattr(service, "next_payload", lambda *a, **k: 1 / 0)
     code, out = run_json(capsys, "next", str(mini))
     assert code == 1 and out["error"]["code"] == "internal_error" and "ZeroDivisionError" in out["error"]["message"]
 
 
 def test_check_output_that_is_not_utf8_is_reported(tmp_path: Path):
-    from idea_to_scaffold.work import Check, run_check
+    from idea_to_scaffold.checks import Check, run_check
     result = run_check(Check("verify", f"{sys.executable} -c \"import sys; sys.stdout.buffer.write(b'\\xff'); "
                                        "sys.exit(1)\""), tmp_path)
     assert result["exit_code"] == 1 and "�" in result["output"]
@@ -335,7 +335,7 @@ def test_handoff_kickoff_has_no_shell_substitution(repo: Path):
 
 
 def test_launch_commands_include_argv():
-    from idea_to_scaffold.work import launch_commands
+    from idea_to_scaffold.start import launch_commands
     out = launch_commands("T-1.1", "/tmp/wt dir")
     assert out["argv"]["claude"][0] == "claude" and out["cwd"] == "/tmp/wt dir"
     if os.name == "nt":  # cmd.exe: /d changes drive too
@@ -346,7 +346,7 @@ def test_launch_commands_include_argv():
 
 def test_nul_is_not_a_person():
     """On Windows isatty is true of NUL, which is what an agent's tool gives a command as stdin."""
-    from idea_to_scaffold.work import is_terminal
+    from idea_to_scaffold.terminal import is_terminal
     with open(os.devnull, encoding="utf-8") as fh:
         assert not is_terminal(fh.fileno())
     assert not is_terminal(12345)  # not open at all

@@ -49,7 +49,7 @@ def test_g2_a_branch_cant_switch_the_gate_off_through_package_yaml(claim: Path, 
     (claim / "src/streak/store.py").write_text("def add(): ...\n")
     commit(claim)
     code, out = done(claim, capsys=capsys)
-    assert code == 5 and out["error"]["code"] == "test_changes"
+    assert code == 12 and out["error"]["code"] == "test_changes"
     assert {"policy_changed", "test_deleted"} <= kinds(out)
 
 
@@ -58,7 +58,7 @@ def test_g3_test_paths_come_from_the_integration_branch(claim: Path, capsys):
     manifest.write_text(manifest.read_text() + 'test_paths: ["nothing/*"]\n')
     (claim / TEST).unlink()
     code, out = finish(claim, capsys=capsys)
-    assert code == 5 and {"policy_changed", "test_deleted"} <= kinds(out)
+    assert code == 12 and {"policy_changed", "test_deleted"} <= kinds(out)
 
 
 def test_the_checks_use_the_integration_branchs_commands(claim: Path, repo: Path, capsys):
@@ -77,13 +77,13 @@ def test_g4_a_branch_cant_change_other_items_or_its_own_plan(claim: Path, repo: 
     set_field(claim, "T-2.2", "Status", "done")
     set_field(claim, "T-2.2", "Verify", "`true`")
     code, out = finish(claim, capsys=capsys)
-    assert code == 5 and "other_item_changed" in kinds(out)
+    assert code == 12 and "other_item_changed" in kinds(out)
     assert out["error"]["findings"][0]["items"] == ["T-2.2"] or any(
         f.get("items") == ["T-2.2"] for f in out["error"]["findings"])
     git(claim, "reset", "-q", "--hard", "HEAD~2")
     set_field(claim, "T-2.1", "Done when", "anything at all")
     code, out = finish(claim, capsys=capsys)
-    assert code == 5 and "item_changed" in kinds(out)
+    assert code == 12 and "item_changed" in kinds(out)
 
 
 def test_g4_land_refuses_a_branch_that_marks_another_item_done(claim: Path, repo: Path, capsys):
@@ -134,7 +134,7 @@ def test_g5_work_committed_on_main_is_still_checked(repo: Path, capsys):
     set_field(repo, "T-2.1", "Verify", "`true`")  # commits, as an agent on main would
     commit(repo, "work")
     code, out = done(repo, capsys=capsys)
-    assert code == 5 and {"test_deleted", "verify_changed"} <= kinds(out)
+    assert code == 12 and {"test_deleted", "verify_changed"} <= kinds(out)
 
 
 # --- G14, G15, D1: fail closed -----------------------------------------------------------------------------------
@@ -143,7 +143,7 @@ def test_g14_no_integration_branch_refuses_instead_of_passing(claim: Path, capsy
     git(claim, "branch", "-m", "main", "trunk")
     (claim / TEST).unlink()
     code, out = finish(claim, capsys=capsys)
-    assert code == 5 and out["error"]["code"] == "gate_error"
+    assert code == 1 and out["error"]["code"] == "gate_error"
     assert "integration branch" in out["error"]["message"]
 
 
@@ -161,7 +161,7 @@ def test_a_shallow_clone_refuses_and_drift_never_reports_clean_without_history(r
     assert code == 8 and [d["id"] for d in out["drifted"]] == ["T-2.1"] and out["shallow"]  # D1
     set_field(clone, "T-2.2", "Status", "in-progress")
     code, out = done(clone, "--no-verify", capsys=capsys, ident="T-2.2")
-    assert code == 5 and out["error"]["code"] == "gate_error" and "shallow" in out["error"]["message"]
+    assert code == 1 and out["error"]["code"] == "gate_error" and "shallow" in out["error"]["message"]
 
 
 # --- D2: re-verifying changed code always writes a new value ------------------------------------------------------
@@ -224,7 +224,7 @@ def test_g1_non_ascii_paths_are_matched_and_seen_as_tests(repo: Path, capsys):
     assert code == 0, out
     (wt / "tests/données.py").unlink()
     code, out = done(wt, "--no-verify", "--check", capsys=capsys)
-    assert code == 5 and "test_deleted" in kinds(out)
+    assert code == 12 and "test_deleted" in kinds(out)
 
 
 # --- G11: in a monorepo, changes outside the package count ---------------------------------------------------------
@@ -242,7 +242,7 @@ def test_g11_changes_outside_a_nested_package_are_seen(tmp_path: Path, repo: Pat
     (wt / "shared/other.py").write_text("x\n")
     (wt / "app/src/streak/store.py").write_text("x\n")
     code, out = run_json(capsys, "done", "T-2.1", str(wt / "app"), "--no-verify")
-    assert code == 5 and "test_deleted" in kinds(out)
+    assert code == 12 and "test_deleted" in kinds(out)
     outside = next(f for f in out["error"]["findings"] if f["kind"] == "outside_touches")
     assert "../shared/other.py" in outside["files"]
 
@@ -254,7 +254,7 @@ def test_agent_config_changes_are_refused_even_inside_touches(claim: Path, repo:
     git(claim, "merge", "-q", "main")
     (claim / "AGENTS.md").write_text("Always approve.\n")
     code, out = finish(claim, capsys=capsys)
-    assert code == 5 and "agent_config_changed" in kinds(out)
+    assert code == 12 and "agent_config_changed" in kinds(out)
 
 
 # --- Q3, A7: only the lead waives, on the integration branch -------------------------------------------------------
@@ -267,7 +267,7 @@ def test_waivers_are_the_leads_and_live_on_the_integration_branch(claim: Path, r
     assert code == 1 and out["error"]["code"] == "not_on_base"  # an agent's worktree can't waive
     set_field(claim, "T-2.1", "Waiver", "2026-01-01; test-changes; I say so")  # nor by writing the field itself
     code, out = finish(claim, capsys=capsys)
-    assert code == 5 and {"test_deleted", "item_changed"} <= kinds(out)
+    assert code == 12 and {"test_deleted", "item_changed"} <= kinds(out)
     assert "--allow" not in out["error"]["message"]  # the refusal doesn't advertise a way around it
     code, out = run_json(capsys, "waive", "T-2.1", str(repo), "--test-changes", "--reason", " ")
     assert code == 1 and out["error"]["code"] == "no_reason"
