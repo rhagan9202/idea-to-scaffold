@@ -74,6 +74,8 @@ ERRORS: dict[str, Code] = {
     "base_untrusted": Code("`land`: the integration branch has commits that `its` didn't record and that aren't on "
                            "the remote; a person looks, then `land --accept-base` trusts them",
                            (EXIT_NOT_LANDED,), ("integration_branch", "commits")),
+    "behind_remote": Code("`start` on the integration branch: it is behind its remote copy, so its backlog is "
+                          "stale; pull first", fields=("branch", "base", "behind")),
     "blocked": Code("`start`: a dependency isn't done", (EXIT_BLOCKED,), ("blocked_by",)),
     "check_failed": Code("`done`: a check failed", (EXIT_CHECK_FAILED,), ("checks",)),
     "claimed": Code("`start`: another branch holds the item's claim", fields=("claim",)),

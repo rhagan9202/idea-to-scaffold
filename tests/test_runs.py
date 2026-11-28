@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -33,31 +35,39 @@ def write(tmp_path: Path, text: str) -> str:
 
 # -- launch commands ---------------------------------------------------------------------------------------------
 
-def test_start_prints_headless_commands_that_keep_the_guards(repo: Path, capsys, state_home: Path):  # noqa: F811
+def test_start_writes_launchers_that_keep_the_guards(repo: Path, capsys, state_home: Path):  # noqa: F811
     code, out = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
     assert code == 0
     h = out["commands"]["headless"]
     claude, codex = h["argv"]["claude"], h["argv"]["codex"]
-    assert h["env_unset"] == list(SCRUBBED_ENV)
-    if os.name == "nt":  # no env(1): the line unsets the tokens with set, and a program drops env_unset itself
-        assert claude[0] == "claude" and all(f"set {name}=& " in h["claude"] for name in SCRUBBED_ENV)
-        assert " && claude " in h["claude"] and "cd /d " in h["claude"]
-    else:
-        assert claude[:2] == ["env", "-u"] and set(SCRUBBED_ENV) <= set(claude)
-        assert h["claude"].startswith("cd ") and " && env -u " in h["claude"]
-    cl = claude[claude.index("claude"):]
-    for flag in ("--bare", "-p", "--settings", "--json-schema", "--max-budget-usd", "--permission-prompts"):
-        assert flag in cl
-    assert cl[cl.index("--max-budget-usd") + 1] == "5"
-    assert json.loads(cl[cl.index("--json-schema") + 1]) == RESULT_SCHEMA
-    cx = codex[codex.index("codex"):]
-    assert cx[cx.index("--sandbox") + 1] == "workspace-write" and "--output-schema" in cx
-    for line in (h["claude"], h["codex"], " ".join(claude), " ".join(codex)):
-        assert "dangerously" not in line and "danger-full-access" not in line and "bypassPermissions" not in line
-    assert h["claude"].endswith(f"its done T-2.1 --result {h['result_file']}")
+    assert h["env_unset"] == list(SCRUBBED_ENV) and claude[0] == "claude" and codex[:2] == ["codex", "exec"]
+    for flag in ("-p", "--settings", "--json-schema", "--max-budget-usd", "--permission-prompts"):
+        assert flag in claude
+    assert "--bare" not in claude  # it would skip the Stop hook in --settings, and only take an API key
+    assert claude[claude.index("--setting-sources") + 1] == "user"  # not the worktree's own .claude/ settings
+    assert claude[claude.index("--max-budget-usd") + 1] == "5"
+    assert json.loads(claude[claude.index("--json-schema") + 1]) == RESULT_SCHEMA
+    assert codex[codex.index("--sandbox") + 1] == "workspace-write" and "--output-schema" in codex
+    worktree = Path(out["claim"]["worktree"]).resolve()
+    for agent in ("claude", "codex"):
+        scripts = {kind: Path(path) for kind, path in h["scripts"][agent].items()}
+        sh, ps1, cmd = (scripts[k].read_text(encoding="utf-8-sig") for k in ("sh", "ps1", "cmd"))
+        for text in (sh, ps1, cmd, " ".join(h["argv"][agent])):
+            assert "dangerously" not in text and "danger-full-access" not in text and "bypassPermissions" not in text
+        assert f"cd {shlex.quote(str(out['claim']['worktree']))} || exit 1" in sh
+        assert all(f"-u {name}" in sh for name in SCRUBBED_ENV) and all(f"'{name}'" in ps1 for name in SCRUBBED_ENV)
+        # the result file is removed first, and `its done --result` runs whatever the agent's exit status
+        run = sh.index(f"-u {SCRUBBED_ENV[-1]} {agent} ")  # the tokens are unset for the agent alone
+        assert sh.index("rm -f ") < run < sh.index("its done T-2.1 --result")
+        assert sh.rstrip().splitlines()[-1] == f"its done T-2.1 --result {shlex.quote(h['result_file'])}"
+        assert "Set-Location -LiteralPath" in ps1 and "& its done T-2.1 --result $result" in ps1
+        assert ps1.rstrip().endswith("exit $LASTEXITCODE") and str(scripts["ps1"]) in cmd
+        line = h[agent]
+        assert line == (f"powershell -NoProfile -ExecutionPolicy Bypass -File {subprocess.list2cmdline([str(scripts['ps1'])])}"
+                        if os.name == "nt" else f"sh {shlex.quote(str(scripts['sh']))}")
+        assert not scripts["sh"].resolve().is_relative_to(worktree)
 
     settings = Path(h["settings"]).resolve()
-    worktree = Path(out["claim"]["worktree"]).resolve()
     common = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
     for folder in (worktree, repo.resolve(), common):  # out of the agent's reach: not in the repo or its git folder
         assert not settings.is_relative_to(folder)
@@ -74,7 +84,8 @@ def test_budget_comes_from_package_yaml(repo: Path, capsys):  # noqa: F811
     git(repo, "commit", "-qam", "budget")
     _, out = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
     assert out["commands"]["headless"]["budget_usd"] == 1.5
-    assert "--max-budget-usd 1.5" in out["commands"]["headless"]["claude"]
+    assert "'--max-budget-usd' '1.5'" in Path(out["commands"]["headless"]["scripts"]["claude"]["ps1"]).read_text(
+        encoding="utf-8-sig")
 
 
 # -- parsing results ---------------------------------------------------------------------------------------------
@@ -160,9 +171,8 @@ def test_stats_reports_first_try_rate_refusals_and_cost(claim: Path, repo: Path,
     assert run_json(capsys, "done", "T-2.1", str(claim))[0] == 5  # refused: weakened test
     git(claim, "checkout", "--", TEST)
     path = write(tmp_path, envelope({"id": "T-2.1", "status": "done", "summary": "store"}))
-    assert run_json(capsys, "done", "T-2.1", str(claim), "--result", path)[0] == 0
-    git(claim, "add", "-A")
-    git(claim, "commit", "-qm", "feat: store")
+    code, out = run_json(capsys, "done", "T-2.1", str(claim), "--result", path)
+    assert code == 0 and out["committed"]  # its commits a headless run's work itself
     assert run_json(capsys, "land", "--dir", str(repo))[0] == 0
 
     code, out = run_json(capsys, "stats", str(repo))

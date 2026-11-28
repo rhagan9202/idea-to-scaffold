@@ -36,6 +36,7 @@ from .work import (
     _on_base_checkout,
     _refresh_mirror,
     integration_branch,
+    item_here,
     item_payload,
     remote_of,
     renumber,
@@ -252,24 +253,44 @@ def _plumb(cwd: Path, *args: str, input: bytes | None = None, env: dict[str, str
     return proc.stdout.decode("utf-8", "replace").strip()
 
 
-def apply_result(pkg: Package, ident: str | None, result_file: str, **done_options) -> dict:
-    """`its done --result FILE`: act on what a headless agent handed back. `done` runs the gate and checks as usual;
-    `blocked` or `needs_human` blocks the item with the agent's reason. Either way the run's cost and turns go to the
-    ledger. A run that ended without a result changes nothing (code `no_result`)."""
+def apply_result(pkg: Package, ident: str | None, result_file: str, *, push: bool | None = None,
+                 **done_options) -> dict:
+    """`its done --result FILE`: act on what a headless agent handed back, and close the run.
+
+    - `done` runs the gate and checks as usual. If the agent already set the item done itself (it followed the
+      playbook), its checks run again instead and its Verified mark is refreshed (`already_done`).
+    - `blocked` or `needs_human` blocks the item with the agent's reason.
+    - In the item's claim checkout, what the run left is then committed (all of it for `done`, which is what the
+      gate checked; only the planning folder for a block) and the claim branch is pushed, when the claim was pushed
+      at start, so the lead sees the result from any machine. A push that fails is reported, not an error.
+    - Every outcome, a failed or mismatched run included, goes to the ledger with the run's cost and turns. A run
+      that ended without a result changes nothing (`no_result`).
+
+    With no `ident`, the item is the checkout's own (its claim, or the only in-progress item), and a result for
+    another item is refused (`result_mismatch`) rather than trusted."""
+    expected = ident
+    if expected is None:
+        try:
+            expected = item_here(pkg, load_backlog(pkg))
+        except BacklogError:
+            expected = None
     try:
-        text = Path(result_file).read_text(encoding="utf-8")
-    except OSError as exc:
+        text = results.read_result_file(result_file)
+    except (OSError, UnicodeDecodeError) as exc:
+        if expected:
+            ledger.record(pkg, expected, "done", "bad_result")
         raise WorkError("bad_result", f"can't read the result file {result_file}: {exc}",
-                        details={"id": ident, "result_file": result_file}) from exc
+                        details={"id": expected, "result_file": result_file}) from exc
     try:
         result, run = results.parse_result(text)
     except results.ResultError as exc:
-        if ident:
-            ledger.record(pkg, ident, "done", exc.code, **exc.run)
-        raise WorkError(exc.code, str(exc), details={"id": ident, "result_file": result_file, **exc.run}) from exc
-    if ident and result["id"] != ident:
-        raise WorkError("result_mismatch", f"the result is for {result['id']}, not {ident}; nothing was marked",
-                        details={"id": ident, "result_id": result["id"], "result_file": result_file})
+        if expected:
+            ledger.record(pkg, expected, "done", exc.code, **exc.run)
+        raise WorkError(exc.code, str(exc), details={"id": expected, "result_file": result_file, **exc.run}) from exc
+    if expected and result["id"] != expected:
+        ledger.record(pkg, expected, "done", "result_mismatch", result_id=result["id"], **run)
+        raise WorkError("result_mismatch", f"the result is for {result['id']}, not {expected}; nothing was marked",
+                        details={"id": expected, "result_id": result["id"], "result_file": result_file})
     ident = result["id"]
     tampered = results.launch_changes(pkg)
     if tampered:
@@ -279,13 +300,75 @@ def apply_result(pkg: Package, ident: str | None, result_file: str, **done_optio
                         "no Stop hook or no sandbox; nothing was marked. Check the run's work by hand; its start "
                         "writes the files again", EXIT_CHECK_FAILED,
                         details={"id": ident, "files": tampered, "result_file": result_file})
+    item, _, _ = _locate(pkg, ident)
+    check_only = done_options.get("check_only", False)
     if result["status"] == "done":
-        from .work import done
-        payload = done(pkg, ident, run=run, **done_options)
+        from .work import done, verify
+        if item.status == "done" and not check_only:
+            payload = verify(pkg, ident, on_check=done_options.get("on_check"), run=run)
+            payload.update(status="done", previous_status="done", already_done=True)
+        else:
+            payload = done(pkg, ident, run=run, **done_options)
+        message = _run_message(pkg, ident, result)
     else:
         reason = f"{result['status'].replace('_', ' ')}: {result['reason'].strip()}"
         payload = block(pkg, ident, reason, run=run)
-    return {**payload, "result": result, "run": run}
+        message = f"Block {ident}\n\n{reason}"
+    out = {**payload, "result": result, "run": run}
+    if not check_only:
+        out.update(_finish_run(pkg, ident, message, everything=result["status"] == "done", push=push))
+    return out
+
+
+def _run_message(pkg: Package, ident: str, result: dict) -> str:
+    """The commit message for a headless run's work: the agent's `commit_message` if it gave one, else its summary,
+    tagged with the item as AGENTS.md asks (`... [T-n.m]`, `Refs:` its requirements)."""
+    text = (result.get("commit_message") or "").strip()
+    summary = " ".join(result["summary"].split())
+    if not text:
+        subject = summary if len(summary) <= 64 else summary[:64].rsplit(" ", 1)[0] + "..."
+        text = subject + (f"\n\n{summary}" if subject != summary else "")
+    subject, _, body = text.partition("\n")
+    if f"[{ident}]" not in subject:
+        subject = f"{subject} [{ident}]"
+    try:
+        item = next((i for i in load_backlog(pkg) if i.id == ident), None)
+    except BacklogError:
+        item = None
+    if item is not None and item.satisfies and "Refs:" not in body:
+        body = f"{body.rstrip()}\n\nRefs: {', '.join(item.satisfies)}".lstrip("\n")
+    return f"{subject}\n\n{body.strip()}\n" if body.strip() else subject + "\n"
+
+
+def _finish_run(pkg: Package, ident: str, message: str, *, everything: bool, push: bool | None) -> dict:
+    """Commit what a headless run left in the item's claim checkout, then push the claim branch. Outside the item's
+    claim (the plain flow on the integration branch), nothing is committed: the person commits there."""
+    out: dict = {"committed": None, "pushed": False}
+    if not cl.in_git(pkg.root):
+        return out
+    branch = cl.current_branch(pkg.root)
+    if branch is None or ident not in (cl.item_of_branch(branch), cl.claim_of_worktree(pkg.root)):
+        out["commit_skipped"] = "this isn't the item's claim checkout; commit the work yourself"
+        return out
+    try:
+        commit = cl.commit_all(pkg.root, message, None if everything else [str(pkg.planning_dir)])
+    except cl.GitError as exc:
+        out["commit_error"] = str(exc)
+        return out
+    out["committed"] = commit[:7] if commit else None
+    remote = remote_of(pkg)
+    if push is False or pkg.get("push_claims") is False or remote is None:
+        return out
+    if not cl.ref_exists(pkg.root, f"refs/remotes/{remote}/{branch}"):
+        out["push_skipped"] = f"the claim was never pushed to {remote}"
+        return out
+    try:
+        cl.push_branch(pkg.root, remote, branch)
+    except cl.GitError as exc:
+        out["push_error"] = str(exc)
+        return out
+    out.update(pushed=True, remote=remote, branch=branch)
+    return out
 
 
 def unblock(pkg: Package, ident: str) -> dict:

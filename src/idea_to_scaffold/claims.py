@@ -112,6 +112,28 @@ def push_claim(cwd: Path, remote: str, ident: str, branch: str) -> None:
         raise GitError(f"couldn't push {branch} to {remote}: {err}")
 
 
+def commit_all(cwd: Path, message: str, paths: list[str] | None = None) -> str | None:
+    """Stage every change in the checkout (only those under `paths`, if given), new files included, and commit them.
+    Returns the new commit, or None when there was nothing to commit. Ignored files stay out, as in `git add -A`."""
+    spec = ["--", *paths] if paths else []
+    proc = gitx.run(cwd, "add", "--all", *spec)
+    if proc.returncode != 0:
+        raise GitError(f"couldn't stage the changes: {proc.stderr.strip()}")
+    if gitx.run(cwd, "diff", "--cached", "--quiet", *spec).returncode == 0:
+        return None
+    proc = gitx.run(cwd, "commit", "--quiet", "-m", message, *spec)
+    if proc.returncode != 0:
+        raise GitError(f"couldn't commit: {proc.stderr.strip() or proc.stdout.strip()}")
+    return git(cwd, "rev-parse", "HEAD")
+
+
+def push_branch(cwd: Path, remote: str, branch: str) -> None:
+    """Push a branch's new commits to the remote. Never forced: a branch someone else moved there is refused."""
+    proc = gitx.run(cwd, "push", "--quiet", remote, f"refs/heads/{branch}:refs/heads/{branch}")
+    if proc.returncode != 0:
+        raise GitError(f"couldn't push {branch} to {remote}: {proc.stderr.strip()}")
+
+
 def conflicting_files(cwd: Path, ours: str, theirs: str) -> list[str] | None:
     """Files that would conflict if `theirs` were merged into `ours` (a dry run with `git merge-tree`, which
     changes nothing). [] means it merges cleanly; None means git can't tell (git older than 2.38)."""
@@ -348,7 +370,7 @@ def release_claim(
         if not local and not entry and not (remote and pushed):
             if force:
                 return {"id": ident, "deleted_branches": [], "removed_worktree": None, "deleted_remote_branches": [],
-                        "remote_branches": remote_claim_branches(run_dir, ident), "released": False}
+                        "remote_branches": pushed, "released": False}
             hint = f" (it has pushed branches: {', '.join(pushed)}; add --remote)" if pushed else ""
             raise GitError(f"{ident} has no local claim{hint}")
 
@@ -396,8 +418,22 @@ def release_claim(
             f":refs/heads/{branch}")
         deleted_remote.append(name)
     return {"id": ident, "deleted_branches": deleted, "removed_worktree": removed_worktree,
-            "deleted_remote_branches": deleted_remote, "remote_branches": remote_claim_branches(run_dir, ident),
+            "deleted_remote_branches": deleted_remote, "remote_branches": still_pushed(run_dir, ident),
             "released": True}
+
+
+def still_pushed(cwd: Path, ident: str) -> list[str]:
+    """The item's pushed claim branches that are really still on the remote. A remote-tracking ref for a branch
+    someone deleted there (`land --release` on another machine) is stale: it is removed, not reported."""
+    out = []
+    for name in remote_claim_branches(cwd, ident):
+        try:
+            if _refresh_remote(cwd, name) is None:
+                continue
+        except GitError:
+            pass  # the remote can't be reached: report what we last saw
+        out.append(name)
+    return out
 
 
 def claim_entry(cwd: Path, ident: str) -> dict:

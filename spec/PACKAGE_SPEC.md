@@ -652,6 +652,7 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `bad_status` | 1 | the status isn't a backlog status, or the item's status doesn't allow the command | `status` |
 | `bad_title` | 1 | `propose`: a proposal needs a title |  |
 | `base_untrusted` | 7 | `land`: the integration branch has commits that `its` didn't record and that aren't on the remote; a person looks, then `land --accept-base` trusts them | `integration_branch`, `commits` |
+| `behind_remote` | 1 | `start` on the integration branch: it is behind its remote copy, so its backlog is stale; pull first | `branch`, `base`, `behind` |
 | `blocked` | 4 | `start`: a dependency isn't done | `blocked_by` |
 | `check_failed` | 5 | `done`: a check failed | `checks` |
 | `claimed` | 1 | `start`: another branch holds the item's claim | `claim` |

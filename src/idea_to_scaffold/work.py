@@ -112,6 +112,7 @@ class View:
     base: str | None = None          # the integration branch's ref, if this is a git repo that has one
     branch: str | None = None        # the checked-out branch
     claims: list[cl.Claim] = field(default_factory=list)  # active claims (unmerged claim branches), orphans included
+    behind: int = 0                  # on the integration branch: commits its remote copy has that it lacks
 
     @property
     def claimed(self) -> set[str]:
@@ -175,7 +176,11 @@ def stale_note(stale: dict | None) -> str | None:
 
 def view(pkg: Package, base: str | None = None) -> View:
     """Read the backlog for readiness. On the integration branch, or outside git, that is the working tree. On any
-    other branch it is the integration branch's copy, so a dependency counts as done only once it is merged."""
+    other branch it is the integration branch's copy, so a dependency counts as done only once it is merged.
+
+    On the integration branch when it is only behind its remote copy (another machine landed work, and this one
+    fetched but didn't pull), it is the remote copy too, with `behind` set: what landed there is done, and nothing
+    is offered or claimed again from the stale copy."""
     items = load_backlog(pkg)
     if not cl.in_git(pkg.root):
         return View(items, "working tree")
@@ -183,12 +188,16 @@ def view(pkg: Package, base: str | None = None) -> View:
     base_ref = cl.resolve_base(pkg.root, name, remote_of(pkg) or "origin")
     branch = cl.current_branch(pkg.root)
     source = "working tree"
-    if base_ref is not None and branch not in (name, base_ref):
+    behind = 0
+    if base_ref is not None and branch == name and base_ref != name:
+        behind = cl.ahead(pkg.root, base_ref, name)
+    if base_ref is not None and (branch not in (name, base_ref) or behind):
         text = cl.read_at(pkg.root, base_ref, pkg.path_of(BACKLOG))
         if text is not None:
             items, source = parse_backlog(text), base_ref
     claims = cl.active_claims(cl.list_claims(pkg.root, _closed(items), {i.id for i in items}))
-    return View(items, source, base_ref, branch, claims)
+    return View(items, source, base_ref, branch, claims, behind)
+
 
 
 def _closed(items: list[BacklogItem]) -> set[str]:
@@ -256,6 +265,7 @@ def next_payload(pkg: Package, *, base: str | None = None, parallel: int | None 
         "schema": SCHEMA,
         "ok": True,
         "source": v.source,
+        "behind": v.behind or None,
         "item": item_payload(pkg, first, items) if first else None,
         "reason": None if first else _nothing_reason(items, ready, waiting, v),
         "ready": [item_payload(pkg, i, items) for i in ready],
@@ -539,6 +549,11 @@ def _start(
         )
     forced = bool(waiting) or item.status != "todo" or bool(clash)
     if not claiming:
+        if v.behind:
+            raise WorkError("behind_remote", f"{v.branch} is {v.behind} commit{'s' if v.behind != 1 else ''} behind "
+                            f"{v.base}, so this backlog is stale; pull first (git pull --ff-only), or claim the item "
+                            f"from {v.base} with its start {ident} --worktree",
+                            details={"id": ident, "branch": v.branch, "base": v.base, "behind": v.behind})
         try:
             previous = set_status(pkg, ident, "in-progress")
         except BacklogError as exc:
@@ -1020,15 +1035,16 @@ def mark_verified(pkg: Package, ident: str, inspection: gate.Inspection, *, skip
     return value
 
 
-def verify(pkg: Package, ident: str, *, on_check: Callable[[Check], None] | None = None) -> dict:
+def verify(pkg: Package, ident: str, *, on_check: Callable[[Check], None] | None = None,
+           run: dict | None = None) -> dict:
     """`its verify`: re-run a done item's checks on the current code and, if they pass, refresh its Verified mark, so
-    `its drift` stops reporting changes that have now been checked."""
+    `its drift` stops reporting changes that have now been checked. `run` is a headless run's report, for the ledger."""
     items = load_backlog(pkg)
     item = _find(items, ident)
     if item.status != "done":
         raise WorkError("bad_status", f"{ident} is {item.status}; only a done item can be re-verified (use its done)",
                         details={"id": ident, "status": item.status})
-    result = done(pkg, ident, check_only=True, on_check=on_check)
+    result = done(pkg, ident, check_only=True, on_check=on_check, run=run)
     try:
         with _locked(pkg):
             previous = item.get("Verified") or None

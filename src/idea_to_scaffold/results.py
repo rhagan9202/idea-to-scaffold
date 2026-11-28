@@ -1,24 +1,30 @@
-"""Headless runs: the launch commands `its start` prints, and the result an agent hands back to `its done --result`.
+"""Headless runs: the launcher scripts `its start` writes, and the result an agent hands back to `its done --result`.
 
-`its` never launches an agent. It prints commands that do it safely:
+`its` never launches an agent. It writes a launcher script per item and agent and prints the line that runs it:
 
-- **The Stop hook runs anyway.** `claude --bare -p` (soon the default for `-p`) skips the project's hooks, so the
-  command passes `--settings` with a settings file `its` writes to the repository's state folder, outside the
-  repository and its git folder (`locking.state_dir`), holding the Stop hook and the sandbox settings. Claude's
-  sandbox doesn't let the agent write there, and `its done --result` refuses a run whose launch files no longer
-  match what `its` wrote (`launch_settings_changed`).
+- **The Stop hook runs anyway.** The Claude line passes `--settings` with a settings file `its` writes to the
+  repository's state folder, outside the repository and its git folder (`locking.state_dir`), holding the Stop hook
+  and the sandbox settings, and `--setting-sources user`, so the worktree's own `.claude/` settings (which an agent
+  can edit) aren't read. It doesn't pass `--bare`, which skips every hook in settings, `--settings` included, and
+  only takes an API key. Claude's sandbox doesn't let the agent write the state folder, and `its done --result`
+  refuses a run whose launch files no longer match what `its` wrote (`launch_settings_changed`).
 - **The sandbox is on and credentials stay out.** Claude runs with its OS sandbox enabled (network denied by
   default); Codex runs with `--sandbox workspace-write`. Push and registry tokens (`GH_TOKEN`, `GITHUB_TOKEN`, ...)
-  are unset for the agent, since `its` does every push itself. Nothing printed skips permissions.
+  are unset for the agent alone, since `its` does every push itself. Nothing printed skips permissions.
 - **A budget, and no prompts that would hang.** `--max-budget-usd` (`launch.budget_usd` in package.yaml, default
   5) and `--permission-prompts none` for Claude.
-- **A structured result.** The agent ends with one JSON object matching RESULT_SCHEMA (`--json-schema` for
-  Claude, `--output-schema` for Codex), saved to a result file. `its done --result FILE` reads it: `done` runs the
-  gate and checks as usual, `blocked` or `needs_human` runs `its block` with the agent's reason, and the run's cost
-  and turns go to the run ledger.
+- **A structured result, always handed back.** The agent ends with one JSON object matching RESULT_SCHEMA
+  (`--json-schema` for Claude, `--output-schema` for Codex), saved to a result file the script deletes first. The
+  script then runs `its done --result FILE` whatever the agent's exit status, so a failed or over-budget run is in
+  the ledger too, and exits with its status. `done` runs the gate and checks, `blocked` or `needs_human` runs
+  `its block` with the agent's reason, and either way the claim branch is committed and pushed (`edits.apply_result`).
+- **One script per shell.** `T-n.m-claude.sh` for sh; `T-n.m-claude.ps1` for PowerShell, which also sets the
+  argument passing that keeps the JSON schema's quotes on Windows PowerShell 5.1 and on PowerShell 7; and
+  `T-n.m-claude.cmd`, which runs the PowerShell one, for cmd. The same for Codex.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -39,6 +45,8 @@ RESULT_SCHEMA = {
         "reason": {"type": "string", "description": "for blocked or needs_human: what stops the work"},
         "files_changed": {"type": "array", "items": {"type": "string"}},
         "tests_run": {"type": "array", "items": {"type": "string"}},
+        "commit_message": {"type": "string",
+                           "description": "for done: the commit message, in the convention AGENTS.md gives"},
     },
 }
 SCRUBBED_ENV = ("GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "GL_TOKEN", "BITBUCKET_TOKEN", "NPM_TOKEN",
@@ -73,9 +81,13 @@ def budget(pkg: Package) -> float:
 
 
 def prompt(ident: str) -> str:
-    return (f"Read AGENTS.md, then follow docs/playbooks/implement-task.md for {ident}. Read the code and reproduce "
-            f"the problem before you edit. Run `its done {ident} --check` before you finish, and if you can't "
-            f"finish honestly, run `its block {ident} --reason '...'`. End with the result JSON.")
+    """The task an unattended agent gets. It matches the playbook's headless note: check with `--check`, and leave
+    the status and the commit to `its done --result`. It holds no quote, percent sign or shell operator, so it reads
+    the same in every launcher."""
+    return (f"Read AGENTS.md, then follow docs/playbooks/implement-task.md for {ident}. Run `its done {ident} --check` "
+            f"until it passes. Do not set the status or commit: when you end, `its done --result` checks the work "
+            "again, marks the item done and commits it. If you cannot finish honestly, never weaken a test: end with "
+            "status blocked or needs_human and say why in reason. End with the result JSON.")
 
 
 HOOK_TIMEOUT = 900  # seconds: the test suite runs inside the Stop hook
@@ -132,39 +144,131 @@ def launch_changes(pkg: Package) -> list[str]:
     return changed
 
 
+def _sh(arg: str) -> str:
+    return shlex.quote(arg)
+
+
+def _ps(arg: str) -> str:
+    return "'" + arg.replace("'", "''") + "'"
+
+
+def _cmd_path(path: str) -> str:
+    return '"' + path.replace("%", "%%") + '"'
+
+
+def _sh_script(ident: str, agent: str, argv: list[str], worktree: str | None, result: str, stdout: bool) -> str:
+    lines = ["#!/bin/sh", f"# its: unattended {AGENT_NAMES[agent]} run for {ident}. `its start` writes it again each time.",
+             f"command -v {argv[0]} >/dev/null 2>&1 || {{ echo '{argv[0]} is not installed' >&2; exit 127; }}"]
+    if worktree:
+        lines.append(f"cd {_sh(worktree)} || exit 1")
+    lines.append(f"rm -f {_sh(result)}")
+    unset = " ".join(f"-u {name}" for name in SCRUBBED_ENV)
+    run = f"env {unset} " + " ".join(_sh(a) for a in argv)
+    lines.append(run + (f" > {_sh(result)}" if stdout else ""))
+    lines.append(f"its done {ident} --result {_sh(result)}")
+    return "\n".join(lines) + "\n"
+
+
+def _ps_script(ident: str, agent: str, argv: list[str], worktree: str | None, result: str, stdout: bool) -> str:
+    """PowerShell: Windows PowerShell 5.1 passes a native argument's double quotes unescaped, and PowerShell 7.3+
+    does so for a .cmd shim (npm's `claude.cmd`) unless told otherwise, so the JSON schema would lose its quotes.
+    7.3+ is set to Standard passing; on older versions the script escapes them itself."""
+    names = ", ".join(_ps(n) for n in SCRUBBED_ENV)
+    args = []
+    for a in argv[1:]:
+        args.append("$schema" if a.startswith("{") else _ps(a))
+    lines = [f"# its: unattended {AGENT_NAMES[agent]} run for {ident}. `its start` writes it again each time.",
+             "$ErrorActionPreference = 'Stop'",
+             "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+             f"if (-not (Get-Command {argv[0]} -ErrorAction SilentlyContinue)) {{ "
+             f"[Console]::Error.WriteLine('{argv[0]} is not installed'); exit 127 }}"]
+    if worktree:
+        lines.append(f"Set-Location -LiteralPath {_ps(worktree)}")
+    lines += [f"$result = {_ps(result)}",
+              "if (Test-Path -LiteralPath $result) { Remove-Item -LiteralPath $result -Force }"]
+    schema = next((a for a in argv if a.startswith("{")), None)
+    if schema is not None:
+        lines += [f"$schema = {_ps(schema)}",
+                  "if ($PSVersionTable.PSVersion -ge [version]'7.3') { $PSNativeCommandArgumentPassing = 'Standard' } "
+                  "else { $schema = $schema.Replace('\"', '\\\"') }"]
+    lines += ["$saved = @{}",
+              f"foreach ($name in @({names})) {{",
+              "    $saved[$name] = [Environment]::GetEnvironmentVariable($name)",
+              "    [Environment]::SetEnvironmentVariable($name, $null)",
+              "}",
+              "$ErrorActionPreference = 'Continue'",
+              "try {",
+              f"    & {argv[0]} {' '.join(args)}" + (" | Out-File -LiteralPath $result -Encoding utf8" if stdout else ""),
+              "} finally {",
+              "    foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }",
+              "}",
+              f"& its done {ident} --result $result",
+              "exit $LASTEXITCODE"]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _cmd_script(ps1: Path) -> str:
+    return "\r\n".join(["@echo off", f"powershell -NoProfile -ExecutionPolicy Bypass -File {_cmd_path(str(ps1))}",
+                         "exit /b %ERRORLEVEL%"]) + "\r\n"
+
+
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+
+
+def run_line(script: dict[str, str]) -> str:
+    """The line that runs a launcher on this platform. The PowerShell line works from cmd and PowerShell alike."""
+    if os.name == "nt":
+        return f"powershell -NoProfile -ExecutionPolicy Bypass -File {subprocess.list2cmdline([script['ps1']])}"
+    return f"sh {_sh(script['sh'])}"
+
+
 def headless_commands(pkg: Package, ident: str, worktree: str | None) -> dict | None:
-    """The unattended commands for Claude Code and Codex, as shell lines and as argv. None outside git."""
+    """Write the unattended launchers for Claude Code and Codex, and return the lines that run them, plus the same
+    commands as argv for a program to run without a shell. None outside git."""
     files = agent_files(pkg)
     if files is None:
         return None
     files["results"].mkdir(parents=True, exist_ok=True)
-    result = files["results"] / f"{ident}-result.json"
+    result = str(files["results"] / f"{ident}-result.json")
     task = prompt(ident)
     spend = budget(pkg)
-    claude = ["claude", "--bare", "-p", task, "--settings", str(files["settings"]), "--output-format", "json",
-              "--json-schema", json.dumps(RESULT_SCHEMA, separators=(",", ":")), "--max-budget-usd", f"{spend:g}",
-              "--permission-mode", "acceptEdits", "--permission-prompts", "none"]
-    codex = ["codex", "exec", "--sandbox", "workspace-write", "--output-schema", str(files["schema"]),
-             "-o", str(result), task]
-    cd = f"{cd_command(worktree)} && " if worktree else ""
-    if os.name == "nt":
-        # cmd.exe has no env(1): the line unsets the tokens first (`set NAME=`, joined with &, which binds more
-        # loosely than &&), and a program that runs argv drops env_unset itself
-        start = "".join(f"set {name}=& " for name in SCRUBBED_ENV) + cd
-        env_prefix: list[str] = []
-    else:
-        start = cd + "env " + " ".join(f"-u {name}" for name in SCRUBBED_ENV) + " "
-        env_prefix = ["env", *[x for name in SCRUBBED_ENV for x in ("-u", name)]]
-    done = f"its done {ident} --result {_quote(str(result))}"
-    line = " ".join(_quote(a) for a in claude)
-    return {
-        "claude": f"{start}{line} > {_quote(str(result))} && {done}",
-        "codex": f"{start}{' '.join(_quote(a) for a in codex)} && {done}",
-        "argv": {"claude": env_prefix + claude, "codex": env_prefix + codex},
-        "cwd": worktree, "result_file": str(result), "settings": str(files["settings"]),
-        "schema": str(files["schema"]), "budget_usd": spend, "env_unset": list(SCRUBBED_ENV),
-        "then": done,
+    argv = {
+        "claude": ["claude", "-p", task, "--setting-sources", "user", "--settings", str(files["settings"]),
+                   "--output-format", "json", "--json-schema", json.dumps(RESULT_SCHEMA, separators=(",", ":")),
+                   "--max-budget-usd", f"{spend:g}", "--permission-mode", "acceptEdits",
+                   "--permission-prompts", "none"],
+        "codex": ["codex", "exec", "--sandbox", "workspace-write", "--output-schema", str(files["schema"]),
+                  "-o", result, task],
     }
+    folder = files["settings"].parent
+    scripts: dict[str, dict[str, str]] = {}
+    for agent, args in argv.items():
+        stdout = agent == "claude"  # claude prints its result; codex writes it with -o
+        paths = {kind: folder / f"{ident}-{agent}.{kind}" for kind in ("sh", "ps1", "cmd")}
+        paths["sh"].write_text(_sh_script(ident, agent, args, worktree, result, stdout), encoding="utf-8",
+                               newline="\n")
+        paths["ps1"].write_text("\ufeff" + _ps_script(ident, agent, args, worktree, result, stdout),
+                                encoding="utf-8", newline="")
+        paths["cmd"].write_text(_cmd_script(paths["ps1"]), encoding="utf-8", newline="")
+        with contextlib.suppress(OSError):
+            paths["sh"].chmod(0o755)
+        scripts[agent] = {kind: str(path) for kind, path in paths.items()}
+    done = f"its done {ident} --result {_quote(result)}"
+    return {
+        "claude": run_line(scripts["claude"]), "codex": run_line(scripts["codex"]), "scripts": scripts,
+        "argv": argv, "cwd": worktree, "result_file": result, "settings": str(files["settings"]),
+        "schema": str(files["schema"]), "budget_usd": spend, "env_unset": list(SCRUBBED_ENV),
+        "then": done, "then_argv": ["its", "done", ident, "--result", result],
+    }
+
+
+def read_result_file(path: str) -> str:
+    """A result file's text. PowerShell 5.1 writes UTF-8 with a byte order mark, and its `>` writes UTF-16, so both
+    are read as well as plain UTF-8."""
+    data = Path(path).read_bytes()
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16")
+    return data.decode("utf-8-sig")
 
 
 def parse_result(text: str) -> tuple[dict, dict]:

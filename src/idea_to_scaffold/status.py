@@ -34,7 +34,7 @@ def status_payload(pkg: Package, base: str | None = None) -> dict:
     nxt = next_payload(pkg, base=base)
     out: dict = {
         "schema": SCHEMA, "ok": True, "project": pkg.name or pkg.slug or pkg.root.name, "source": v.source,
-        "branch": v.branch, "base": v.base, "counts": dict(sorted(counts.items())),
+        "branch": v.branch, "base": v.base, "behind": v.behind or None, "counts": dict(sorted(counts.items())),
         "next": nxt["item"]["id"] if nxt["item"] else None, "next_reason": nxt["reason"],
         "ready": [i["id"] for i in nxt["ready"]],
         "blocked": nxt["blocked"],
@@ -76,6 +76,9 @@ def render(payload: dict) -> list[str]:
     lines = [f"{payload['project']}{where}: {summary or 'no items'}"]
     if payload["source"] != "working tree":
         lines.append(f"  (backlog read from {payload['source']})")
+    if payload.get("behind"):
+        lines.append(f"  {payload['branch']} is {payload['behind']} commit(s) behind {payload['base']}: "
+                     "pull before starting work here (git pull --ff-only)")
     if payload["claims"]:
         lines.append("claims:")
         for c in payload["claims"]:

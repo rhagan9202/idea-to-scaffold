@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -368,6 +369,9 @@ def cmd_next(args: argparse.Namespace) -> int:
     note = stale_note(payload["stale_remote"])
     if note and not args.json:
         print(note, file=sys.stderr)
+    if payload["behind"] and not args.json:
+        print(f"note: {payload['source']} is ahead of this checkout by {payload['behind']} commit(s); the backlog is "
+              f"read from there. Pull before starting work here: git pull --ff-only", file=sys.stderr)
     nothing = EXIT_COMPLETE if payload["reason"] == "complete" else EXIT_NOTHING_READY
     if args.parallel is not None:
         code = 0 if payload["parallel"] else nothing
@@ -477,10 +481,12 @@ def cmd_start(args: argparse.Namespace) -> int:
         print(f"  {payload['commands']['codex']}")
         headless = payload["commands"].get("headless")
         if headless:
-            print(f"or unattended (sandboxed, budget ${headless['budget_usd']:g}, push tokens unset; it ends with "
-                  "`its done --result`):")
+            print(f"or unattended (sandboxed, budget ${headless['budget_usd']:g}, push tokens unset; the script ends "
+                  "with `its done --result`, which commits the work and pushes the branch):")
             print(f"  {headless['claude']}")
             print(f"  {headless['codex']}")
+            if os.name == "nt":
+                print(f"  (from cmd you can also run {headless['scripts']['claude']['cmd']})")
     else:
         print(f"{_item_line(item)} is now in-progress (was {payload['previous_status']})")
     if item["verify"]:
@@ -603,10 +609,15 @@ def cmd_done(args: argparse.Namespace) -> int:
     options = {"verify": not args.no_verify, "check_only": args.check, "on_check": announce}
     try:
         if args.result:
-            payload = apply_result(pkg, args.id, args.result, **options)
+            payload = apply_result(pkg, args.id, args.result, push=False if args.no_push else None, **options)
             if payload["status"] == "blocked":
-                args.commit = True  # nobody is at an unattended run to commit the block
-                return _edited(args, payload, pkg)
+                if not args.json:
+                    print(f"{payload['id']} is now blocked (was {payload['previous_status']})")
+                    print(f"  reason: {payload['reason']}")
+                    _print_run_commit(payload)
+                    return 0
+                _emit(payload)
+                return 0
         else:
             payload = done(pkg, args.id, **options)
     except WorkError as err:
@@ -630,15 +641,38 @@ def cmd_done(args: argparse.Namespace) -> int:
     if payload.get("checked_only"):
         print(f"{payload['id']} passes its checks (status unchanged: {payload['status']})")
         return 0
+    if payload.get("already_done"):
+        print(f"{payload['id']} was already done; its checks pass again and its Verified mark is {payload['verified']}")
+        _print_run_commit(payload)
+        return 0
     print(f"{payload['id']} is now done (was {payload['previous_status']})")
     if payload["manual_verify"]:
         print(f"  check by hand: {payload['manual_verify']}")
     if payload["now_ready"]:
         when = "ready once this branch is merged" if payload["merge_needed"] else "now ready"
         print(f"  {when}: {', '.join(payload['now_ready'])}")
-    elif payload["merge_needed"]:
+    elif payload["merge_needed"] and "committed" not in payload:
         print("  commit, then merge this branch; dependent items become ready once it is merged")
+    _print_run_commit(payload)
     return 0
+
+
+def _print_run_commit(payload: dict) -> None:
+    """What `done --result` did with the run's work: the commit and the push."""
+    if "committed" not in payload:
+        return
+    if payload.get("commit_error"):
+        print(f"  warning: the work isn't committed: {payload['commit_error']}")
+    elif payload.get("commit_skipped"):
+        print(f"  {payload['commit_skipped']}")
+    elif payload["committed"]:
+        print(f"  committed {payload['committed']}")
+    if payload.get("pushed"):
+        print(f"  pushed {payload['branch']} to {payload['remote']}; land it from the integration branch: its land --fetch")
+    elif payload.get("push_error"):
+        print(f"  warning: the branch isn't pushed: {payload['push_error']}")
+    elif payload.get("push_skipped"):
+        print(f"  not pushed: {payload['push_skipped']}")
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
@@ -1196,7 +1230,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-verify", action="store_true", help="don't run Verify, test and lint first")
     s.add_argument("--check", action="store_true", help="run every check but leave the status alone (exit 5 if any fails)")
     s.add_argument("--result", metavar="FILE",
-                   help="act on a headless agent's result JSON: done runs the checks, blocked or needs_human blocks it")
+                   help="act on a headless agent's result JSON: done runs the checks, blocked or needs_human blocks "
+                        "it; in a claim checkout the work is then committed and the branch pushed")
+    s.add_argument("--no-push", action="store_true", help="with --result: commit, but don't push the claim branch")
     s.add_argument("--allow-test-changes", **allow)
     s.add_argument("--allow-outside-touches", **allow)
     s.add_argument("--json", action="store_true", help=json_help)
