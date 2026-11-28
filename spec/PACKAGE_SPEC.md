@@ -125,6 +125,9 @@ test_paths: ["tests/**"]           # optional; globs for test files the done gat
 gate:                              # optional; the done gate's settings (section 17)
   acceptance_path: "tests/acceptance/"  # held-out tests (per item in <path>/<ID>/): hidden from agents, changes refused
   require_review: false            # true: `its land` needs an approving `its review` of what it merges (section 17)
+  max_unreviewed: 3                # optional; `next` and `start` warn once this many finished items wait for the lead
+  max_attempts: 2                  # tries an item gets before `its brief --retry` refuses (default 2)
+  stale_days: 3                    # `its status` calls a claim with no commit for this long stale (default 3)
   checks:                          # the mode of the checks that can be relaxed (section 17); `its scaffold`
     tests_pass_on_parent: enforce  # writes enforce for each warn-first check. enforce, warn or off
   env: ["DATABASE_URL"]            # variables the checks get beyond the allow-list (section 17)
@@ -385,6 +388,7 @@ list, so there is one place to look and one place to update.
 | Verify | no | a command in backticks, a test ID, or `manual: ...`; how to check the item is done |
 | Touches | no | comma-separated paths or globs relative to the repo root; used to keep parallel items apart |
 | Kind | no | `test-only` for an item that only adds tests for behaviour that already exists: red on parent is skipped for it (section 17) |
+| Risk | no | `low`, `normal` (the default) or `high`: a `high` item lands only with an approving review of exactly what merges (section 17); `its validate` warns on any other value |
 | Verified | written by `its done` and `its verify` | the date the checks passed, the integration-branch commit the work was built on, and a hash of its Touches files (`2026-11-27, base 1a2b3c4d5e, tree 0a1b2c3d4e5f`) |
 | Override | written by `its done` when a person waives the gate | the date, the waived finding kinds and the reason |
 | Blocked / Dropped | written by `its block` and `its drop` | why |
@@ -511,7 +515,8 @@ into a full one by adding the missing docs and changing `profile`.
 
 `its backlog`, `next`, `show`, `start`, `done`, `claims`, `release`,
 `renumber`, `land`, `propose`, `promote`, `block`, `unblock`, `drop`,
-`set-status`, `waive`, `review`, `hooks`, `drift`, `verify`, `status`, `stats`, `gate-audit`, `link` and `validate` take `--json`. Output is one
+`set-status`, `waive`, `review`, `hooks`, `drift`, `verify`, `status`, `stats`, `gate-audit`, `adopt`, `brief`,
+`gate`, `link` and `validate` take `--json`. Output is one
 JSON object on stdout, so agents never parse text or stderr, even when `its` hits a bug (`internal_error`) or the
 command line is wrong (`usage`, exit 2). The global `-C DIR` runs any command as if from `DIR`: it is put in front
 of the command's relative folder arguments.
@@ -536,7 +541,10 @@ the file's own line endings.
   items. `stale_remote` is `{remote, fetched_at}` when there is a remote that
   wasn't fetched in the last hour (`fetched_at` is `null` if never), since
   claims made on other machines may then be missing; `null` otherwise, and
-  always with `--fetch`. `status` has it too.
+  always with `--fetch`. `status` has it too. `warnings` holds `wip_limit`
+  (`{kind, limit, items, message}`) once the finished items waiting for the lead
+  (done on their claim branch, or an adopted claim with a candidate) reach
+  `gate.max_unreviewed`; `start` returns the same `warnings`. Neither refuses.
 - `backlog` adds `proposals`: the items in `planning/proposals/`.
 - `show`: `{id, kind, file, anchor, line, text, referenced_by}`, plus `item`
   for a backlog ID. `referenced_by` lists the docs that mention the ID: the
@@ -549,7 +557,8 @@ the file's own line endings.
   cwd, result_file, settings, schema, budget_usd, env_unset, then, then_argv}`
   gives the unattended commands of section 17: `claude` and `codex` are the
   line that runs the agent's launcher script), and `claim_held_here: true` when
-  the claim is already this checkout's. A new worktree adds `setup`: the setup
+  the claim is already this checkout's, and `run`, the ID of the run the start
+  began (section 17). A new worktree adds `setup`: the setup
   command's check result plus `lockfiles` (what it wrote that the gate lets
   through), or `null` with `--no-setup`.
   `pushed` and `remote` say whether the claim branch was pushed, and
@@ -557,7 +566,8 @@ the file's own line endings.
   `lost_to_others` lists the items `start --next` passed over because another
   machine claimed them first; a lost race for a named item is the `claimed`
   error, with the winner's `claim: {id, branch, remote}` when it is known. A claim is
-  `{id, branch, remote_only, worktree, agent, started, finished, orphaned}`;
+  `{id, branch, remote_only, worktree, agent, started, finished, orphaned, candidates}`
+  (`candidates` is the adopted branches, below);
   `remote_only` means the branch exists only as a remote-tracking branch (another machine's claim), and
   `orphaned` means its ID isn't in the integration branch's backlog.
 - `claims`: `{base, claims}`, where each claim adds `ahead` (commits not on
@@ -569,18 +579,28 @@ the file's own line endings.
   integration branch) and `state`: `working`, `blocked`, `ready_to_land`,
   `conflicts`, `waiting`, `no_commits` (marked done with nothing to land),
   `finished` or `orphaned`. In `status`, a done claim also has `review`
-  (`null`, or `{label, required, current, passed, verdict, at, unmet,
+  (`null`, or `{label, required, current, passed, outcome, verdict, at, unmet,
   blocking}`), and `state` is `changes_requested` or `not_reviewed` when the
-  review would keep `its land` from taking it.
+  review would keep `its land` from taking it. An adopted claim's
+  `candidates` are `[{name, ref, remote, fetch, pr?, tip, agent, adopted,
+  ahead, exists, last_commit, conflicts_with_base, review}]`; its `state`
+  comes from them (`no_commits` until one has commits, `conflicts` when every
+  one with commits conflicts), and its `review` is that of the first
+  candidate its review doesn't hold back.
 - `status`: `{project, source, branch, base, counts, next, next_reason, ready,
   blocked, in_progress, proposals: [{id, title, file}], claims,
-  ready_to_land, to_release, drift: {drifted, unknown}, warnings}`. `claims` are the
-  active ones, with the fields above; `blocked` adds a `branch` for an item
+  ready_to_land, to_release, drift: {drifted, unknown}, warnings, attention}`. `claims` are the
+  active ones, with the fields above plus `attention` (their inbox group) and,
+  for a stale one, `idle_days`, sorted most urgent first; `attention` is `{needs_you,
+  ready_to_land, running, stale, done}`, each a list of IDs: `needs_you` is a
+  claim that is blocked, whose review requested changes or is required, or that
+  conflicts, plus items blocked without a claim; `stale` is a working claim with
+  no commit for `gate.stale_days`; `blocked` adds a `branch` for an item
   blocked on its claim branch; `in_progress` lists items in progress without
   a claim; `drift` is `null` outside git or when it can't be computed.
   `warnings` is `[{kind, message, ...}]`: `main_moved` (with `commits`) when
   the integration branch has commits nothing vouches for, which `its land`
-  would refuse (section 17). `release`: `{id, released, deleted_branches,
+  would refuse (section 17), and `wip_limit`, as in `next`. `release`: `{id, released, deleted_branches,
   removed_worktree, deleted_remote_branches, remote_branches}`. `link`: `{check,
   changed}`; `link --check` with changes is the `link_outdated` error. `renumber`: `{dry_run, renumbered:
   [{from, to}], files, proposals_moved}`.
@@ -598,8 +618,27 @@ the file's own line endings.
   `outside_touches` with `findings`, `changes_requested` or `not_reviewed`
   with `review`, `gate_error`, `base_moved`, `base_untrusted` (the integration
   branch moved during the land), `checkout_blocked`, `git_error`, `waiting`
-  with `blocked_by`, `no_claim`, `no_commits`, `not_done` or `dry_run`) and
-  `message`.
+  with `blocked_by`, `no_claim`, `no_commits`, `not_done`, `not_chosen` (an
+  adopted claim's other candidate, after one landed) or `dry_run`) and
+  `message`. An adopted candidate's entry has `branch` (the candidate's
+  name), `adopted: true`, `claim_branch` and `red_on_parent`.
+- `adopt`: `{id, title, claim, created, candidate, added, candidates, pushed,
+  push_error, remote, overlaps, run, commands: {land, review, release}}`;
+  `created` says whether this adoption made the claim, `added` whether the
+  candidate is new (adopting the same ref again changes nothing).
+- `brief`: `{id, title, source, brief, retry, checks: [{name, command}],
+  held_out, review_required, issue, commands}`. `brief` is the text; `retry` is
+  `null`, or with `--retry` `{attempt, max_attempts, after, outcome, branch,
+  head, failing_checks, failing_tests, held_out_failed, findings, messages}`
+  (`failing_tests` leaves out held-out tests, which `held_out_failed` counts);
+  `issue` is `null`, or with `--github` `{number, url, action: created | updated
+  | commented}`.
+- `gate`: `{ref, head, base, branch, id, found_by, passed, reason, message,
+  findings, warnings, checks, held_out, red_on_parent, policy_source}`, plus
+  `held_out_failed` when held-out tests failed. `found_by` is how the item was
+  found: `--id`, `claim_branch`, `adopted`, `branch_name`, `backlog` or
+  `commit_tags`; with none, `id` is `null` and `reason` is `no_item`. `reason`
+  is otherwise `null` (passed), `check_failed`, or a gate refusal's code.
 - `validate`: `{valid, ready, errors, warnings}`, plus `trace` with
   `--trace`: `{checked, criteria, requirements: [{id, title, file, criteria:
   [{ac, text, tests: [{file, line}], by_requirement}]}], uncovered: [{id, ac,
@@ -613,12 +652,18 @@ the file's own line endings.
 - `review`: `{id, item, requirements: [{id, text, file}], base, merge_base,
   verify_source, touches_checked, findings, changed_files: [{status, path,
   old_path}], diff, diff_truncated, omitted, prompt, reply_schema, digest,
-  commands}`; `digest` identifies the content the prompt shows. `review ID
-  --reply`: `{id, passed, verdict, min_severity, blocking, unmet, missing,
-  findings, requirements, digest, current, recorded}`: `missing` lists the
-  item's requirements the reply left out (they count as unmet), `current`
-  whether the content is still what the prompt showed, and `recorded` whether
-  the verdict was saved for `its land`. `stats` adds `reviews` (verdicts by
+  reviewed_branch, commands}`; `digest` identifies the content the prompt
+  shows, and `reviewed_branch` names the candidate reviewed (`null` for the
+  claim's own branch or this checkout). `review ID --reply`: `{id, passed,
+  outcome, verdict, min_severity, blocking, unmet, missing, findings,
+  requirements, evidence, digest, current, recorded, reviewed_branch}`:
+  `outcome` is `approved`, `changes_requested` or `inconclusive`; `missing`
+  lists the item's requirements the reply left out (they count as unmet);
+  `evidence` is `[{kind, of, command, reproduced, why, exit_code?, output?}]`,
+  one per `not_met` requirement and `blocker` finding, and each of those has
+  `reproduced` and, when it didn't, `downgraded_from`; `current` says whether
+  the content is still what the prompt showed, and `recorded` whether the
+  verdict was saved for `its land`. `stats` adds `reviews` (verdicts by
   outcome). `hooks`: `{command,
   written, unchanged}`.
 - A gate finding is `{kind, message, ...}`, where `kind` is `verify_changed`,
@@ -653,7 +698,11 @@ the file's own line endings.
   `drift` then reports as `unknown` with reason `not_verified`). `verify_source` is where the Verify
   command was read (the integration branch's ref, or `working tree`);
   `findings` are the done gate's findings that were allowed. With `--check`:
-  `{id, status, checks, ..., checked_only: true}`, and nothing is written. Checks are the
+  `{id, status, checks, ..., checked_only: true}`, and nothing is written. `attempt` is the
+  attempt's number in the current run (section 17), and a failed `done`'s error
+  has `retry: {attempt, max_attempts, retries_left, failing_checks,
+  failing_tests, command}` (`command` is `its brief --retry ID` while a retry
+  is left, else `null`). Checks are the
   item's `Verify` command, then `commands.test` and `commands.lint`, run from
   the repo root; they run only in a scaffolded repo, and `--no-verify` skips
   them. `Verify` is run only when its whole value is one backticked command;
@@ -1081,11 +1130,14 @@ or Codex in each; it never launches an agent itself.
   lead's own choice.
 - **Review and hooks.** `its review <ID>` prints an evidence bundle for a second
   agent: the item, the text of each requirement it satisfies, the gate's
-  findings and the diff, with instructions to review once, only the diff, and
-  answer with one JSON object (`its review --schema`): `{verdict: approve |
-  changes_requested, requirements: [{id, status: met | not_met | cant_tell,
-  evidence}], findings: [{severity: blocker | major | minor, file, line,
-  message}]}`. The author's own account is left out, since it sways a
+  findings and the diff, with instructions to review the change once (reading
+  the repository and running its tests as it needs, and reporting only
+  problems the change has or causes) and answer with one JSON object (`its
+  review --schema`): `{verdict: approve | changes_requested, requirements:
+  [{id, status: met | not_met | cant_tell, evidence, repro}], findings:
+  [{severity: blocker | major | minor, file, line, message, repro}]}`. A
+  `repro` is `{command, files}`: a command, and any files to add first (a
+  test that shows the problem), that fails because of the problem. The author's own account is left out, since it sways a
   reviewer: the backlog's diff and notes files (`HANDOFF.md`, `NOTES.md`,
   `PROGRESS.md`, `SUMMARY.md`, `WORKLOG.md`, `CHANGES.md`, `.its/`) are listed
   but not shown (`omitted`). `its review ID --reply FILE` reads the answer
@@ -1094,20 +1146,45 @@ or Codex in each; it never launches an agent itself.
   it when the verdict is approve, every requirement the item satisfies is in
   the reply and met (one left out is `missing`, and counts as unmet), and no
   finding is at or above `--min-severity` (default `major`); otherwise it exits
-  5. A reply that doesn't fit the schema is `bad_review`.
+  5. A reply that doesn't fit the schema is `bad_review`. The answer's
+  `outcome` is `approved`, `changes_requested` (a finding at or above the
+  cut-off, or a requirement `not_met`) or `inconclusive` (nothing was shown
+  wrong, but the reply doesn't approve: a requirement it can't tell, or a
+  verdict of changes_requested with nothing behind it).
+  - **Runnable evidence.** A reviewer that reads the repository finds real
+    problems and also reports ones that aren't there, so the two claims that
+    can stop a change, a `not_met` requirement and a `blocker` finding, have to
+    reproduce. `--reply` runs each one's repro in a throwaway worktree of
+    exactly the content reviewed (the reviewed ref, or for a checkout its
+    HEAD plus its uncommitted and untracked changes), after `commands.setup`,
+    with the gate's allow-listed environment and time limit: it writes the
+    repro's files (a path outside the repository is refused), runs the
+    command, and resets the worktree for the next. A repro that fails there
+    stands (`reproduced: true`). One that passes, can't run (exit 126, 127 or
+    9009), runs out of time, or is missing is downgraded, `not_met` to
+    `cant_tell` and `blocker` to `major`, with `downgraded_from`; the answer's
+    `evidence` says what happened to each. No language model filters the
+    findings: the command decides. The commands are the reviewer's, so they
+    get no more than the branch's own tests already get. `--no-evidence` runs
+    none, so every such claim is downgraded.
   - **Recorded verdicts.** `its review ID` notes a digest of the change it put
     in the prompt (each changed file's git blob id, without the backlog and the
     author's notes, so the same content gives the same digest in a worktree,
     on a branch and in the commit land merges). `--reply` records the verdict
-    against that digest in the state folder (`reviews.json`) and the ledger.
-    `its land` computes the digest of what it would merge: a changes-requested
-    verdict on that content refuses it (`changes_requested`), and with
-    `--require-review`, or `gate.require_review: true` in the integration
-    branch's `package.yaml`, only content with an approving verdict lands
-    (`not_reviewed`); a landed merge commit says so (`Reviewed: approved DATE
+    against that digest in the state folder (`reviews.json`, the newest 20 per
+    item) and the ledger. `its land` computes the digest of what it would
+    merge: a verdict whose outcome is `changes_requested` on that content
+    refuses it (`changes_requested`), and with `--require-review`,
+    `gate.require_review: true` in the integration branch's `package.yaml`,
+    or `Risk: high` on the item there, only content with an approving verdict
+    lands (`not_reviewed`; an inconclusive one doesn't count); a landed merge commit says so (`Reviewed: approved DATE
     (DIGEST)`). Any later change to a reviewed file, or a new file, makes the
-    verdict stale: it neither blocks nor approves. `its status` shows each done
-    claim's review. The record is the lead's, like the claims: it isn't
+    verdict stale: it neither blocks nor approves. An adopted claim's review is
+    of one candidate: `--branch NAME` names it (a candidate's name, or any
+    branch here; `no_branch` otherwise), else the candidate checked out here,
+    else the first with commits. Each candidate keeps its own verdict, and the
+    payload says which was reviewed (`reviewed_branch`). `its status` shows
+    each done claim's review, and each candidate's. The record is the lead's, like the claims: it isn't
     signed, so an agent that can write the state folder could forge one. The item and requirement text come from the
   integration branch (a requirement the branch changed is flagged
   `changed_on_branch`), and the diff sits in a fence longer than any run of
@@ -1150,12 +1227,33 @@ or Codex in each; it never launches an agent itself.
   fast-forwards from the remote first, `--push` pushes the result, `--release`
   releases each landed claim, `--dry-run` reports what would land. `its claims`
   shows each claim's conflicts with the base and with other claims ahead of
-  time.
+  time. An adopted claim (*Vendor dispatchers*) has candidates instead of a
+  finished branch: nobody ran `its done` on them, so land runs the whole done
+  gate on each in turn, in the order they were adopted (the scope and tamper
+  checks, the item's Verify and the checks on the merged tree, the item's own
+  held-out tests, and red on parent), lands the first that passes with the
+  item set done in the merge commit (`Adopted: NAME`), and leaves the others
+  (`not_chosen`). So when several agents tried one item, the one that passes
+  the tests it couldn't see is the one kept.
+- **The lead's inbox.** `its status` groups claims by what they need from
+  the lead, most urgent first (`attention`): `needs_you` (blocked, a review
+  that requested changes or is required and missing, conflicts; unclaimed
+  blocked items too), `ready_to_land`, `running`, `stale` (no commit for
+  `gate.stale_days`, default 3; `idle_days`) and `done` (release them). An
+  adopted claim lists its candidates, each with its review. Agents finish
+  work faster than a person can review it, so `gate.max_unreviewed` on the
+  integration branch is a work-in-progress limit: once that many finished
+  items wait for the lead, `its next`, `its start` and `its status` warn
+  (`wip_limit`, with the items). Nothing is refused.
 - **The trust boundary.** An agent works in a linked worktree of the lead's
   repository, and `its land` runs as the lead, so the agent's work must not
-  become the lead's actions. `its land` is where the rules are enforced;
-  `its done` in the agent's checkout is a pre-check, and a pull request
-  merged without `its land` skips the gate. The plain flow, where an agent
+  become the lead's actions. `its land`, and `its gate` in a pull request's
+  CI, are where the rules are enforced, and the only gates that cover every
+  surface an agent works on: `its done`, the Stop hook and a launcher's `done
+  --result` run in the agent's checkout and are pre-checks it can skip, and a
+  vendor's cloud agent runs none of them. A pull request merged without `its
+  land` is gated only when its CI runs `its gate` and the merge requires that
+  check to pass. The plain flow, where an agent
   works on the integration branch itself, isn't enforced: nothing stands
   between that agent and the branch.
   - **Git runs no repository code.** Every git command `its` runs sets
@@ -1244,20 +1342,91 @@ or Codex in each; it never launches an agent itself.
     declined) is `no_result`; none of them change the item, and all are
     recorded. `done` returns `result` and `run: {agent, cost_usd, turns,
     duration_ms, session_id}`.
-- **The run ledger.** `start`, `done`, `block`, `land`, `review --reply`
-  and the Stop hook each append `{ts, item, event, outcome, ...}` to `runs/<ID>.jsonl` in the
-  state folder: shared by every worktree on the
+- **Vendor dispatchers.** Every major coding-agent vendor runs agents in
+  parallel itself (Claude Code's background sessions and Projects, GitHub's
+  issue assignment to Copilot, Claude or Codex, Codex's cloud queue), with
+  dashboards, budgets and isolation `its` doesn't try to match. Those agents
+  push branches under their own names (`claude/...`, `copilot/...`,
+  `codex/...`) and usually never run `its`. `its` doesn't launch or watch
+  them: it writes the task, takes in their branches and gates them.
+  - **`its brief ID`** writes the task for an agent that never runs `its`:
+    the item, the text of each requirement it satisfies, its Touches and
+    Verify, the check commands, that held-out tests exist (not where they
+    are, or what they test), whether a review is required, and the rules
+    (work on a branch `<your-prefix>/ID-slug`, change only the Touches, tests
+    included, tag each commit `[ID]`, leave the backlog alone, end with `its
+    done ID --check` if `its` is installed, else say why it is blocked). The
+    item and the rules come from the integration branch. A `done` or
+    `dropped` item is `bad_status`. `--github` puts the brief on the
+    repository's issue with `gh`: created as `[ID] title`, or updated when it
+    exists (the number `its` recorded, else a search); `github_failed` without
+    `gh` or when it fails. It returns `{id, title, brief, retry, checks,
+    held_out, review_required, issue, commands}` and records a `brief` event.
+  - **`its adopt REF ID`** claims the item as `its start --branch` does (a
+    claim branch from the integration branch, pushed) and records REF as a
+    candidate: a pull request (`pr:12`, `#12` or its URL, fetched into
+    `refs/its/pull/12`), a branch, a remote branch or any ref (`no_branch`
+    when it isn't there). Adopting more branches for the item adds candidates,
+    so several agents can try one item; *Landing* keeps the first that
+    passes.
+  - **`its gate [REF] [DIR]`** runs the done gate on any branch or pull
+    request, for CI, so a pull request shows red before anyone reviews it:
+    the scope and tamper checks, the item's Verify, the test and lint
+    commands, the item's held-out tests and red on parent, with the rules of
+    the base (`--base`, else `GITHUB_BASE_REF`, else the integration branch,
+    read from the remote when there is no local copy; `no_base`), in a
+    throwaway worktree at REF (default `HEAD`), so the checkout is never
+    changed. The item is `--id`, else the first of: a claim branch, a branch
+    adopted here, a T-n.m in the branch name (`GITHUB_HEAD_REF` in CI), the
+    item whose status the branch changes, or `[T-n.m]` in its commit
+    messages; several is `which_item` (with `candidates`). A branch that
+    names no item passes with `reason: no_item`, unless `--require-item`. A
+    failure exits 7. The Python stack's CI has a `gate` job that runs it on
+    pull requests (`actions/checkout` with `fetch-depth: 0`).
+  - **One targeted retry.** A failed `done` (not `--check`), `gate` or
+    `land` of the item is an attempt: one per agent run (its `session_id`)
+    or per commit, so running `its done` again on the same work, or landing
+    the same commit twice, is the same attempt, and a held-out test failing
+    on the integration branch itself (`base_failing`) isn't the item's. A
+    failure's payload has `retry: {attempt, max_attempts, retries_left,
+    failing_checks, failing_tests, command}`. `its brief --retry ID` writes
+    a short brief of only what failed in the last attempt (the failing
+    checks, the failing tests by name, held-out ones only counted as
+    `held_out_failed`, and the first messages), not the whole brief again; with `--github`
+    it is a comment on the issue. There is nothing to retry before a failure
+    (`nothing_to_retry`), and after `gate.max_attempts` failed attempts
+    (default 2) the item needs a person (`out_of_attempts`, with `attempts`
+    and `max_attempts`).
+  - **Locally**, the same flow is `its start ID --worktree`, then a
+    background agent (`claude --bg`) in the worktree with the brief or the
+    command `its start` prints; the Stop hook and `its done` run there too.
+- **The run ledger.** `start`, `adopt`, `brief`, `done`, `block`, `gate`,
+  `land`, `review --reply` and the Stop hook each append `{ts, item, event,
+  outcome, run, ...}` to `runs/<ID>.jsonl` in the state folder: shared by every worktree on the
   machine, never committed and never in a diff, so recording can't trip the
   gate (an `.its/` folder in the checkout would be agent configuration) or
   conflict at land. `done` records its outcome (`passed`, `check_failed`,
   `test_changes`, `outside_touches`, `gate_error`, `no_result`), the finding
-  kinds, the failed checks, the Touches count and what the agent reported.
+  kinds, the failed checks, the Touches count and what the agent reported; a
+  failure also records the commit (`head`), its attempt number, the failing
+  checks and tests (`failing_checks`, `failing_tests`, up to 20) and the
+  first messages, which is what `its brief --retry` reads. `land` records the
+  branch and commit it tried, and marks a `base_failing` refusal
+  `collateral`. A run ID (`run`, also in `start`'s and `adopt`'s payloads)
+  links the start or adopt of an item to its results, done and land; a new
+  start or a claiming adopt begins a new run, and attempts count within it.
   `its stats` reads it: `{items: [{id, attempts, passed, failed, blocked,
-  landed, cost_usd, first_try, touches, agents}], records, attempted,
-  first_try, first_try_rate, refusals, land, reviews, cost_usd, cost_p90_usd,
-  by_size, by_agent, ledger}`. A `done --check` (and so the Stop hook) is
-  recorded but isn't an attempt. Nothing in the ledger goes into an agent's
-  prompt.
+  landed, cost_usd, first_try, touches, agents, agent, started_by, runs}],
+  records, attempted, first_try, first_try_rate, first_try_interval,
+  comparable_from, refusals, land, reviews, cost_usd, cost_p90_usd, by_size,
+  by_agent, ledger}`. An item's `agent` is the one recorded with its first
+  attempt, else the one that started or adopted it, so a lead's `its start` and a Claude session on the
+  same item count once, as Claude's. Each rate in `by_size` and `by_agent`
+  has a 95% Wilson `interval`, and `comparable` is false below 20 attempts
+  (`comparable_from`): too few to rank agents or sizes by. A `done --check`
+  (and so the Stop hook) is recorded but isn't an attempt. What goes back
+  into an agent's prompt from the ledger is only a retry brief's failure
+  details.
 - **Sizing.** `its validate --sizing` adds `sizing: {checked, items,
   warnings: [{id, kind, message}], flagged}` for todo and proposed items:
   `too_many_touches` (more than 3), `too_many_requirements` (more than 2
