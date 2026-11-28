@@ -74,14 +74,16 @@ def argv(*args: str) -> list[str]:
 
 
 def run(cwd: Path | str, *args: str, input: str | bytes | None = None, timeout: float | None = None,
-        binary: bool = False) -> subprocess.CompletedProcess:
-    """Run one git command in `cwd`. Never raises for a failure: check `returncode` (TIMED_OUT for a timeout)."""
+        binary: bool = False, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """Run one git command in `cwd`. Never raises for a failure: check `returncode` (TIMED_OUT for a timeout).
+    `extra_env` is set on top of the cleaned environment (`its`'s own, such as a temporary GIT_INDEX_FILE)."""
     if timeout is None:
         timeout = NETWORK_TIMEOUT if args and args[0] in NETWORK_COMMANDS else LOCAL_TIMEOUT
     command = argv(*args)
     text = {} if binary else {"text": True, "encoding": "utf-8", "errors": "replace"}
     try:
-        return subprocess.run(command, cwd=cwd, capture_output=True, env=env(), timeout=timeout, input=input,
+        return subprocess.run(command, cwd=cwd, capture_output=True, env={**env(), **(extra_env or {})},
+                              timeout=timeout, input=input,
                               stdin=None if input is not None else subprocess.DEVNULL, **text)
     except subprocess.TimeoutExpired:
         empty = b"" if binary else ""

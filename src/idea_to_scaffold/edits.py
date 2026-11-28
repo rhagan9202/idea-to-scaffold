@@ -7,6 +7,7 @@ locked, predictable edit. Each returns a dict in the versioned JSON contract (sp
 from __future__ import annotations
 
 import re
+import tempfile
 from datetime import date
 from pathlib import Path
 
@@ -197,25 +198,59 @@ def waive(pkg: Package, ident: str, groups: list[str], reason: str) -> dict:
         raise WorkError("bad_status", f"{ident} is {item.status}; there is nothing left to waive",
                         details={"id": ident, "status": item.status})
     backlog = pkg.path_of(BACKLOG)
-    if gitx.out(pkg.root, "status", "--porcelain", "--", str(backlog), check=False):
-        raise WorkError("dirty", f"{shown(pkg, pkg.rel(backlog))} has uncommitted changes; commit or stash them "
-                        "first, so the waiver's commit holds only the waiver", details={"id": ident})
+    if gitx.out(pkg.root, "diff", "--cached", "--name-only", "--", str(backlog), check=False):
+        raise WorkError("dirty", f"{shown(pkg, pkg.rel(backlog))} has staged changes; commit or unstage them first",
+                        details={"id": ident})
     waiver = Waiver(date.today().isoformat(), chosen, reason)
     before = gitx.out(pkg.root, "rev-parse", "HEAD", check=False)
     try:
         with _locked(pkg):
-            set_field(pkg, ident, WAIVER_FIELD, waiver.render(), add=True, apart=True)
-            cl.git(pkg.root, "commit", "--quiet", "-m", f"Waive {', '.join(chosen)} for {ident}\n\n{reason}", "--",
-                   str(backlog))
+            commit = _commit_waiver(pkg, ident, waiver, f"Waive {', '.join(chosen)} for {ident}\n\n{reason}")
+            set_field(pkg, ident, WAIVER_FIELD, waiver.render(), add=True, apart=True)  # the working tree too
+            gitx.run(pkg.root, "reset", "--quiet", "HEAD", "--", str(backlog))  # and the index
     except BacklogError as exc:
         raise WorkError("bad_backlog", str(exc), details={"id": ident}) from exc
     except cl.GitError as exc:
-        raise WorkError("git_error", f"the waiver was written but couldn't be committed: {exc}",
-                        details={"id": ident}) from exc
-    trusted = trust.record(pkg.root, base, "HEAD", after=before or None, remote=remote_of(pkg))
+        raise WorkError("git_error", f"the waiver couldn't be committed: {exc}", details={"id": ident}) from exc
+    trust.note_waiver(pkg.root, base, commit)
+    trusted = trust.record(pkg.root, base, commit, after=before or None, remote=remote_of(pkg))
     _refresh_mirror(pkg)
     return {"schema": SCHEMA, "ok": True, "id": ident, "waiver": waiver.to_dict(),
-            "committed": gitx.out(pkg.root, "rev-parse", "--short", "HEAD", check=False), "trusted": trusted}
+            "committed": commit[:7], "trusted": trusted}
+
+
+def _commit_waiver(pkg: Package, ident: str, waiver: Waiver, message: str) -> str:
+    """Commit HEAD's backlog with the waiver added, and nothing else: uncommitted work in the checkout (on the plain
+    flow, the agent's) stays out of the commit `its` vouches for. Built in a temporary index, then the branch is
+    moved to it only if it hasn't moved meanwhile. Returns the new commit."""
+    root = pkg.root
+    top = cl.toplevel(root)
+    rel = Path(pkg.path_of(BACKLOG)).resolve().relative_to(top.resolve()).as_posix()
+    head = cl.git(root, "rev-parse", "HEAD")
+    branch = cl.git(root, "symbolic-ref", "HEAD")
+    old = gitx.show(top, f"HEAD:{rel}")
+    if old is None:
+        raise cl.GitError(f"{rel} isn't committed on {branch}")
+    mode = (cl.git(top, "ls-tree", "HEAD", "--", rel).split() or ["100644"])[0]
+    with tempfile.TemporaryDirectory(prefix="its-waive-") as scratch:
+        copy = Path(scratch) / "backlog.md"
+        copy.write_bytes(old)
+        set_field(pkg, ident, WAIVER_FIELD, waiver.render(), add=True, apart=True, path=copy)
+        index = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
+        blob = _plumb(top, "hash-object", "-w", "--stdin", input=copy.read_bytes())
+        _plumb(top, "read-tree", "HEAD", env=index)
+        _plumb(top, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{rel}", env=index)
+        tree = _plumb(top, "write-tree", env=index)
+    commit = _plumb(top, "commit-tree", tree, "-p", head, "-m", message)
+    _plumb(top, "update-ref", "-m", "its waive", branch, commit, head)
+    return commit
+
+
+def _plumb(cwd: Path, *args: str, input: bytes | None = None, env: dict[str, str] | None = None) -> str:
+    proc = gitx.run(cwd, *args, input=input, binary=True, extra_env=env)
+    if proc.returncode != 0:
+        raise cl.GitError(proc.stderr.decode("utf-8", "replace").strip() or f"git {args[0]} failed")
+    return proc.stdout.decode("utf-8", "replace").strip()
 
 
 def apply_result(pkg: Package, ident: str | None, result_file: str, **done_options) -> dict:

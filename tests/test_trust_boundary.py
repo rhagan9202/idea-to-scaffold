@@ -280,3 +280,31 @@ def test_rewritten_launch_settings_refuse_the_result(claim: Path, repo: Path, tm
     code, out = run_json(capsys, "done", "T-2.1", str(claim), "--result", str(result))
     assert code == 5 and out["error"]["code"] == "launch_settings_changed"
     assert status_line(claim, "T-2.1", "Status").endswith("todo")
+
+
+def test_a_waiver_on_the_plain_flow_counts_from_the_waive_on(repo: Path, capsys):  # noqa: F811
+    assert main(["start", "T-2.1", str(repo)]) == 0
+    (repo / "tests/test_smoke.py").unlink()
+    (repo / "src/streak/store.py").write_text("x = 1\n")
+    code, out = run_json(capsys, "done", "T-2.1", str(repo), "--no-verify")
+    assert code == 5 and "test_deleted" in kinds(out)
+    waive(repo, "T-2.2", "outside-touches", reason="another item's waiver")  # not a change T-2.1's work made
+    waive(repo, "T-2.1", "test-changes", reason="the smoke test is replaced")
+    code, out = run_json(capsys, "done", "T-2.1", str(repo), "--no-verify")
+    assert code == 0 and out["override"]["waived"] == ["test_deleted"], out
+
+
+# --- A8: test configuration hidden from git still counts ---------------------------------------------------------
+
+def test_a8_a_conftest_hidden_through_info_exclude_is_found(claim: Path, capsys):  # noqa: F811
+    exclude = common_dir(claim) / "info" / "exclude"
+    exclude.parent.mkdir(exist_ok=True)
+    exclude.write_text(exclude.read_text() + "\nconftest.py\n" if exclude.exists() else "conftest.py\n")
+    (claim / "tests/conftest.py").write_text("collect_ignore = ['test_store.py']\n")
+    (claim / ".venv/lib/site-packages").mkdir(parents=True)
+    (claim / ".venv/lib/site-packages/conftest.py").write_text("")  # an installed package's: left alone
+    assert "conftest" not in git(claim, "status", "--porcelain")  # git doesn't show it
+    code, out = finish(claim, capsys=capsys)
+    assert code == 5 and "test_config_changed" in kinds(out)
+    hidden = [f for f in out["error"]["findings"] if f.get("hidden")]
+    assert [f["file"] for f in hidden] == ["tests/conftest.py"]

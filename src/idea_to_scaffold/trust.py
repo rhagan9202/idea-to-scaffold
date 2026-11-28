@@ -30,6 +30,7 @@ from . import gitx
 from .locking import state_dir
 
 FILE = "trust.json"
+WAIVERS = "#waivers"  # the key suffix for the commits its waive made
 LIMIT = 200  # tips kept per branch, newest last
 LIST_LIMIT = 20
 
@@ -78,6 +79,22 @@ def untrusted(cwd: Path, branch: str, ref: str = "HEAD", remote: str | None = No
     return lines
 
 
+def note_waiver(cwd: Path, branch: str, commit: str) -> None:
+    """Remember a commit `its waive` made on `branch`. It vouches for nothing behind it, unlike a tip: on the plain
+    flow the agent's own commits sit below it. Best effort."""
+    _update(cwd, f"{branch}{WAIVERS}", commit)
+
+
+def last_waiver(cwd: Path, branch: str, since: str, ref: str = "HEAD", look: int = 20) -> str | None:
+    """The newest commit `its waive` made on `branch` that is on `ref` and not behind `since` (an item's start on
+    the plain flow, where the agent commits on the integration branch itself). Only the newest `look` are tried."""
+    for commit in reversed(tips(cwd, f"{branch}{WAIVERS}")[-look:]):
+        if gitx.ok(cwd, "merge-base", "--is-ancestor", commit, ref) and gitx.ok(
+                cwd, "merge-base", "--is-ancestor", since, commit):
+            return commit
+    return None
+
+
 def record(cwd: Path, branch: str, ref: str = "HEAD", *, after: str | None = None,
            remote: str | None = None) -> bool:
     """Trust `ref` (and everything behind it) on `branch`. With `after`, the tip before `its` made the commit, only
@@ -91,9 +108,16 @@ def record(cwd: Path, branch: str, ref: str = "HEAD", *, after: str | None = Non
         left = untrusted(cwd, branch, after, remote)
         if left:  # None (nothing recorded yet) is first use: trusted
             return False
+    return _update(cwd, branch, commit)
+
+
+def _update(cwd: Path, key: str, commit: str) -> bool:
+    path = _file(cwd)
+    if path is None:
+        return False
     data = _load(path)
-    known = [t for t in data.get(branch, []) if t != commit] + [commit]
-    data[branch] = known[-LIMIT:]
+    known = [t for t in data.get(key, []) if t != commit] + [commit]
+    data[key] = known[-LIMIT:]
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_name(f".{FILE}.{os.getpid()}")

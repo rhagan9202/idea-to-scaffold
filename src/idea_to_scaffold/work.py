@@ -23,7 +23,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from . import claims as cl
-from . import gate, gitx, ledger, results
+from . import gate, gitx, ledger, results, trust
 from .backlog import (
     BACKLOG,
     BacklogError,
@@ -793,8 +793,9 @@ def gate_target(pkg: Package, ident: str) -> tuple[str | None, str | None]:
 def inspect_item(pkg: Package, ident: str) -> gate.Inspection:
     """Run the gate's comparison for an item, refusing (never passing) when git can't answer."""
     ref, fork = gate_target(pkg, ident)
+    waiver_ref = trust.last_waiver(pkg.root, integration_branch(pkg), fork) if fork else None
     try:
-        return gate.inspect(pkg, ident, ref, fork=fork)
+        return gate.inspect(pkg, ident, ref, fork=fork, waiver_ref=waiver_ref)
     except gate.GateError as exc:
         raise WorkError("gate_error", f"{ident} can't be checked: {exc}", EXIT_CHECK_FAILED, {"id": ident}) from exc
 
