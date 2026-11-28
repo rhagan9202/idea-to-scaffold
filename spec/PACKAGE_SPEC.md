@@ -754,6 +754,7 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `gate_error` | 1 | `done`, `review`, `gate`: the gate couldn't compare the branch (git couldn't answer, or the branch is set up wrong), so nothing passed |  |
 | `git_error` | 1 | a git command failed |  |
 | `github_failed` | 1 | `brief --github`: the GitHub CLI (`gh`) isn't installed, isn't signed in, or failed |  |
+| `import_failed` | 1 | `import`: the export can't be read, or conflicts with files in the package |  |
 | `incomplete` | 1 | `promote`: the item has no Done when or Touches | `missing` |
 | `internal_error` | 1 | a bug in `its`; the message says what to report | `version` |
 | `launch_settings_changed` | 12 | `done --result`: the headless launch files were changed during the run, so it may have had no Stop hook or sandbox; nothing was marked | `files`, `result_file` |
@@ -768,6 +769,7 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `no_result` | 1 | `done --result`: the agent's run ended without a result; nothing was marked | `result_file` |
 | `no_status` | 1 | `done`: the item has no Status field |  |
 | `no_waiver_group` | 1 | `waive`: name what is waived (`--test-changes`, `--outside-touches`, `--dependencies`) |  |
+| `not_empty` | 1 | `new`: the folder exists and isn't empty |  |
 | `not_found` | 1 | no such ID, or a file `its` was given can't be read | `mentioned_in` |
 | `not_git` | 1 | the command needs a git repository |  |
 | `not_integration_branch` | 1 | `land`, `renumber`: run it on the integration branch | `branch`, `integration_branch` |
@@ -785,6 +787,7 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `placeholder` | 1 | the item has a placeholder ID; `its promote` gives it a permanent one |  |
 | `push_failed` | 11 | `land --push`: the branches landed locally, but the push failed | `landed`, `skipped` |
 | `result_mismatch` | 1 | `done --result`: the result is for another item | `result_id`, `result_file` |
+| `scaffold_failed` | 1 | `scaffold`: the package can't be loaded or scaffolded (not ready, or the target is in the way) |  |
 | `status_changed` | 1 | `done`: the item's status changed while its checks ran (a `block`, say), and that change is kept | `status`, `was` |
 | `test_changes` | 12 | `done`, `gate`: the done gate refused the branch's test changes (tests, test config, or how the item is verified); the lead waives them with `its waive <ID> --test-changes` | `findings`, `warnings` |
 | `usage` | 2 | the command line is wrong |  |

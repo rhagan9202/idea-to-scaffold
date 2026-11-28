@@ -18,31 +18,15 @@ from . import claims as cl
 from . import gate, gitx, trust
 from .backlog import load_proposals
 from .contract import SCHEMA, WorkError
+from .drift import drift
 from .package import Package
 from .review import claim_review
 from .tips import claims_payload
 from .view import integration_branch, next_payload, remote_of, shown, view
 
-STATE_LABELS = {
-    "ready_to_land": "ready to land",
-    "blocked": "blocked",
-    "working": "working",
-    "changes_requested": "done, but its review requested changes",
-    "not_reviewed": "done, waiting for an approving review (gate.require_review)",
-    "conflicts": "done, but conflicts with the integration branch",
-    "waiting": "done, waiting on dependencies",
-    "no_commits": "done, but no commits yet",
-    "finished": "finished: release it",
-    "orphaned": "orphaned: not in the backlog, release it",
-}
-
-
 REVIEWED = ("ready_to_land", "waiting", "conflicts")  # done on the branch, so a review can count for it
 ATTENTION = ("needs_you", "ready_to_land", "running", "stale", "done")  # the inbox's groups, most urgent first
 NEEDS_YOU = ("blocked", "changes_requested", "not_reviewed", "conflicts")
-SECTION_TITLES = {"needs_you": "needs you", "ready_to_land": "ready to land (its land)", "running": "running",
-                  "stale": "stale (no commit for a while: check on it, or its release it)",
-                  "done": "done (its release <ID>)"}
 
 
 def _attention(claim: dict, stale_days: int, now: datetime) -> str:
@@ -120,106 +104,9 @@ def status_payload(pkg: Package, base: str | None = None) -> dict:
                 "kind": "main_moved", "commits": left,
                 "message": f"{name} has {len(left)} commit(s) that its didn't make and that aren't pushed; its land "
                            "refuses until you look at them and run its land --accept-base"})
-        from .drift import drift  # drift imports work, so import it late
         try:
             d = drift(pkg)
             out["drift"] = {"drifted": [x["id"] for x in d["drifted"]], "unknown": [x["id"] for x in d["unknown"]]}
         except WorkError:
             out["drift"] = None
     return out
-
-
-def render(payload: dict) -> list[str]:
-    counts = payload["counts"]
-    order = ["done", "in-progress", "blocked", "todo", "proposed", "dropped"]
-    summary = ", ".join(f"{counts[k]} {k}" for k in order + sorted(set(counts) - set(order)) if counts.get(k))
-    where = f" on {payload['branch']}" if payload["branch"] else ""
-    lines = [f"{payload['project']}{where}: {summary or 'no items'}"]
-    if payload["source"] != "working tree":
-        lines.append(f"  (backlog read from {payload['source']})")
-    if payload.get("behind"):
-        lines.append(f"  {payload['branch']} is {payload['behind']} commit(s) behind {payload['base']}: "
-                     "pull before starting work here (git pull --ff-only)")
-    unclaimed_blocked = [b for b in payload["blocked"] if "branch" not in b]
-    for section in ATTENTION:
-        group = [c for c in payload["claims"] if c.get("attention", "running") == section]
-        extra = unclaimed_blocked if section == "needs_you" else []
-        if not group and not extra:
-            continue
-        lines.append(f"{SECTION_TITLES[section]}:")
-        for c in group:
-            lines += _claim_lines(c)
-        for b in extra:
-            lines.append(f"  {b['id']:<8} blocked" + (f": {b['reason']}" if b["reason"] else ""))
-    if payload["in_progress"]:
-        lines.append(f"in progress here: {', '.join(payload['in_progress'])}")
-    if payload["next"]:
-        others = [i for i in payload["ready"] if i != payload["next"]]
-        lines.append(f"next: its start {payload['next']} --worktree" + (f"  (also ready: {', '.join(others)})"
-                                                                         if others else ""))
-    elif payload["next_reason"] == "complete":
-        lines.append("every item is done")
-    if payload["to_release"]:
-        lines.append(f"done, release: {', '.join(payload['to_release'])}  (its release <ID>)")
-    if payload["proposals"]:
-        lines.append(f"proposals: {', '.join(p['id'] for p in payload['proposals'])}  (its renumber)")
-    for w in payload.get("warnings", []):
-        lines.append(f"warning: {w['message']}")
-        lines += [f"  {c}" for c in w.get("commits", [])]
-    drift = payload["drift"]
-    if drift and drift["drifted"]:
-        lines.append(f"drifted: {', '.join(drift['drifted'])}  (its drift; its verify --drifted)")
-    if drift and drift["unknown"]:
-        lines.append(f"drift unknown: {', '.join(drift['unknown'])}")
-    return lines
-
-
-def _tail(c: dict) -> str:
-    last = c.get("last_commit")
-    return f"  {c['ahead']} commit(s), last {last['date'][:10]} \"{last['subject']}\"" if last and c.get("ahead") else ""
-
-
-def _candidate_line(cand: dict) -> str:
-    """One adopted candidate: its name and agent, its commits, conflicts and review."""
-    who = f" ({cand['agent']})" if cand.get("agent") else ""
-    if not cand.get("exists", True):
-        return f"{cand['name']}{who}: not fetched here (its land --fetch)"
-    if not cand.get("ahead"):
-        return f"{cand['name']}{who}: no new commits"
-    line = f"{cand['name']}{who}{_tail(cand)}"
-    if cand.get("conflicts_with_base"):
-        line += f"; conflicts in {', '.join(cand['conflicts_with_base'])}"
-    review = cand.get("review")
-    if review:
-        line += f"; review: {review['label']}"
-        why = [*review.get("unmet", []), *review.get("blocking", [])] if review.get("current") \
-            and review.get("outcome") == "changes_requested" else []
-        line += f" ({', '.join(why)})" if why else ""
-    return line
-
-
-def _claim_lines(c: dict) -> list[str]:
-    label = STATE_LABELS.get(c["state"], c["state"])
-    if c["state"] == "blocked" and c["blocked_reason"]:
-        label += f": {c['blocked_reason']}"
-    if c["state"] == "waiting" and c["waiting_on"]:
-        label += f" ({', '.join(c['waiting_on'])})"
-    if c["state"] == "conflicts" and c["conflicts_with_base"]:
-        label += f" in {', '.join(c['conflicts_with_base'])}"
-    if c.get("idle_days") is not None:
-        label += f", no commit for {c['idle_days']} day(s)"
-    review = c.get("review")
-    if review and c["state"] not in ("changes_requested", "not_reviewed") and not c.get("candidates"):
-        label += f"; review: {review['label']}"
-    lines = [f"  {c['id']:<8} {label}"]
-    if c["state"] == "changes_requested" and not c.get("candidates"):
-        why = [*review["unmet"], *review["blocking"]]
-        lines.append(f"           review: {', '.join(why) or 'changes requested'}")
-    if c.get("candidates"):
-        lines.append(f"           {c['branch']} (adopted; land tries these in turn)")
-        lines += [f"           - {_candidate_line(x)}" for x in c["candidates"]]
-    else:
-        lines.append(f"           {c['branch']}{_tail(c)}" + (f"  ({c['worktree']})" if c["worktree"] else ""))
-    for other in c.get("conflicts_with", []):
-        lines.append(f"           would conflict with {other['id']} in {', '.join(other['files'])}")
-    return lines

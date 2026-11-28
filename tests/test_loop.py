@@ -578,9 +578,9 @@ def test_start_next_takes_the_next_item_when_another_machine_won_the_race(repo: 
 
 def test_a_closed_pipe_ends_quietly(tmp_path: Path):  # B12: `its status | head`
     script = tmp_path / "flood.py"
-    script.write_text("import sys\nfrom idea_to_scaffold import cli\n"
+    script.write_text("import sys\nfrom idea_to_scaffold import cli\nfrom idea_to_scaffold.cli import commands\n"
                       "def flood(args):\n    for _ in range(200000):\n        print('x' * 80)\n    return 0\n"
-                      "cli.cmd_stats = flood\nsys.exit(cli.main(['stats', '.']))\n")
+                      "commands.cmd_stats = flood\nsys.exit(cli.main(['stats', '.']))\n")
     env = {**os.environ, "PYTHONPATH": str(Path(idea_to_scaffold.__file__).parent.parent)}
     writer = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               env=env, cwd=tmp_path)

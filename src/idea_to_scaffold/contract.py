@@ -108,6 +108,7 @@ ERRORS: dict[str, Code] = {
                        "the branch is set up wrong), so nothing passed"),
     "git_error": Code("a git command failed"),
     "github_failed": Code("`brief --github`: the GitHub CLI (`gh`) isn't installed, isn't signed in, or failed"),
+    "import_failed": Code("`import`: the export can't be read, or conflicts with files in the package"),
     "incomplete": Code("`promote`: the item has no Done when or Touches", fields=("missing",)),
     "internal_error": Code("a bug in `its`; the message says what to report", fields=("version",)),
     "launch_settings_changed": Code("`done --result`: the headless launch files were changed during the run, so it "
@@ -131,6 +132,7 @@ ERRORS: dict[str, Code] = {
                       fields=("result_file",)),
     "no_status": Code("`done`: the item has no Status field"),
     "no_waiver_group": Code("`waive`: name what is waived (`--test-changes`, `--outside-touches`, `--dependencies`)"),
+    "not_empty": Code("`new`: the folder exists and isn't empty"),
     "not_found": Code("no such ID, or a file `its` was given can't be read", fields=("mentioned_in",)),
     "not_git": Code("the command needs a git repository"),
     "out_of_attempts": Code("`brief --retry`: the item has failed `gate.max_attempts` times; it needs a person "
@@ -158,6 +160,8 @@ ERRORS: dict[str, Code] = {
     "push_failed": Code("`land --push`: the branches landed locally, but the push failed", (EXIT_RETRY,),
                         ("landed", "skipped")),
     "result_mismatch": Code("`done --result`: the result is for another item", fields=("result_id", "result_file")),
+    "scaffold_failed": Code("`scaffold`: the package can't be loaded or scaffolded (not ready, or the target is in the "
+                            "way)"),
     "status_changed": Code("`done`: the item's status changed while its checks ran (a `block`, say), and that "
                            "change is kept", fields=("status", "was")),
     "test_changes": Code(_REFUSAL + "test changes (tests, test config, or how the item is verified); the lead waives "

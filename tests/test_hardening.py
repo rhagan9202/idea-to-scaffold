@@ -121,8 +121,8 @@ def test_done_refuses_an_item_with_no_status_before_running_checks(mini: Path, c
 
 
 def test_unexpected_errors_still_return_json(mini: Path, capsys, monkeypatch):
-    from idea_to_scaffold import cli
-    monkeypatch.setattr(cli, "next_payload", lambda *a, **k: 1 / 0)
+    from idea_to_scaffold import service
+    monkeypatch.setattr(service, "next_payload", lambda *a, **k: 1 / 0)
     code, out = run_json(capsys, "next", str(mini))
     assert code == 1 and out["error"]["code"] == "internal_error" and "ZeroDivisionError" in out["error"]["message"]
 

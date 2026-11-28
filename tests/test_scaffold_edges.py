@@ -39,7 +39,7 @@ def test_force_needs_confirmation_when_not_interactive(plan: Path, tmp_path: Pat
     assert main(["scaffold", str(plan), "--out", str(out), "--no-git"]) == 0
     marker = out / "streak" / "keep.txt"
     marker.write_text("mine")
-    monkeypatch.setattr("idea_to_scaffold.cli.is_terminal", lambda fd: False)
+    monkeypatch.setattr("idea_to_scaffold.cli.commands.is_terminal", lambda fd: False)
     assert main(["scaffold", str(plan), "--out", str(out), "--no-git", "--force"]) == 1
     assert marker.exists()
     assert "--yes" in capsys.readouterr().err
@@ -50,7 +50,7 @@ def test_force_needs_confirmation_when_not_interactive(plan: Path, tmp_path: Pat
 def test_force_prompt_declined(plan: Path, tmp_path: Path, monkeypatch):
     out = tmp_path / "out"
     assert main(["scaffold", str(plan), "--out", str(out), "--no-git"]) == 0
-    monkeypatch.setattr("idea_to_scaffold.cli.is_terminal", lambda fd: True)
+    monkeypatch.setattr("idea_to_scaffold.cli.commands.is_terminal", lambda fd: True)
     monkeypatch.setattr("builtins.input", lambda _prompt: "n")
     assert main(["scaffold", str(plan), "--out", str(out), "--no-git", "--force"]) == 1
     assert (out / "streak" / "AGENTS.md").exists()

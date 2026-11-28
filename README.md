@@ -167,7 +167,8 @@ its scaffold /tmp/streak-plan --out /tmp
 spec/PACKAGE_SPEC.md                    the planning package contract
 prompts/stages/                         copy-paste prompts for Claude or ChatGPT
 prompts/claude-skill/plan-project/      the same flow as a Claude skill
-src/idea_to_scaffold/                   the `its` CLI
+src/idea_to_scaffold/                   the `its` package; service.py has one function per command
+src/idea_to_scaffold/cli/               the command line: parses arguments, renders what service.py returns
 src/idea_to_scaffold/templates/package/ blank planning package
 src/idea_to_scaffold/templates/stacks/  per-language repo skeletons (python, generic)
 examples/streak/                        a sample chat export
@@ -187,5 +188,9 @@ CI runs lint, and the tests on Linux (Python 3.10 to 3.13), macOS (3.12) and Win
 Error codes and exit codes live in `src/idea_to_scaffold/contract.py`. Add a new code there, then regenerate the
 spec's tables with `python -m idea_to_scaffold.contract spec/PACKAGE_SPEC.md`; a test fails until the spec and the
 registry match.
+
+Adding a command: put what it does and how it exits in `src/idea_to_scaffold/service.py`, its options in
+`cli/parser.py` (under one of the help groups) and its text in `cli/render.py`. `tests/test_structure.py` fails
+if the command line does more than parse and render.
 
 Adding a language: create `src/idea_to_scaffold/templates/stacks/<language>/` (see the README there).
