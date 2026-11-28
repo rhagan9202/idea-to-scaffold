@@ -13,6 +13,7 @@ import pytest
 import idea_to_scaffold
 from idea_to_scaffold import claims as cl
 from idea_to_scaffold import ledger
+from idea_to_scaffold.cli import main
 from idea_to_scaffold.package import Package
 from idea_to_scaffold.results import RESULT_SCHEMA
 
@@ -471,3 +472,90 @@ def test_verify_drifted_fixes_every_drifted_item_in_one_run(repo: Path, capsys):
     code, out = run_json(capsys, "verify", "--drifted", str(repo), "--commit")
     assert code == 0 and {v["id"] for v in out["verified"]} == {"T-1.1", "T-2.1"} and not out["failed"], out
     assert run_json(capsys, "drift", str(repo), "--check")[0] == 0
+
+
+# --- review verdicts are recorded and count at land, for the content they judged ------------------------------------
+
+def _reply(path: Path, verdict: str = "approve", status: str = "met", findings: tuple = ()) -> Path:
+    reqs = [{"id": r, "status": status, "evidence": "test_add"} for r in ("FR-001", "FR-002", "NFR-002")]
+    path.write_text(json.dumps({"verdict": verdict, "requirements": reqs, "findings": list(findings)}))
+    return path
+
+
+def _done_and_committed(claim: Path, capsys, body: str = "def add(): return 1\n") -> None:  # noqa: F811
+    (claim / "src/streak/store.py").write_text(body)
+    code, out = run_json(capsys, "done", "T-2.1", str(claim))
+    assert code == 0, out
+    git(claim, "add", "-A")
+    git(claim, "commit", "-qm", "feat(store): add the store [T-2.1]")
+
+
+def test_changes_requested_keeps_that_version_from_landing(claim: Path, repo: Path, tmp_path: Path,  # noqa: F811
+                                                           capsys):
+    _done_and_committed(claim, capsys)
+    _, prompt = run_json(capsys, "review", "T-2.1", str(repo))  # from main: it reviews the claim branch
+    blocker = {"severity": "blocker", "file": "src/streak/store.py", "line": 1, "message": "add() stores nothing"}
+    reply = _reply(tmp_path / "review.json", "changes_requested", findings=(blocker,))
+    code, out = run_json(capsys, "review", "T-2.1", str(repo), "--reply", str(reply))
+    assert code == 5 and out["recorded"] and out["current"] and out["digest"] == prompt["digest"], out
+    _, out = run_json(capsys, "status", str(repo))
+    entry = next(c for c in out["claims"] if c["id"] == "T-2.1")
+    assert entry["state"] == "changes_requested" and out["ready_to_land"] == []
+    assert entry["review"]["blocking"] == ["blocker src/streak/store.py"]
+    capsys.readouterr()
+    assert main(["status", str(repo)]) == 0
+    text = capsys.readouterr().out
+    assert "done, but its review requested changes" in text and "review: blocker src/streak/store.py" in text
+    code, out = run_json(capsys, "land", "--dir", str(repo), "--dry-run")
+    assert code == 7 and out["skipped"][0]["reason"] == "changes_requested", out
+    code, out = run_json(capsys, "land", "--dir", str(repo))
+    assert code == 7 and out["landed"] == [] and out["skipped"][0]["reason"] == "changes_requested"
+    # once the reviewed content changes, that verdict no longer counts either way
+    (claim / "src/streak/store.py").write_text("def add(): return 'stored'\n")
+    git(claim, "commit", "-qam", "fix(store): store it [T-2.1]")
+    _, out = run_json(capsys, "status", str(repo))
+    entry = next(c for c in out["claims"] if c["id"] == "T-2.1")
+    assert entry["state"] == "ready_to_land" and entry["review"]["label"] == "reviewed an earlier version"
+    code, out = run_json(capsys, "land", "--dir", str(repo), "--dry-run", "--require-review")
+    assert code == 7 and out["skipped"][0]["reason"] == "not_reviewed", out
+    assert "earlier version" in out["skipped"][0]["message"]
+    run_json(capsys, "review", "T-2.1", str(repo))
+    code, out = run_json(capsys, "review", "T-2.1", str(repo), "--reply", str(_reply(reply)))
+    assert code == 0 and out["passed"] and out["current"]
+    code, out = run_json(capsys, "land", "--dir", str(repo), "--require-review")
+    assert code == 0 and out["landed"][0]["review"]["passed"], out
+    assert "Reviewed: approved" in git(repo, "log", "-1", "--format=%B")
+    events = [e["outcome"] for e in ledger.read(Package.find(repo)) if e["event"] == "review"]
+    assert events == ["changes_requested", "approved"]
+    _, out = run_json(capsys, "stats", str(repo))
+    assert out["reviews"] == {"changes_requested": 1, "approved": 1}
+
+
+def test_a_verdict_is_for_what_the_reviewer_saw(claim: Path, repo: Path, tmp_path: Path, capsys):  # noqa: F811
+    _done_and_committed(claim, capsys)
+    run_json(capsys, "review", "T-2.1", str(repo))  # the prompt the reviewer gets
+    (claim / "src/streak/store.py").write_text("def add(): return 2\n")  # the agent goes on after the prompt
+    git(claim, "commit", "-qam", "more [T-2.1]")
+    code, out = run_json(capsys, "review", "T-2.1", str(repo), "--reply", str(_reply(tmp_path / "r.json")))
+    assert code == 0 and out["passed"] and not out["current"]  # an approval of the earlier version
+    code, out = run_json(capsys, "land", "--dir", str(repo), "--dry-run", "--require-review")
+    assert code == 7 and out["skipped"][0]["reason"] == "not_reviewed"
+
+
+def test_the_integration_branch_can_require_a_review(claim: Path, repo: Path, tmp_path: Path, capsys):  # noqa: F811
+    manifest = repo / "docs/planning/package.yaml"
+    manifest.write_text(manifest.read_text().replace("\ngate:\n", "\ngate:\n  require_review: true\n", 1))
+    git(repo, "commit", "-qam", "land needs a review")
+    _done_and_committed(claim, capsys)
+    _, out = run_json(capsys, "status", str(repo))
+    assert next(c for c in out["claims"] if c["id"] == "T-2.1")["state"] == "not_reviewed"
+    code, out = run_json(capsys, "land", "--dir", str(repo), "--dry-run")
+    assert code == 7 and out["skipped"][0]["reason"] == "not_reviewed"
+    # the claim's own package.yaml can't turn it off: the rule comes from the integration branch
+    wt_manifest = claim / "docs/planning/package.yaml"
+    assert "require_review" not in wt_manifest.read_text()
+    run_json(capsys, "review", "T-2.1", str(claim))  # a review made in the worktree counts once committed
+    code, out = run_json(capsys, "review", "T-2.1", str(repo), "--reply", str(_reply(tmp_path / "r.json")))
+    assert code == 0 and out["current"]
+    code, out = run_json(capsys, "land", "--dir", str(repo), "--dry-run")
+    assert code == 0 and out["skipped"][0]["reason"] == "dry_run", out

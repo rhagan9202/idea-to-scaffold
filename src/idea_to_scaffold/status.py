@@ -14,18 +14,24 @@ from . import gitx, trust
 from .backlog import load_proposals
 from .contract import SCHEMA, WorkError
 from .package import Package
+from .review import claim_review
 from .work import claims_payload, integration_branch, next_payload, remote_of, shown, view
 
 STATE_LABELS = {
     "ready_to_land": "ready to land",
     "blocked": "blocked",
     "working": "working",
+    "changes_requested": "done, but its review requested changes",
+    "not_reviewed": "done, waiting for an approving review (gate.require_review)",
     "conflicts": "done, but conflicts with the integration branch",
     "waiting": "done, waiting on dependencies",
     "no_commits": "done, but no commits yet",
     "finished": "finished: release it",
     "orphaned": "orphaned: not in the backlog, release it",
 }
+
+
+REVIEWED = ("ready_to_land", "waiting", "conflicts")  # done on the branch, so a review can count for it
 
 
 def status_payload(pkg: Package, base: str | None = None) -> dict:
@@ -44,6 +50,12 @@ def status_payload(pkg: Package, base: str | None = None) -> dict:
     }
     if cl.in_git(pkg.root):
         claims = claims_payload(pkg, base)["claims"]
+        for c in claims:  # what its land would say about the review of what it would merge
+            c["review"] = claim_review(pkg, c, v.base) if v.base and c["state"] in REVIEWED else None
+            if c["state"] == "ready_to_land" and c["review"] and c["review"]["current"] and not c["review"]["passed"]:
+                c["state"] = "changes_requested"
+            elif c["state"] == "ready_to_land" and c["review"] and c["review"]["required"] and not c["review"]["current"]:
+                c["state"] = "not_reviewed"
         out["claims"] = [c for c in claims if c["state"] not in ("finished", "orphaned")]
         out["ready_to_land"] = [c["id"] for c in claims if c["state"] == "ready_to_land"]
         out["to_release"] = [c["id"] for c in claims if c["state"] in ("finished", "orphaned")]
@@ -91,7 +103,13 @@ def render(payload: dict) -> list[str]:
                 label += f" in {', '.join(c['conflicts_with_base'])}"
             last = c["last_commit"]
             tail = f"  {c['ahead']} commit(s), last {last['date'][:10]} \"{last['subject']}\"" if last and c["ahead"] else ""
+            review = c.get("review")
+            if review and c["state"] not in ("changes_requested", "not_reviewed"):
+                label += f"; review: {review['label']}"
             lines.append(f"  {c['id']:<8} {label}")
+            if c["state"] == "changes_requested":
+                why = [*review["unmet"], *review["blocking"]]
+                lines.append(f"           review: {', '.join(why) or 'changes requested'}")
             lines.append(f"           {c['branch']}{tail}" + (f"  ({c['worktree']})" if c["worktree"] else ""))
             for other in c.get("conflicts_with", []):
                 lines.append(f"           would conflict with {other['id']} in {', '.join(other['files'])}")

@@ -25,6 +25,7 @@ from pathlib import Path
 
 from . import claims as cl
 from . import gate, gitx, heldout, ledger, trust
+from . import review as reviews
 from .backlog import BacklogItem, blocked_by, load_backlog, load_proposals, parse_backlog, set_field
 from .checks import RESULT_KINDS, Check, checks_for, result_findings, run_check
 from .contract import EXIT_NOT_LANDED, SCHEMA, WorkError
@@ -102,10 +103,13 @@ def land(
     release: bool = False,
     dry_run: bool = False,
     accept_base: bool = False,
+    require_review: bool = False,
     on_check: Callable[[str, Check], None] | None = None,
 ) -> dict:
     """Land finished claim branches on the integration branch, one at a time, testing each merged result.
-    `accept_base` trusts the commits on the integration branch that `its` didn't make (a person has looked)."""
+    `accept_base` trusts the commits on the integration branch that `its` didn't make (a person has looked).
+    `require_review` lands only what has an approving review of exactly what would merge (as does the integration
+    branch's `gate.require_review`); a changes_requested verdict on it always refuses (review.py)."""
     if not cl.in_git(pkg.root):
         raise WorkError("not_git", "landing needs a git repository")
     root = pkg.root
@@ -145,7 +149,8 @@ def land(
                 continue
             pending.remove((claim, ref))
             progress = True
-            outcome = _land_one(pkg, claim, ref, verify=verify, dry_run=dry_run, on_check=on_check, remote=remote)
+            outcome = _land_one(pkg, claim, ref, verify=verify, dry_run=dry_run, on_check=on_check, remote=remote,
+                                require_review=require_review)
             (landed if outcome["landed"] else skipped).append(outcome)
             if outcome.get("reason") == "base_failing":
                 broken = outcome
@@ -210,7 +215,8 @@ def check_base(pkg: Package, base: str, remote: str | None, *, accept: bool = Fa
 
 
 def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run: bool,
-              on_check: Callable[[str, Check], None] | None, remote: str | None = None) -> dict:
+              on_check: Callable[[str, Check], None] | None, remote: str | None = None,
+              require_review: bool = False) -> dict:
     """Merge one claim in a throwaway worktree, check the merged result there, and only then fast-forward the
     integration branch to it. The user's checkout is never merged into, reset or cleaned, so nothing in it (untracked
     notes included) can be lost, and a status written there while the checks run survives."""
@@ -225,6 +231,12 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
         tests = [f for f in blocking if f["kind"] in gate.TEST_KINDS]
         return {**result, "reason": gate.refusal(blocking), "findings": blocking,
                 "message": (tests or blocking)[0]["message"]}
+    refused = reviews.land_refusal(pkg, claim.id, inspection,
+                                   require=require_review or inspection.policy.require_review)
+    if refused:
+        return {**result, **refused}
+    review = reviews.standing(pkg, claim.id, inspection)
+    approved = review if review and review["current"] and review["passed"] else None
     conflicts = cl.conflicting_files(root, "HEAD", ref)
     generated = _generated(pkg)
     real = [f for f in conflicts or [] if f not in generated]
@@ -247,7 +259,10 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
         shutil.rmtree(scratch, ignore_errors=True)
         return {**result, "reason": "git_error", "message": "couldn't create a worktree to test the merge in"}
     try:
-        merged = _merge_in(tree, prefix, ref, f"Land {claim.id}: {item_title}".rstrip(": "), generated)
+        message = f"Land {claim.id}: {item_title}".rstrip(": ")
+        if approved:  # a trailer, so the history says what review the landed content had
+            message += f"\n\nReviewed: approved {approved['at'][:10]} ({approved['digest']})"
+        merged = _merge_in(tree, prefix, ref, message, generated)
         if "reason" in merged:
             return {**result, **merged}
         checks: list[dict] = []
@@ -306,7 +321,7 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
             trust.record(root, integration_branch(pkg), commit)
         _refresh_mirror(pkg)
         return {**result, "landed": True, "commit": commit, "checks": checks, "warnings": inspection.warnings,
-                "held_out": held, "reverified": reverified,
+                "held_out": held, "reverified": reverified, "review": approved,
                 "checks_skipped": None if (verify and pkg.repo_layout) else
                 ("--no-verify" if not verify else "this is a planning package, not a scaffolded repo")}
     finally:

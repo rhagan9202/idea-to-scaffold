@@ -540,10 +540,7 @@ def record_setup(cwd: Path, ident: str, files: dict[str, str]) -> None:
         data[ident] = files
     else:
         data.pop(ident, None)
-    store.mkdir(parents=True, exist_ok=True)
-    tmp = store / "setup.json.tmp"
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
-    os.replace(tmp, store / "setup.json")
+    _save_json(store, "setup.json", data)
 
 
 def content_digest(text: str | None) -> str:
@@ -593,3 +590,32 @@ def _load_json(path: Path) -> dict:
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+# --- review verdicts ---------------------------------------------------------------------------------------------
+# `its review` notes what it put in front of the reviewer, and `its review --reply` the verdict, per item, so that
+# `its land` and `its status` can act on it (review.py). Like the setup record, it is the lead's record, not proof.
+
+def record_review(cwd: Path, ident: str, *, prompt: dict | None = None, verdict: dict | None = None) -> None:
+    """Record the review prompt `its review` made for an item, or the verdict on it."""
+    store = _store_dir(cwd)
+    data = _load_json(store / "reviews.json")
+    entry = data.get(ident) if isinstance(data.get(ident), dict) else {}
+    if prompt is not None:
+        entry["prompt"] = prompt
+    if verdict is not None:
+        entry["verdict"] = verdict
+    data[ident] = entry
+    _save_json(store, "reviews.json", data)
+
+
+def reviews_of(cwd: Path, ident: str) -> dict:
+    entry = _load_json(_store_dir(cwd) / "reviews.json").get(ident)
+    return entry if isinstance(entry, dict) else {}
+
+
+def _save_json(store: Path, name: str, data: dict) -> None:
+    store.mkdir(parents=True, exist_ok=True)
+    tmp = store / f"{name}.tmp"
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    os.replace(tmp, store / name)

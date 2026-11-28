@@ -33,7 +33,7 @@ from .landing import land
 from .ledger import stats
 from .linker import link_package
 from .package import BACKLOG_STATUSES, PROFILES, Package, PackageError, new_package
-from .review import REPLY_SCHEMA, read_reply, review
+from .review import REPLY_SCHEMA, judge, review
 from .scaffold import ScaffoldError, scaffold
 from .sizing import sizing
 from .status import STATE_LABELS, render, status_payload
@@ -710,6 +710,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
         print("refused for: " + ", ".join(f"{k} {v}" for k, v in out["refusals"].items()))
     if out["land"]:
         print("land: " + ", ".join(f"{k} {v}" for k, v in out["land"].items()))
+    if out["reviews"]:
+        print("reviews: " + ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in out["reviews"].items()))
     if out["cost_usd"]:
         p90 = f", p90 per run ${out['cost_p90_usd']:.2f}" if out["cost_p90_usd"] is not None else ""
         print(f"agent cost ${out['cost_usd']:.2f}{p90}")
@@ -731,7 +733,8 @@ def cmd_land(args: argparse.Namespace) -> int:
         return _fail(args, gone)
     try:
         payload = land(pkg, args.ids or None, verify=not args.no_verify, fetch=args.fetch, push=args.push,
-                       release=args.release, dry_run=args.dry_run, accept_base=args.accept_base, on_check=announce)
+                       release=args.release, dry_run=args.dry_run, accept_base=args.accept_base,
+                       require_review=args.require_review, on_check=announce)
     except WorkError as err:
         if err.code == "base_untrusted" and not args.json:
             for line in err.details["commits"]:
@@ -904,9 +907,12 @@ def cmd_review(args: argparse.Namespace) -> int:
         print(json.dumps(REPLY_SCHEMA, indent=None if args.json else 2))
         return 0
     if args.reply:
+        pkg = _load(args)
+        if pkg is None:
+            return 1
         try:
             text = sys.stdin.read() if args.reply == "-" else Path(args.reply).read_text(encoding="utf-8")
-            payload = read_reply(text, min_severity=args.min_severity)
+            payload = judge(pkg, args.id, text, min_severity=args.min_severity, base=args.base)
         except OSError as exc:
             return _fail(args, WorkError("not_found", f"can't read {args.reply}: {exc}"))
         except WorkError as err:
@@ -915,13 +921,19 @@ def cmd_review(args: argparse.Namespace) -> int:
         if args.json:
             _emit(payload)
             return code
-        print(f"review: {payload['verdict']}" + ("" if payload["passed"] else " (not passed)"))
+        print(f"review of {payload['id']}: {payload['verdict']}" + ("" if payload["passed"] else " (not passed)"))
         for ident in payload["unmet"]:
-            print(f"  {ident}: not met")
+            print(f"  {ident}: " + ("not in the reply" if ident in payload["missing"] else "not met"))
         for f in payload["findings"]:
             mark = "!" if f in payload["blocking"] else " "
             print(f" {mark}{f['severity']:<8} {f['file']}{':' + str(f['line']) if f.get('line') else ''}  "
                   f"{f['message']}")
+        if not payload["current"]:
+            print(f"{payload['id']} changed since the review prompt was made: this verdict counts only for what the "
+                  "reviewer saw")
+        elif payload["recorded"]:
+            print("recorded: its land " + ("will take it" if payload["passed"] else
+                                           "refuses this version until it changes and is reviewed again"))
         return code
     pkg = _load(args)
     if pkg is None:
@@ -1147,6 +1159,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--dry-run", action="store_true", help="show what would land, changing nothing")
     s.add_argument("--accept-base", action="store_true",
                    help="trust the integration branch's commits that its didn't make, after you have looked at them")
+    s.add_argument("--require-review", action="store_true",
+                   help="land only items with an approving its review of exactly what would merge "
+                        "(gate.require_review in package.yaml does this always)")
     s.add_argument("--allow-test-changes", **allow)
     s.add_argument("--allow-outside-touches", **allow)
     s.add_argument("--json", action="store_true", help=json_help)
@@ -1290,8 +1305,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--base", help="the ref to diff against (default: the integration branch)")
     s.add_argument("--schema", action="store_true", help="print the JSON schema the reviewer's reply must follow")
-    s.add_argument("--reply", metavar="FILE", help="read a reviewer's JSON reply (- for stdin) and say if it passes "
-                                                   "(exit 5 if not)")
+    s.add_argument("--reply", metavar="FILE", help="read a reviewer's JSON reply to the item's review (- for stdin), "
+                                                   "record the verdict, and say if it passes (exit 5 if not)")
     s.add_argument("--min-severity", default="major", choices=["blocker", "major", "minor"],
                    help="with --reply: the lowest severity that fails the review (default: major)")
     s.add_argument("--json", action="store_true", help=json_help)
