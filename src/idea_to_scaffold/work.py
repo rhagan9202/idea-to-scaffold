@@ -33,6 +33,7 @@ from .backlog import (
     load_backlog,
     load_proposals,
     parse_backlog,
+    proposal_problems,
     ready_items,
     set_field,
     set_status,
@@ -1100,7 +1101,9 @@ def _off_integration_branch(pkg: Package) -> bool:
 def write_backlog_json(pkg: Package) -> Path:
     """Write the backlog mirror next to the backlog. It is generated, gitignored and never edited by hand."""
     path = pkg.path_of(BACKLOG_JSON)
-    path.write_text(json.dumps(backlog_payload(pkg), indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")  # written whole, then swapped in: never half a file
+    temp.write_text(json.dumps(backlog_payload(pkg), indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    os.replace(temp, path)
     return path
 
 
@@ -1130,6 +1133,10 @@ def renumber(pkg: Package, ids: list[str] | None = None, *, dry_run: bool = Fals
 
 def _renumber(pkg: Package, ids: list[str] | None, *, dry_run: bool) -> dict:
     items = load_backlog(pkg)
+    problems = proposal_problems(pkg)
+    if problems:
+        raise WorkError("bad_proposal", f"{problems[0]}" + (f" (and {len(problems) - 1} more)" if len(problems) > 1
+                        else "") + "; fix the proposal files, then renumber", details={"problems": problems})
     proposals = load_proposals(pkg)
     proposal_of = {item.id: path for path, item in proposals}
     known = {i.id for i in items} | set(proposal_of)
@@ -1180,7 +1187,7 @@ def _renumber(pkg: Package, ids: list[str] | None, *, dry_run: bool) -> dict:
     if pairs and not dry_run:
         backlog_path = pkg.path_of(BACKLOG)
         renumbering = {old for old, _ in pairs}
-        appended = [path for path, item in proposals if item.id in renumbering]
+        appended = list(dict.fromkeys(path for path, item in proposals if item.id in renumbering))
         if appended:  # move each renumbered proposal to the end of the backlog, then delete its file
             text = read_raw(backlog_path)
             eol = "\r\n" if "\r\n" in text else "\n"

@@ -44,7 +44,7 @@ import yaml
 
 from . import claims as cl
 from . import gitx, tamper
-from .backlog import BACKLOG, BRANCH_FIELDS, BacklogItem, parse_backlog
+from .backlog import BACKLOG, BRANCH_FIELDS, BacklogItem, check_proposal, parse_backlog
 from .checks import Settings
 from .ids import META_FILES, line_fields
 from .package import Package
@@ -53,7 +53,7 @@ from .touches import covered
 TEST_KINDS = ("test_deleted", "assertions_removed", "skip_added", "verify_changed", "policy_changed",
               "item_changed", "other_item_changed", "agent_config_changed", "assertions_weakened", "test_disabled",
               "test_config_changed", "acceptance_changed", "tests_pass_on_parent", "test_removed",
-              "no_test_report", "failures_hidden", "no_tests_ran", "tests_skipped")
+              "no_test_report", "failures_hidden", "no_tests_ran", "tests_skipped", "proposal_invalid")
 SCOPE_KINDS = ("outside_touches", "touches_changed", "no_changes")
 DEPENDENCY_KINDS = ("dependency_added",)
 # What `its waive --<group>` waives.
@@ -476,8 +476,12 @@ def inspect(pkg: Package, ident: str, base_ref: str | None, *, head: str | None 
             config.add(path)
         if planning and path.startswith(planning):
             logical = "planning/" + path[len(planning):]
+            if logical.startswith(proposals) and change.status != "D":
+                text = after_content(pkg, head, change) or ""
+                for problem in check_proposal(path, posixpath.splitext(posixpath.basename(path))[0], text):
+                    result.add({"kind": "proposal_invalid", "file": path, "message": problem})
             if logical == pkg.rel(backlog) or logical in generated or logical.startswith(proposals):
-                continue  # the backlog is diffed item by item above; proposals and generated files are free
+                continue  # the backlog is diffed item by item above; valid proposals and generated files are free
             if not in_touches(path, result.touches):
                 outside.add(path)
             continue

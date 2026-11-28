@@ -17,6 +17,7 @@ from .backlog import (
     NO_VALUE,
     BacklogError,
     BacklogItem,
+    check_proposal,
     load_backlog,
     load_proposals,
     remove_field,
@@ -317,7 +318,11 @@ def promote(pkg: Package, ident: str, *, force: bool = False, allow_incomplete: 
 
     An item with no `Done when` or no `Touches` is refused unless `allow_incomplete`: an agent would have nothing to
     finish against, and an item without Touches can't run alongside anything."""
-    item, _, _ = _locate(pkg, ident)
+    item, path, _ = _locate(pkg, ident)
+    if path is not None:
+        problems = check_proposal(pkg.rel(path), path.stem, path.read_text(encoding="utf-8"))
+        if problems:
+            raise WorkError("bad_proposal", "; ".join(problems), details={"id": ident, "problems": problems})
     if item.status != "proposed":
         raise WorkError("bad_status", f"{ident} is {item.status}, not proposed", details={"id": ident})
     missing = [name for name, empty in (("Done when", item.done_when.strip().lower() in NO_VALUE),

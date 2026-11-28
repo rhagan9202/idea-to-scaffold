@@ -365,6 +365,43 @@ def set_status(pkg: Package, item_id: str, status: str, *, path: Path | None = N
 
 # --- proposals -----------------------------------------------------------------------------------------------
 
+PROPOSAL_ONLY_ITS = ("verified", "override", "waiver", "blocked")  # fields a proposal can't carry yet
+
+
+def check_proposal(rel: str, stem: str, text: str) -> list[str]:
+    """What is wrong with one proposal file, as messages: it must hold exactly one item, whose placeholder ID is the
+    file's name, with status `proposed` and none of the fields `its` sets on scheduled work. A proposal skips the
+    gate's item-by-item diff, so anything else would enter the backlog unchecked: an item already done, or one that
+    takes a real item's ID."""
+    items = parse_backlog(text)
+    if len(items) != 1:
+        return [f"{rel}: holds {len(items)} items; a proposal file holds exactly one"]
+    item = items[0]
+    out = []
+    if not item.placeholder:
+        out.append(f"{rel}: holds {item.id}, a permanent ID; a proposal has a placeholder ID (T-new-<name>)")
+    elif item.id != stem:
+        out.append(f"{rel}: holds {item.id}, but the file is named {stem}; a proposal's file is named after its ID")
+    if item.status != "proposed":
+        out.append(f"{rel}: {item.id} is {item.status or 'missing a status'}; a proposal is proposed until its promote "
+                   "or its renumber schedules it")
+    extra = [name.capitalize() for name in PROPOSAL_ONLY_ITS if name in item.fields]
+    if extra:
+        out.append(f"{rel}: {item.id} has {', '.join(extra)}, which only scheduled items carry")
+    return out
+
+
+def proposal_problems(pkg: Package) -> list[str]:
+    """`check_proposal` for every proposal file."""
+    out: list[str] = []
+    for path in pkg.proposal_files():
+        try:
+            out += check_proposal(pkg.rel(path), path.stem, _read(path))
+        except (OSError, UnicodeDecodeError) as exc:
+            out.append(f"{pkg.rel(path)}: can't be read ({exc})")
+    return out
+
+
 def load_proposals(pkg: Package) -> list[tuple[Path, BacklogItem]]:
     """Proposed items waiting in `planning/proposals/`, one per file, in file-name order. A proposal lives in its own
     file so two branches that each propose items never edit the same lines; `its renumber` moves them into the

@@ -308,3 +308,53 @@ def test_a8_a_conftest_hidden_through_info_exclude_is_found(claim: Path, capsys)
     assert code == 5 and "test_config_changed" in kinds(out)
     hidden = [f for f in out["error"]["findings"] if f.get("hidden")]
     assert [f["file"] for f in hidden] == ["tests/conftest.py"]
+
+
+# --- C1-C3: proposals are checked before anything takes them into the backlog -------------------------------------
+
+def proposal(ident: str, title: str = "Follow-up", status: str = "proposed", extra: str = "") -> str:
+    return (f"### {ident} — {title}\n- **Milestone:** —\n- **Status:** {status}\n- **Satisfies:** FR-001\n"
+            f"- **Depends on:** —\n{extra}")
+
+
+def test_c1_a_proposal_marked_done_is_refused_by_done_validate_and_renumber(claim: Path, repo: Path, capsys):  # noqa: F811
+    folder = claim / "docs/planning/proposals"
+    folder.mkdir(exist_ok=True)
+    (folder / "T-new-evil.md").write_text(proposal("T-new-evil", status="done", extra="- **Verified:** never\n"))
+    code, out = finish(claim, capsys=capsys)
+    assert code == 5 and "proposal_invalid" in kinds(out)
+    messages = [f["message"] for f in out["error"]["findings"] if f["kind"] == "proposal_invalid"]
+    assert any("is done" in m for m in messages) and any("Verified" in m for m in messages)
+    code, out = run_json(capsys, "validate", str(claim))
+    assert code == 1 and any("T-new-evil" in e for e in out["errors"])
+
+
+def test_c2_a_proposal_file_with_two_items_is_refused_whole(repo: Path, capsys):  # noqa: F811
+    folder = repo / "docs/planning/proposals"
+    folder.mkdir(exist_ok=True)
+    (folder / "T-new-a.md").write_text(proposal("T-new-a") + "\n" + proposal("T-new-b"))
+    backlog = (repo / "docs/planning/07-backlog.md").read_text()
+    code, out = run_json(capsys, "renumber", "--dir", str(repo))
+    assert code == 1 and out["error"]["code"] == "bad_proposal" and "holds 2 items" in out["error"]["message"]
+    assert (folder / "T-new-a.md").exists() and (repo / "docs/planning/07-backlog.md").read_text() == backlog
+
+
+def test_c3_a_proposal_holding_a_real_id_never_renames_it(repo: Path, capsys):  # noqa: F811
+    folder = repo / "docs/planning/proposals"
+    folder.mkdir(exist_ok=True)
+    (folder / "T-new-copy.md").write_text(proposal("T-2.2", title="Copied by mistake"))
+    backlog = (repo / "docs/planning/07-backlog.md").read_text()
+    code, out = run_json(capsys, "renumber", "--dir", str(repo))
+    assert code == 1 and out["error"]["code"] == "bad_proposal" and "permanent ID" in out["error"]["message"]
+    assert (repo / "docs/planning/07-backlog.md").read_text() == backlog
+    code, out = run_json(capsys, "promote", "T-new-copy", str(repo))
+    assert code == 1
+
+
+def test_a_well_formed_proposal_still_lands_and_renumbers(claim: Path, repo: Path, capsys):  # noqa: F811
+    assert main(["propose", "Store backups", "--dir", str(claim), "--satisfies", "FR-001"]) == 0
+    assert finish(claim, capsys=capsys)[0] == 0
+    commit(claim, "feat: store")
+    assert run_json(capsys, "land", "--dir", str(repo))[0] == 0
+    code, out = run_json(capsys, "renumber", "--dir", str(repo))
+    assert code == 0 and [r["from"] for r in out["renumbered"]] == ["T-new-store-backups"]
