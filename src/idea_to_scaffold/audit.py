@@ -25,11 +25,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import claims as cl
-from . import gate, tamper
+from . import gate, gitx, tamper
 from .backlog import BACKLOG, BacklogItem, parse_backlog, set_field
 from .checks import Check, checks_for, result_findings, run_check, runs_pytest
+from .contract import SCHEMA, WorkError
 from .package import Package
-from .work import SCHEMA, WorkError, base_ref, changed_tests
+from .work import base_ref, changed_tests
 
 
 @dataclass
@@ -235,7 +236,7 @@ def _first_assert(text: str) -> tuple[int, int, int, int] | None:
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return gitx.run(cwd, *args)
 
 
 def _target(pkg: Package, ident: str | None, base: str) -> Target:
@@ -280,11 +281,11 @@ def _run(t: Target, inspection: gate.Inspection, here: Path) -> dict:
     if not any(runs_pytest(c.command) for c in plan):
         return {"skipped": "none of the item's checks runs pytest"}
     if commands.get("setup") and commands["setup"].strip() != "true":
-        if not run_check(Check("setup", commands["setup"]), here)["passed"]:
+        if not run_check(Check("setup", commands["setup"]), here, inspection.policy.run)["passed"]:
             return {"skipped": f"setup ({commands['setup']}) failed in the audit checkout"}
     results = []
     for check in plan:
-        results.append(run_check(check, here))
+        results.append(run_check(check, here, inspection.policy.run))
         if not results[-1]["passed"]:
             break
     if t.marker is not None and not t.marker.exists():

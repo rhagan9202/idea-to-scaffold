@@ -42,6 +42,11 @@ def status_in(root: Path, ident: str) -> str:
     return next(i.status for i in load_backlog(Package.load(root)) if i.id == ident)
 
 
+def waive(root: Path, ident: str, *groups: str, reason: str = "a person looked at it") -> None:
+    """The lead's waiver: `its waive`, run in the main checkout on main, which commits it there."""
+    assert main(["waive", ident, str(root), *(f"--{g}" for g in groups), "--reason", reason]) == 0
+
+
 def set_field(root: Path, ident: str, name: str, value: str) -> None:
     """Add or replace a field on an item, then commit."""
     path = root / "docs/planning/07-backlog.md"

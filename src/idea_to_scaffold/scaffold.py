@@ -8,15 +8,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
 
+from . import gitx
 from .gate import DEFAULT_MODES
 from .linker import link_package
 from .package import GENERATED_MARKER, Package, parse_front_matter, templates_dir
 from .validate import Report, validate
 
+SCAFFOLD_WARN = {"dependency_added": "enforce it once the lockfile is committed, or the first `uv sync` trips it"}
 GATE_BLOCK = (
     "\n# The done gate. A new scaffold enforces every check, including the ones that start in warn mode for older\n"
     "# projects. Set one to warn (reported, never refusing) if it misfires on honest work here.\n"
-    "gate:\n  checks:\n" + "".join(f"    {kind}: enforce\n" for kind in sorted(DEFAULT_MODES))
+    "gate:\n  checks:\n" + "".join(f"    {kind}: warn  # {SCAFFOLD_WARN[kind]}\n" if kind in SCAFFOLD_WARN
+                                   else f"    {kind}: enforce\n" for kind in sorted(DEFAULT_MODES))
 )
 
 ITS_REPO = "https://github.com/rhagan9202/idea-to-scaffold"  # where scaffolded CI installs `its` from
@@ -43,7 +46,7 @@ def _its_commit() -> str | None:
 
     def git(*args: str) -> str | None:
         try:
-            proc = subprocess.run(["git", *args], cwd=here, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
+            proc = gitx.run(here, *args, timeout=10)
         except (OSError, subprocess.SubprocessError):
             return None
         return proc.stdout.strip() if proc.returncode == 0 else None
@@ -277,7 +280,7 @@ def _readme(pkg: Package) -> str:
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return gitx.run(root, *args)
 
 
 def _git_commit(root: Path, message: str) -> None:
@@ -289,9 +292,7 @@ def _git_commit(root: Path, message: str) -> None:
     identity: list[str] = []
     if not _git(root, "config", "user.email").stdout.strip():
         identity = ["-c", "user.name=idea-to-scaffold", "-c", "user.email=idea-to-scaffold@localhost"]
-    result = subprocess.run(
-        ["git", *identity, "commit", "-m", message], cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace"
-    )
+    result = gitx.run(root, *identity, "commit", "-m", message)
     if result.returncode != 0:
         raise ScaffoldError(f"git commit failed: {result.stderr.strip() or result.stdout.strip()}")
 

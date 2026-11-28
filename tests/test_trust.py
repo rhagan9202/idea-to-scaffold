@@ -18,9 +18,9 @@ from idea_to_scaffold.cli import main
 from idea_to_scaffold.package import Package
 from idea_to_scaffold.touches import matches
 
-from .test_gate import TEST, claim, finish  # noqa: F401 - fixtures
+from .test_gate import TEST, claim, finish, status_line  # noqa: F401 - fixtures
 from .test_landing import git_identity, py, repo  # noqa: F401 - fixtures
-from .test_parallel import git, run_json, set_field, status_in
+from .test_parallel import git, run_json, set_field, status_in, waive
 
 MANIFEST = "docs/planning/package.yaml"
 
@@ -151,7 +151,7 @@ def test_a_shallow_clone_refuses_and_drift_never_reports_clean_without_history(r
                                                                                 capsys):
     assert main(["start", "T-2.1", str(repo)]) == 0
     (repo / "src/streak/store.py").write_text("x = 1\n")
-    assert main(["done", "T-2.1", str(repo), "--no-verify"]) == 0
+    assert main(["done", "T-2.1", str(repo)]) == 0
     commit(repo, "feat")
     (repo / "src/streak/store.py").write_text("x = 2\n")
     commit(repo, "drift it")
@@ -170,7 +170,7 @@ def test_d2_same_day_reverify_on_a_branch_clears_drift(repo: Path, capsys):
     _, out = run_json(capsys, "start", "T-2.1", str(repo), "--worktree")
     wt = Path(out["claim"]["worktree"])
     (wt / "src/streak/store.py").write_text("x = 1\n")
-    assert main(["done", "T-2.1", str(wt), "--no-verify"]) == 0
+    assert main(["done", "T-2.1", str(wt)]) == 0
     commit(wt, "feat")
     (wt / "src/streak/store.py").write_text("x = 2\n")
     commit(wt, "change")
@@ -204,7 +204,7 @@ def test_g8_g10_the_gate_and_drift_agree_on_globs(repo: Path, capsys):
     set_field(repo, "T-2.1", "Touches", "`src/streak/{store,util}.py`, `src/*.py`")
     assert main(["start", "T-2.1", str(repo)]) == 0
     (repo / "src/streak/store.py").write_text("x = 1\n")
-    code, out = done(repo, "--no-verify", capsys=capsys)
+    code, out = done(repo, capsys=capsys)
     assert code == 0, out
     commit(repo, "feat")
     (repo / "src/streak/store.py").write_text("x = 2\n")
@@ -257,17 +257,26 @@ def test_agent_config_changes_are_refused_even_inside_touches(claim: Path, repo:
     assert code == 5 and "agent_config_changed" in kinds(out)
 
 
-# --- Q3: waiving the gate needs a reason and a person ----------------------------------------------------------
+# --- Q3, A7: only the lead waives, on the integration branch -------------------------------------------------------
 
-def test_overrides_need_a_reason_and_a_person(claim: Path, capsys, monkeypatch):
+def test_waivers_are_the_leads_and_live_on_the_integration_branch(claim: Path, repo: Path, capsys):  # noqa: F811
     (claim / TEST).unlink()
-    code, out = finish(claim, "--allow-test-changes", capsys=capsys)
-    assert code == 1 and out["error"]["code"] == "override_reason"
-    monkeypatch.delenv("ITS_ALLOW_OVERRIDES")
     code, out = finish(claim, "--allow-test-changes=the test covered removed code", capsys=capsys)
-    assert code == 1 and out["error"]["code"] == "override_needs_person"
+    assert code == 1 and out["error"]["code"] == "use_waive"  # the old flags are gone
+    code, out = run_json(capsys, "waive", "T-2.1", str(claim), "--test-changes", "--reason", "mine")
+    assert code == 1 and out["error"]["code"] == "not_on_base"  # an agent's worktree can't waive
+    set_field(claim, "T-2.1", "Waiver", "2026-01-01; test-changes; I say so")  # nor by writing the field itself
     code, out = finish(claim, capsys=capsys)
-    assert "--allow" not in out["error"]["message"]  # the refusal doesn't advertise the way around it
+    assert code == 5 and {"test_deleted", "item_changed"} <= kinds(out)
+    assert "--allow" not in out["error"]["message"]  # the refusal doesn't advertise a way around it
+    code, out = run_json(capsys, "waive", "T-2.1", str(repo), "--test-changes", "--reason", " ")
+    assert code == 1 and out["error"]["code"] == "no_reason"
+    waive(repo, "T-2.1", "test-changes", reason="the test covered removed code")
+    git(claim, "reset", "-q", "--hard", "HEAD~1")  # drop the branch's own Waiver commit
+    (claim / TEST).unlink()
+    code, out = finish(claim, capsys=capsys)
+    assert code == 0 and out["override"]["waived"] == ["test_deleted"]
+    assert "the test covered removed code" in status_line(claim, "T-2.1", "Override")
 
 
 # --- G13: a waiver never swaps in the branch's Verify ---------------------------------------------------------------
@@ -276,7 +285,8 @@ def test_g13_waived_test_changes_still_run_the_integration_branchs_verify(claim:
                                                                           capsys):
     set_field(repo, "T-2.1", "Verify", f"`{py('import sys; sys.exit(9)')}`")
     (claim / TEST).write_text("def test_add():\n    assert len('ab') == 2\n")
-    code, out = finish(claim, "--allow-test-changes=simplified the test", capsys=capsys)
+    waive(repo, "T-2.1", "test-changes", reason="simplified the test")
+    code, out = finish(claim, capsys=capsys)
     assert code == 5 and out["error"]["checks"][0]["exit_code"] == 9
 
 

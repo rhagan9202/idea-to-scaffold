@@ -2,16 +2,19 @@
 
 Everything the lead would otherwise visit worktrees for: each claim with what its branch tip says (working,
 blocked and why, ready to land, conflicting or waiting), plain in-progress items, what can start next, claims to
-release, proposals waiting for `its renumber`, and drifted items. It changes nothing.
+release, proposals waiting for `its renumber`, and drifted items. It also warns (`main_moved`) when the integration
+branch holds commits `its` doesn't trust (see `trust.py`), which `its land` would refuse. It changes nothing.
 """
 from __future__ import annotations
 
 from collections import Counter
 
 from . import claims as cl
+from . import gitx, trust
 from .backlog import load_proposals
+from .contract import SCHEMA, WorkError
 from .package import Package
-from .work import SCHEMA, WorkError, claims_payload, next_payload, shown, view
+from .work import claims_payload, integration_branch, next_payload, remote_of, shown, view
 
 STATE_LABELS = {
     "ready_to_land": "ready to land",
@@ -37,7 +40,7 @@ def status_payload(pkg: Package, base: str | None = None) -> dict:
         "blocked": nxt["blocked"],
         "in_progress": [i.id for i in v.items if i.status == "in-progress" and i.id not in v.claimed],
         "proposals": [{"id": i.id, "title": i.title, "file": shown(pkg, pkg.rel(p))} for p, i in load_proposals(pkg)],
-        "claims": [], "ready_to_land": [], "to_release": [], "drift": None,
+        "claims": [], "ready_to_land": [], "to_release": [], "drift": None, "warnings": [],
     }
     if cl.in_git(pkg.root):
         claims = claims_payload(pkg, base)["claims"]
@@ -46,6 +49,16 @@ def status_payload(pkg: Package, base: str | None = None) -> dict:
         out["to_release"] = [c["id"] for c in claims if c["state"] in ("finished", "orphaned")]
         out["blocked"] += [{"id": c["id"], "title": None, "reason": c["blocked_reason"], "branch": c["branch"]}
                            for c in claims if c["state"] == "blocked"]
+        name = integration_branch(pkg)
+        try:
+            left = trust.untrusted(pkg.root, name, name, remote_of(pkg)) if cl.ref_exists(pkg.root, name) else None
+        except gitx.GitError:
+            left = None
+        if left:
+            out["warnings"].append({
+                "kind": "main_moved", "commits": left,
+                "message": f"{name} has {len(left)} commit(s) that its didn't make and that aren't pushed; its land "
+                           "refuses until you look at them and run its land --accept-base"})
         from .drift import drift  # drift imports work, so import it late
         try:
             d = drift(pkg)
@@ -96,6 +109,9 @@ def render(payload: dict) -> list[str]:
         lines.append(f"release: {', '.join(payload['to_release'])}  (its release <ID>)")
     if payload["proposals"]:
         lines.append(f"proposals: {', '.join(p['id'] for p in payload['proposals'])}  (its renumber)")
+    for w in payload.get("warnings", []):
+        lines.append(f"warning: {w['message']}")
+        lines += [f"  {c}" for c in w.get("commits", [])]
     drift = payload["drift"]
     if drift and drift["drifted"]:
         lines.append(f"drifted: {', '.join(drift['drifted'])}  (its drift; its verify --drifted)")

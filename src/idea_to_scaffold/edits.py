@@ -1,4 +1,5 @@
-"""Changing the backlog from the CLI: `its propose`, `promote`, `block`, `unblock`, `drop` and `set-status`.
+"""Changing the backlog from the CLI: `its propose`, `promote`, `block`, `unblock`, `drop`, `set-status` and
+`waive`.
 
 Agents and people change items through these commands instead of editing Markdown, so every change is one small,
 locked, predictable edit. Each returns a dict in the versioned JSON contract (spec section 16).
@@ -6,23 +7,40 @@ locked, predictable edit. Each returns a dict in the versioned JSON contract (sp
 from __future__ import annotations
 
 import re
+import tempfile
+from datetime import date
 from pathlib import Path
 
-from . import ledger, results, sizing
+from . import claims as cl
+from . import gitx, ledger, results, sizing, trust
 from .backlog import (
     NO_VALUE,
     BacklogError,
     BacklogItem,
+    check_proposal,
     load_backlog,
     load_proposals,
     remove_field,
     set_field,
     set_status,
 )
+from .contract import EXIT_CHECK_FAILED, SCHEMA, WorkError
+from .gate import WAIVER_FIELD, WAIVER_GROUPS, Waiver
 from .ids import is_placeholder
 from .locking import LockTimeout, package_lock
 from .package import BACKLOG_STATUSES, Package
-from .work import SCHEMA, WorkError, _find, _refresh_mirror, item_payload, renumber, shown
+from .work import (
+    BACKLOG,
+    _find,
+    _locked,
+    _on_base_checkout,
+    _refresh_mirror,
+    integration_branch,
+    item_payload,
+    remote_of,
+    renumber,
+    shown,
+)
 
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -150,6 +168,90 @@ def block(pkg: Package, ident: str, reason: str, *, run: dict | None = None) -> 
     return payload
 
 
+def waive(pkg: Package, ident: str, groups: list[str], reason: str) -> dict:
+    """`its waive`: let one item through the parts of the gate named by `groups` (WAIVER_GROUPS), for `reason`.
+
+    The waiver is written as the item's Waiver field and committed on the integration branch, in the repository's
+    main checkout: done and land read waivers only from there, where an agent's worktree can't write. That makes a
+    waiver the lead's alone, where the old `--allow-*` flags and their terminal check were advisory. A new waiver
+    replaces the item's old one, so name every group it needs."""
+    reason = _clean(reason)
+    if not reason:
+        raise WorkError("no_reason", "say why: its waive <ID> --test-changes --reason '...' (it is recorded)",
+                        details={"id": ident})
+    chosen = tuple(g for g in WAIVER_GROUPS if g in groups)
+    if not chosen:
+        raise WorkError("no_waiver_group", "name what to waive: --test-changes, --outside-touches or --dependencies",
+                        details={"id": ident})
+    if not cl.in_git(pkg.root):
+        raise WorkError("not_git", "a waiver is committed on the integration branch, so it needs a git repository",
+                        details={"id": ident})
+    base = integration_branch(pkg)
+    if not _on_base_checkout(pkg):
+        raise WorkError(
+            "not_on_base", f"run its waive on {base}, in the repository's main checkout: done and land honour a waiver "
+            "only on the integration branch, where an agent's worktree can't write it",
+            details={"id": ident, "branch": cl.current_branch(pkg.root), "integration_branch": base})
+    item = _find(load_backlog(pkg), ident)
+    if item.status in ("done", "dropped"):
+        raise WorkError("bad_status", f"{ident} is {item.status}; there is nothing left to waive",
+                        details={"id": ident, "status": item.status})
+    backlog = pkg.path_of(BACKLOG)
+    if gitx.out(pkg.root, "diff", "--cached", "--name-only", "--", str(backlog), check=False):
+        raise WorkError("dirty", f"{shown(pkg, pkg.rel(backlog))} has staged changes; commit or unstage them first",
+                        details={"id": ident})
+    waiver = Waiver(date.today().isoformat(), chosen, reason)
+    before = gitx.out(pkg.root, "rev-parse", "HEAD", check=False)
+    try:
+        with _locked(pkg):
+            commit = _commit_waiver(pkg, ident, waiver, f"Waive {', '.join(chosen)} for {ident}\n\n{reason}")
+            set_field(pkg, ident, WAIVER_FIELD, waiver.render(), add=True, apart=True)  # the working tree too
+            gitx.run(pkg.root, "reset", "--quiet", "HEAD", "--", str(backlog))  # and the index
+    except BacklogError as exc:
+        raise WorkError("bad_backlog", str(exc), details={"id": ident}) from exc
+    except cl.GitError as exc:
+        raise WorkError("git_error", f"the waiver couldn't be committed: {exc}", details={"id": ident}) from exc
+    trust.note_waiver(pkg.root, base, commit)
+    trusted = trust.record(pkg.root, base, commit, after=before or None, remote=remote_of(pkg))
+    _refresh_mirror(pkg)
+    return {"schema": SCHEMA, "ok": True, "id": ident, "waiver": waiver.to_dict(),
+            "committed": commit[:7], "trusted": trusted}
+
+
+def _commit_waiver(pkg: Package, ident: str, waiver: Waiver, message: str) -> str:
+    """Commit HEAD's backlog with the waiver added, and nothing else: uncommitted work in the checkout (on the plain
+    flow, the agent's) stays out of the commit `its` vouches for. Built in a temporary index, then the branch is
+    moved to it only if it hasn't moved meanwhile. Returns the new commit."""
+    root = pkg.root
+    top = cl.toplevel(root)
+    rel = Path(pkg.path_of(BACKLOG)).resolve().relative_to(top.resolve()).as_posix()
+    head = cl.git(root, "rev-parse", "HEAD")
+    branch = cl.git(root, "symbolic-ref", "HEAD")
+    old = gitx.show(top, f"HEAD:{rel}")
+    if old is None:
+        raise cl.GitError(f"{rel} isn't committed on {branch}")
+    mode = (cl.git(top, "ls-tree", "HEAD", "--", rel).split() or ["100644"])[0]
+    with tempfile.TemporaryDirectory(prefix="its-waive-") as scratch:
+        copy = Path(scratch) / "backlog.md"
+        copy.write_bytes(old)
+        set_field(pkg, ident, WAIVER_FIELD, waiver.render(), add=True, apart=True, path=copy)
+        index = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
+        blob = _plumb(top, "hash-object", "-w", "--stdin", input=copy.read_bytes())
+        _plumb(top, "read-tree", "HEAD", env=index)
+        _plumb(top, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{rel}", env=index)
+        tree = _plumb(top, "write-tree", env=index)
+    commit = _plumb(top, "commit-tree", tree, "-p", head, "-m", message)
+    _plumb(top, "update-ref", "-m", "its waive", branch, commit, head)
+    return commit
+
+
+def _plumb(cwd: Path, *args: str, input: bytes | None = None, env: dict[str, str] | None = None) -> str:
+    proc = gitx.run(cwd, *args, input=input, binary=True, extra_env=env)
+    if proc.returncode != 0:
+        raise cl.GitError(proc.stderr.decode("utf-8", "replace").strip() or f"git {args[0]} failed")
+    return proc.stdout.decode("utf-8", "replace").strip()
+
+
 def apply_result(pkg: Package, ident: str | None, result_file: str, **done_options) -> dict:
     """`its done --result FILE`: act on what a headless agent handed back. `done` runs the gate and checks as usual;
     `blocked` or `needs_human` blocks the item with the agent's reason. Either way the run's cost and turns go to the
@@ -169,6 +271,14 @@ def apply_result(pkg: Package, ident: str | None, result_file: str, **done_optio
         raise WorkError("result_mismatch", f"the result is for {result['id']}, not {ident}; nothing was marked",
                         details={"id": ident, "result_id": result["id"], "result_file": result_file})
     ident = result["id"]
+    tampered = results.launch_changes(pkg)
+    if tampered:
+        ledger.record(pkg, ident, "done", "launch_settings_changed", **run)
+        raise WorkError("launch_settings_changed",
+                        f"the headless launch files were changed ({', '.join(tampered)}), so this run may have had "
+                        "no Stop hook or no sandbox; nothing was marked. Check the run's work by hand; its start "
+                        "writes the files again", EXIT_CHECK_FAILED,
+                        details={"id": ident, "files": tampered, "result_file": result_file})
     if result["status"] == "done":
         from .work import done
         payload = done(pkg, ident, run=run, **done_options)
@@ -206,7 +316,11 @@ def promote(pkg: Package, ident: str, *, force: bool = False, allow_incomplete: 
 
     An item with no `Done when` or no `Touches` is refused unless `allow_incomplete`: an agent would have nothing to
     finish against, and an item without Touches can't run alongside anything."""
-    item, _, _ = _locate(pkg, ident)
+    item, path, _ = _locate(pkg, ident)
+    if path is not None:
+        problems = check_proposal(pkg.rel(path), path.stem, path.read_text(encoding="utf-8"))
+        if problems:
+            raise WorkError("bad_proposal", "; ".join(problems), details={"id": ident, "problems": problems})
     if item.status != "proposed":
         raise WorkError("bad_status", f"{ident} is {item.status}, not proposed", details={"id": ident})
     missing = [name for name, empty in (("Done when", item.done_when.strip().lower() in NO_VALUE),

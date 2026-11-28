@@ -28,21 +28,24 @@ there is still checked.
 The gate fails closed: if git can't answer (no integration branch, a missing commit, a shallow clone), it raises
 `GateError` instead of passing.
 
-Findings fall in two groups, so each can be waived on its own: test and plan changes, and scope changes.
+Findings fall in groups (`WAIVER_GROUPS`) so that each can be waived on its own: test and plan changes, scope
+changes, and dependency changes. Only the lead can waive: `its waive` writes a `Waiver` field on the item on the
+integration branch, and the gate honours only the integration branch's copy (`Inspection.waiver`). A branch that
+writes a Waiver on its own item changes the item (`item_changed`).
 """
 from __future__ import annotations
 
 import posixpath
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 from . import claims as cl
-from . import tamper
-from .backlog import BACKLOG, BacklogItem, parse_backlog
+from . import deps, gitx, tamper
+from .backlog import BACKLOG, BRANCH_FIELDS, BacklogItem, check_proposal, parse_backlog
+from .checks import Settings
 from .ids import META_FILES, line_fields
 from .package import Package
 from .touches import covered
@@ -50,15 +53,31 @@ from .touches import covered
 TEST_KINDS = ("test_deleted", "assertions_removed", "skip_added", "verify_changed", "policy_changed",
               "item_changed", "other_item_changed", "agent_config_changed", "assertions_weakened", "test_disabled",
               "test_config_changed", "acceptance_changed", "tests_pass_on_parent", "test_removed",
-              "no_test_report", "failures_hidden", "no_tests_ran", "tests_skipped")
+              "no_test_report", "failures_hidden", "no_tests_ran", "tests_skipped", "proposal_invalid")
 SCOPE_KINDS = ("outside_touches", "touches_changed", "no_changes")
-OWN_FIELDS = {"status", "verified", "blocked", "override"}  # what a branch may change on its own item
+DEPENDENCY_KINDS = ("dependency_added",)
+# What `its waive --<group>` waives.
+WAIVER_GROUPS = {"test-changes": TEST_KINDS, "outside-touches": SCOPE_KINDS, "dependencies": DEPENDENCY_KINDS}
+WAIVER_FIELD = "Waiver"
+REFUSALS = ("test_changes", "dependency_changes", "outside_touches")  # the error codes a gate refusal has
+
+
+def refusal(blocking: list[dict]) -> str:
+    """The error code for refused findings, by the group of the worst: tests first, then dependencies, then scope."""
+    found = {f["kind"] for f in blocking}
+    if found & set(TEST_KINDS):
+        return "test_changes"
+    return "dependency_changes" if found & set(DEPENDENCY_KINDS) else "outside_touches"
+
+
+OWN_FIELDS = set(BRANCH_FIELDS)  # what a branch may change on its own item
 MODES = ("enforce", "warn", "off")
 # Checks that can misfire on honest work start in warn mode: they are reported but don't refuse the item until a
 # person sets `gate: {checks: {<kind>: enforce}}` in package.yaml (a new scaffold sets that for all of them). Every
 # other check enforces. Only the RELAXABLE checks can be set to warn or off; the rest always enforce.
 DEFAULT_MODES = {"assertions_weakened": "warn", "test_disabled": "warn", "test_config_changed": "warn",
-                 "tests_pass_on_parent": "warn", "no_test_report": "warn", "tests_skipped": "warn"}
+                 "tests_pass_on_parent": "warn", "no_test_report": "warn", "tests_skipped": "warn",
+                 "dependency_added": "warn"}
 RELAXABLE = set(DEFAULT_MODES) | {"test_removed", "failures_hidden", "no_tests_ran"}
 DEFAULT_ACCEPTANCE = "tests/acceptance/"
 
@@ -84,6 +103,7 @@ class Change:
     path: str              # package-relative (`../x` for a file outside the package), after the change
     old_path: str | None = None
     untracked: bool = False
+    hidden: bool = False   # untracked and ignored by git, but a test runner reads it (see `hidden_test_config`)
     git_path: str = ""     # repository-relative, for asking git about it
     git_old_path: str | None = None
 
@@ -99,6 +119,7 @@ class Policy:
     source: str = "working tree"
     modes: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MODES))
     acceptance: str = DEFAULT_ACCEPTANCE   # held-out tests: run by land, hidden from agents' worktrees
+    run: Settings = field(default_factory=Settings)  # how checks run: gate.env and gate.timeout
 
     @classmethod
     def of(cls, manifest: dict, source: str) -> Policy:
@@ -116,10 +137,36 @@ class Policy:
                     modes[str(kind)] = str(mode)
         acceptance = gate.get("acceptance_path")
         acceptance = str(acceptance).strip().strip("/") + "/" if acceptance else DEFAULT_ACCEPTANCE
-        return cls(cmds, globs, source, modes, acceptance)
+        return cls(cmds, globs, source, modes, acceptance, Settings.of(gate))
 
     def mode(self, kind: str) -> str:
         return self.modes.get(kind, "enforce")
+
+
+@dataclass(frozen=True)
+class Waiver:
+    """A waiver the lead recorded with `its waive`: `- **Waiver:** 2026-11-28; test-changes, dependencies; why`."""
+    date: str
+    groups: tuple[str, ...]
+    reason: str
+
+    @property
+    def kinds(self) -> frozenset[str]:
+        return frozenset(kind for group in self.groups for kind in WAIVER_GROUPS.get(group, ()))
+
+    def render(self) -> str:
+        return f"{self.date}; {', '.join(self.groups)}; {self.reason}"
+
+    @classmethod
+    def parse(cls, text: str | None) -> Waiver | None:
+        parts = [p.strip() for p in (text or "").split(";", 2)]
+        if len(parts) != 3 or not parts[2]:
+            return None
+        groups = tuple(g for g in re.split(r"[\s,]+", parts[1]) if g in WAIVER_GROUPS)
+        return cls(parts[0], groups, parts[2]) if groups else None
+
+    def to_dict(self) -> dict:
+        return {"date": self.date, "groups": list(self.groups), "reason": self.reason}
 
 
 @dataclass
@@ -135,10 +182,25 @@ class Inspection:
     touches_checked: bool = False
     policy: Policy = field(default_factory=Policy)
     planned: BacklogItem | None = None  # the item as the integration branch has it
+    waiver_item: BacklogItem | None = None  # the item in the last waive commit, on the plain flow
 
-    def blocking(self, *, allow_test_changes: bool = False, allow_outside_touches: bool = False) -> list[dict]:
-        allowed = (TEST_KINDS if allow_test_changes else ()) + (SCOPE_KINDS if allow_outside_touches else ())
-        return [f for f in self.findings if f["kind"] not in allowed and f.get("mode") != "warn"]
+    @property
+    def waiver(self) -> Waiver | None:
+        """The lead's waiver for the item: only ever read from the integration branch's copy of it (on the plain
+        flow, from the last commit `its waive` made there)."""
+        item = self.waiver_item or self.planned
+        return Waiver.parse(item.get(WAIVER_FIELD)) if item else None
+
+    def blocking(self) -> list[dict]:
+        """The findings that refuse the item: every enforced finding the integration branch's waiver doesn't cover."""
+        waived = self.waiver.kinds if self.waiver else frozenset()
+        return [f for f in self.findings if f["kind"] not in waived and f.get("mode") != "warn"]
+
+    @property
+    def waived(self) -> list[dict]:
+        """The enforced findings the waiver lets through."""
+        waived = self.waiver.kinds if self.waiver else frozenset()
+        return [f for f in self.findings if f["kind"] in waived and f.get("mode") != "warn"]
 
     @property
     def warnings(self) -> list[dict]:
@@ -161,8 +223,7 @@ class Inspection:
 def run_git(cwd: Path, *args: str, check: bool = True, input_text: str | None = None) -> str:
     """Run git with unquoted UTF-8 paths. With `check`, a failure raises GateError instead of reading as "no
     changes"."""
-    proc = subprocess.run(["git", "-c", "core.quotePath=false", *args], cwd=cwd, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", input=input_text)
+    proc = gitx.run(cwd, *args, input=input_text)
     if check and proc.returncode != 0:
         raise GateError(f"git {args[0]} failed: {proc.stderr.strip() or proc.stdout.strip() or proc.returncode}")
     return proc.stdout if proc.returncode == 0 else ""
@@ -218,7 +279,29 @@ def changed_files(pkg: Package, merge_base: str, head: str | None) -> list[Chang
     if head is None:
         for path in _nul(run_git(top, "ls-files", "-z", "--others", "--exclude-standard")):
             out.append(Change("A", _local(prefix, path), untracked=True, git_path=path))
+        for path in hidden_test_config(top):
+            out.append(Change("A", _local(prefix, path), untracked=True, hidden=True, git_path=path))
     return out
+
+
+# Test configuration a runner reads whether or not git ignores it, by name (`tamper.TEST_CONFIG_FILES`).
+HIDDEN_CONFIG_NAMES = ("conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "setup.py", "pyproject.toml",
+                       "sitecustomize.py", "usercustomize.py", "*.pth", "package.json", ".mocharc*", "jest.config.*",
+                       "vitest.config.*", "playwright.config.*", "cypress.config.*", "karma.conf.*")
+# Folders that hold installed packages or tool caches, where such files are expected.
+INSTALL_DIRS = {"venv", "env", "site-packages", "dist-packages", "node_modules", "__pycache__"}
+
+
+def hidden_test_config(top: Path) -> list[str]:
+    """Untracked test configuration that git ignores, so the ordinary untracked listing misses it: a `conftest.py`
+    hidden through `.git/info/exclude` (which an agent's worktree can write), a global excludes file, or a
+    `.gitignore`. The test runner reads it all the same. Files in dot-folders and package folders (`.venv`,
+    `node_modules`, `site-packages`, ...) are left out."""
+    specs = [f":(glob)**/{name}" for name in HIDDEN_CONFIG_NAMES]
+    listed = _nul(run_git(top, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", *specs,
+                          check=False))
+    return [p for p in listed if tamper.is_test_config(p)
+            and not any(part.startswith(".") or part in INSTALL_DIRS for part in p.split("/")[:-1])]
 
 
 def _before(pkg: Package, merge_base: str, change: Change) -> str | None:
@@ -226,8 +309,8 @@ def _before(pkg: Package, merge_base: str, change: Change) -> str | None:
     if change.status == "A" and change.git_old_path is None:
         return None
     path = change.git_old_path or change.git_path
-    proc = subprocess.run(["git", "show", f"{merge_base}:{path}"], cwd=cl.toplevel(pkg.root), capture_output=True)
-    return proc.stdout.decode("utf-8", "replace") if proc.returncode == 0 else None
+    data = gitx.show(cl.toplevel(pkg.root), f"{merge_base}:{path}")
+    return data.decode("utf-8", "replace") if data is not None else None
 
 
 def after_content(pkg: Package, head: str | None, change: Change) -> str | None:
@@ -240,8 +323,8 @@ def after_content(pkg: Package, head: str | None, change: Change) -> str | None:
             return (top / change.git_path).read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
-    proc = subprocess.run(["git", "show", f"{head}:{change.git_path}"], cwd=top, capture_output=True)
-    return proc.stdout.decode("utf-8", "replace") if proc.returncode == 0 else None
+    data = gitx.show(top, f"{head}:{change.git_path}")
+    return data.decode("utf-8", "replace") if data is not None else None
 
 
 # --- the plan --------------------------------------------------------------------------------------------------
@@ -278,11 +361,20 @@ def manifest_at(pkg: Package, ref: str) -> dict | None:
 
 
 def _plan_findings(pkg: Package, ident: str, texts: dict[str, str | None], result: Inspection) -> None:
-    """Compare the backlog the branch has with the one it forked from, item by item."""
+    """Compare the backlog the branch has with the one it forked from, item by item. A change the integration
+    branch made too is merged in, not made here. On the plain flow, a Waiver field that `its waive` committed since
+    the start (`texts["waived"]`, that commit's backlog) isn't the branch's change either."""
     mine_text, fork_text, plan_text = texts["mine"], texts["fork"], texts["planned"]
-    mine, forked, planned = _items(mine_text), _items(fork_text), _items(plan_text)
+    mine, forked, planned, waived = _items(mine_text), _items(fork_text), _items(plan_text), _items(texts.get("waived"))
     rel = pkg.rel(pkg.path_of(BACKLOG))
     me, was, plan = mine.get(ident), forked.get(ident), planned.get(ident)
+
+    def leaves(item_id: str, item: BacklogItem | None) -> set[str]:
+        """{"waiver"} when the branch's Waiver on the item is the one `its waive` wrote, so it is left out."""
+        lead = waived.get(item_id)
+        value = item.get(WAIVER_FIELD) if item else ""
+        return {"waiver"} if lead is not None and value and value == lead.get(WAIVER_FIELD) else set()
+
     if me is not None and was is not None:
         if me.verify != was.verify and (plan is None or me.verify != plan.verify):
             result.add({
@@ -295,9 +387,10 @@ def _plan_findings(pkg: Package, ident: str, texts: dict[str, str | None], resul
                 "kind": "touches_changed", "file": rel,
                 "message": f"the branch changed {ident}'s Touches; change the plan on {result.base} first",
                 "planned": (plan or was).touches, "branch": me.touches})
-        drop = OWN_FIELDS | {"verify", "touches"}
-        if _item_body(mine_text or "", me, drop) != _item_body(fork_text or "", was, drop) and (
-                plan is None or _item_body(mine_text or "", me, drop) != _item_body(plan_text or "", plan, drop)):
+        drop = OWN_FIELDS | {"verify", "touches"} | leaves(ident, me)
+        body = _item_body(mine_text or "", me, drop)
+        if body != _item_body(fork_text or "", was, drop) and (
+                plan is None or body != _item_body(plan_text or "", plan, drop)):
             result.add({
                 "kind": "item_changed", "file": rel,
                 "message": f"the branch changed {ident}'s plan (only its Status, Verified and Blocked fields are its "
@@ -307,12 +400,13 @@ def _plan_findings(pkg: Package, ident: str, texts: dict[str, str | None], resul
         if other == ident:
             continue
         a, b = mine.get(other), forked.get(other)
-        body_a = _item_body(mine_text or "", a) if a else None
-        body_b = _item_body(fork_text or "", b) if b else None
+        skip = leaves(other, a)
+        body_a = _item_body(mine_text or "", a, skip) if a else None
+        body_b = _item_body(fork_text or "", b, skip) if b else None
         if body_a == body_b:
             continue
         c = planned.get(other)
-        if c is not None and body_a == _item_body(plan_text or "", c):
+        if c is not None and body_a == _item_body(plan_text or "", c, skip):
             continue  # the integration branch made the same change: merged in, not made here
         changed.append(other)
     if changed:
@@ -324,9 +418,11 @@ def _plan_findings(pkg: Package, ident: str, texts: dict[str, str | None], resul
 # --- the gate --------------------------------------------------------------------------------------------------
 
 def inspect(pkg: Package, ident: str, base_ref: str | None, *, head: str | None = None,
-            fork: str | None = None) -> Inspection:
+            fork: str | None = None, waiver_ref: str | None = None) -> Inspection:
     """Compare the branch (the working tree, or `head`) with `base_ref`, for the item `ident`. `fork` is the fork
-    point when it isn't the merge base: the commit an item started from on the integration branch itself."""
+    point when it isn't the merge base: the commit an item started from on the integration branch itself. On that
+    plain flow the rules come from the fork point, and the waiver from `waiver_ref`, the last waiver `its waive`
+    committed since (`trust.last_waiver`)."""
     root = pkg.root
     backlog = pkg.path_of(BACKLOG)
     if head is None:
@@ -361,10 +457,14 @@ def inspect(pkg: Package, ident: str, base_ref: str | None, *, head: str | None 
     fork_text = cl.read_at(root, merge_base, backlog)
     planned = _items(plan_text).get(ident)
     result.planned = planned
+    waived_text = cl.read_at(root, waiver_ref, backlog) if fork is not None and waiver_ref else None
+    if waived_text is not None:
+        result.waiver_item = _items(waived_text).get(ident)
     if planned is not None:
         result.verify_command, result.touches = planned.verify_command, planned.touches
         result.verify_source = base_ref if fork is None else f"{base_ref} when {ident} started"
-    _plan_findings(pkg, ident, {"mine": branch_text, "fork": fork_text, "planned": plan_text}, result)
+    _plan_findings(pkg, ident, {"mine": branch_text, "fork": fork_text, "planned": plan_text,
+                                "waived": waived_text}, result)
 
     result.changes = changed_files(pkg, merge_base, head)
     planning = _planning_prefix(pkg)
@@ -388,8 +488,12 @@ def inspect(pkg: Package, ident: str, base_ref: str | None, *, head: str | None 
             config.add(path)
         if planning and path.startswith(planning):
             logical = "planning/" + path[len(planning):]
+            if logical.startswith(proposals) and change.status != "D":
+                text = after_content(pkg, head, change) or ""
+                for problem in check_proposal(path, posixpath.splitext(posixpath.basename(path))[0], text):
+                    result.add({"kind": "proposal_invalid", "file": path, "message": problem})
             if logical == pkg.rel(backlog) or logical in generated or logical.startswith(proposals):
-                continue  # the backlog is diffed item by item above; proposals and generated files are free
+                continue  # the backlog is diffed item by item above; valid proposals and generated files are free
             if not in_touches(path, result.touches):
                 outside.add(path)
             continue
@@ -405,6 +509,14 @@ def inspect(pkg: Package, ident: str, base_ref: str | None, *, head: str | None 
                         "message": f"the branch changed {path}, a held-out acceptance test; only a person changes "
                                    "those, on the integration branch"})
             continue
+        if deps.kind_of(path) and change.status != "D":
+            for finding in deps.findings(path, _before(pkg, merge_base, change), after_content(pkg, head, change)):
+                result.add(finding)
+        if change.hidden:
+            result.add({"kind": "test_config_changed", "file": path, "hidden": True,
+                        "message": f"{path} is test configuration that git ignores (through .git/info/exclude, a "
+                                   "global excludes file or a .gitignore), so the diff doesn't show it, but the test "
+                                   "runner still reads it"})
         if tamper.is_test_config(path):
             for finding in tamper.config_findings(path, _before(pkg, merge_base, change),
                                                   after_content(pkg, head, change)):

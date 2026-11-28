@@ -14,23 +14,23 @@ needs the history, so in a shallow clone it is reported as unknown, never as cle
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
 
 from . import claims as cl
+from . import gitx
 from .backlog import BACKLOG, BacklogItem, load_backlog, parse_backlog
+from .contract import SCHEMA, WorkError
 from .gate import _planning_prefix
 from .package import Package
 from .touches import covered
-from .work import SCHEMA, WorkError, touched_files, touches_hash
+from .work import touched_files, touches_hash
 
 COMMIT_LIMIT = 10
 TREE_RE = re.compile(r"\btree ([0-9a-f]{6,40})\b")
 
 
 def _git(root: Path, *args: str) -> str:
-    proc = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace")
+    proc = gitx.run(root, *args)
     return proc.stdout if proc.returncode == 0 else ""
 
 
@@ -75,11 +75,15 @@ def drift(pkg: Package) -> dict:
     items = load_backlog(pkg)
     history = History(pkg)
     planning = _planning_prefix(pkg)
-    shallow = subprocess.run(["git", "rev-parse", "--is-shallow-repository"], cwd=pkg.root, capture_output=True,
-                             text=True, encoding="utf-8", errors="replace").stdout.strip() == "true"
+    shallow = gitx.out(pkg.root, "rev-parse", "--is-shallow-repository", check=False) == "true"
     drifted, unknown, no_touches, clean = [], [], [], []
     for item in items:
         if item.status != "done":
+            continue
+        if (item.get("Verified") or "").startswith("skipped"):
+            unknown.append({"id": item.id, "reason": "not_verified",
+                            "message": "it was set done without its checks (its done --no-verify); run its verify "
+                                       f"{item.id} to check it"})
             continue
         if not item.touches:
             no_touches.append(item.id)

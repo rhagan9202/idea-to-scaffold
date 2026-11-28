@@ -23,9 +23,10 @@ import re
 from . import claims as cl
 from . import gate
 from .backlog import BACKLOG, load_backlog
+from .contract import SCHEMA, WorkError
 from .ids import ID_RE, sections, strip_links
 from .package import Package
-from .work import SCHEMA, WorkError, _find, _ref, base_ref, gate_target, item_here, show_payload
+from .work import _find, _ref, base_ref, gate_target, item_here, show_payload
 
 DIFF_LIMIT = 200_000  # characters of diff to include; the rest is cut and flagged
 AUTHOR_NOTES = re.compile(r"(^|/)(HANDOFF|NOTES|PROGRESS|SUMMARY|WORKLOG|CHANGES)(\.[\w-]+)?\.(md|txt)$|(^|/)\.its/", re.I)

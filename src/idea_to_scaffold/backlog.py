@@ -276,9 +276,11 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def set_field(pkg: Package, item_id: str, name: str, value: str, *, add: bool = False,
-              path: Path | None = None) -> str:
+              path: Path | None = None, apart: bool = False) -> str:
     """Replace one field's value in place, keeping the rest of the file byte for byte. Returns the old value ("" if
-    the field was added). With `add`, a missing field is added on a new line after the item's Status.
+    the field was added). With `add`, a missing field is added on a new line after the item's Status, or with
+    `apart` at the end of the item (or its start), away from the fields a branch changes on its own item, so a field
+    the lead adds on the integration branch merges cleanly with a branch's `its done`.
 
     The read, change and write happen under the package lock, so two commands changing different items at the same
     moment can't lose either change. `path` names another file holding the item (a proposal)."""
@@ -287,7 +289,7 @@ def set_field(pkg: Package, item_id: str, name: str, value: str, *, add: bool = 
         raise BacklogError(f"{pkg.rel(path) if path.is_relative_to(pkg.root) else path} not found")
     try:
         with package_lock(pkg.root):
-            return _set_field(path, item_id, name, value, add)
+            return _set_field(path, item_id, name, value, add, apart)
     except LockTimeout as exc:
         raise BacklogError(str(exc)) from None
 
@@ -323,7 +325,10 @@ def _one(text: str, item_id: str) -> BacklogItem:
     return items[0]
 
 
-def _set_field(path: Path, item_id: str, name: str, value: str, add: bool = False) -> str:
+BRANCH_FIELDS = ("status", "verified", "blocked", "override")  # what `its done` and `its block` change
+
+
+def _set_field(path: Path, item_id: str, name: str, value: str, add: bool = False, apart: bool = False) -> str:
     text = _read(path)
     item = _one(text, item_id)
     lines = text.split("\n")  # keeps any "\r" at line ends, so line endings are preserved
@@ -332,10 +337,15 @@ def _set_field(path: Path, item_id: str, name: str, value: str, add: bool = Fals
         anchor = item.fields.get("status")
         if not add or anchor is None:
             raise BacklogError(f"{item_id} has no **{name}:** field")
-        status_line = lines[anchor.line]
-        prefix = status_line[: status_line.index("**")] if "**" in status_line else "- "
-        eol = "\r" if status_line.endswith("\r") else ""
-        lines.insert(anchor.line + 1, f"{prefix}**{name}:** {value}{eol}")
+        at = anchor.line + 1
+        if apart:
+            used = sorted({f.line for f in item.fields.values()})
+            own = {item.fields[k].line for k in BRANCH_FIELDS if k in item.fields}
+            at = used[-1] + 1 if used[-1] not in own or used[0] in own else used[0]
+        neighbour = lines[anchor.line]
+        prefix = neighbour[: neighbour.index("**")] if "**" in neighbour else "- "
+        eol = "\r" if neighbour.endswith("\r") else ""
+        lines.insert(at, f"{prefix}**{name}:** {value}{eol}")
         _atomic_write(path, "\n".join(lines))
         return ""
     line = lines[span.line]
@@ -354,6 +364,43 @@ def set_status(pkg: Package, item_id: str, status: str, *, path: Path | None = N
 
 
 # --- proposals -----------------------------------------------------------------------------------------------
+
+PROPOSAL_ONLY_ITS = ("verified", "override", "waiver", "blocked")  # fields a proposal can't carry yet
+
+
+def check_proposal(rel: str, stem: str, text: str) -> list[str]:
+    """What is wrong with one proposal file, as messages: it must hold exactly one item, whose placeholder ID is the
+    file's name, with status `proposed` and none of the fields `its` sets on scheduled work. A proposal skips the
+    gate's item-by-item diff, so anything else would enter the backlog unchecked: an item already done, or one that
+    takes a real item's ID."""
+    items = parse_backlog(text)
+    if len(items) != 1:
+        return [f"{rel}: holds {len(items)} items; a proposal file holds exactly one"]
+    item = items[0]
+    out = []
+    if not item.placeholder:
+        out.append(f"{rel}: holds {item.id}, a permanent ID; a proposal has a placeholder ID (T-new-<name>)")
+    elif item.id != stem:
+        out.append(f"{rel}: holds {item.id}, but the file is named {stem}; a proposal's file is named after its ID")
+    if item.status != "proposed":
+        out.append(f"{rel}: {item.id} is {item.status or 'missing a status'}; a proposal is proposed until its promote "
+                   "or its renumber schedules it")
+    extra = [name.capitalize() for name in PROPOSAL_ONLY_ITS if name in item.fields]
+    if extra:
+        out.append(f"{rel}: {item.id} has {', '.join(extra)}, which only scheduled items carry")
+    return out
+
+
+def proposal_problems(pkg: Package) -> list[str]:
+    """`check_proposal` for every proposal file."""
+    out: list[str] = []
+    for path in pkg.proposal_files():
+        try:
+            out += check_proposal(pkg.rel(path), path.stem, _read(path))
+        except (OSError, UnicodeDecodeError) as exc:
+            out.append(f"{pkg.rel(path)}: can't be read ({exc})")
+    return out
+
 
 def load_proposals(pkg: Package) -> list[tuple[Path, BacklogItem]]:
     """Proposed items waiting in `planning/proposals/`, one per file, in file-name order. A proposal lives in its own

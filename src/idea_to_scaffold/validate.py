@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from .backlog import bad_touches, find_cycles, load_backlog
+from .backlog import bad_touches, find_cycles, load_backlog, proposal_problems
 from .ids import (
     ID_RE,
     META_FILES,
@@ -271,6 +271,7 @@ def validate(pkg: Package, *, check_links_current: bool = True) -> Report:
                         r.errors.append(f"{ident}: {label}")
     must = _must_requirements(planning.get("planning/03-requirements.md", ""))
     _check_backlog(pkg, defined, must, r)
+    r.errors += proposal_problems(pkg)
     _check_plan_tasks(planning.get("planning/06-project-plan.md", ""), r)
 
     # Links

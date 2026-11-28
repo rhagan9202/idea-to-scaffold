@@ -23,7 +23,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from . import claims as cl
-from . import gate, ledger, results
+from . import gate, gitx, ledger, results, trust
 from .backlog import (
     BACKLOG,
     BacklogError,
@@ -33,6 +33,7 @@ from .backlog import (
     load_backlog,
     load_proposals,
     parse_backlog,
+    proposal_problems,
     ready_items,
     set_field,
     set_status,
@@ -46,40 +47,27 @@ from .checks import (  # noqa: F401 - re-exported: check running lived here befo
     result_findings,
     run_check,
 )
+from .contract import (  # noqa: F401 - re-exported: the contract lived here before phase 10
+    EXIT_AUDIT_MISSED,
+    EXIT_BLOCKED,
+    EXIT_CHECK_FAILED,
+    EXIT_COMPLETE,
+    EXIT_DRIFT,
+    EXIT_ERROR,
+    EXIT_NOT_LANDED,
+    EXIT_NOTHING_READY,
+    EXIT_OK,
+    EXIT_OVERLAP,
+    SCHEMA,
+    WorkError,
+)
 from .ids import KIND_LABELS, META_FILES, definition_on_line, id_kind, is_placeholder, scan_lines, strip_links
 from .linker import NAV_BLOCK_RE, Doc, Target, _load_docs, link_package, scan_package
-from .locking import LockTimeout, git_store_dir, package_lock
+from .locking import LockTimeout, git_common_dir, git_store_dir, package_lock
 from .package import Package
 from .touches import covered
 
-SCHEMA = 1
 BACKLOG_JSON = "planning/backlog.json"
-
-EXIT_OK = 0
-EXIT_ERROR = 1
-EXIT_NOTHING_READY = 3
-EXIT_BLOCKED = 4
-EXIT_CHECK_FAILED = 5
-EXIT_OVERLAP = 6
-EXIT_NOT_LANDED = 7
-EXIT_DRIFT = 8
-EXIT_COMPLETE = 9
-EXIT_AUDIT_MISSED = 10  # gate-audit: the gate missed a seeded cheat  # `next`: nothing left, every item is done
-
-
-
-@dataclass
-class WorkError(Exception):
-    code: str
-    message: str
-    exit_code: int = EXIT_ERROR
-    details: dict = field(default_factory=dict)
-
-    def __str__(self) -> str:
-        return self.message
-
-    def to_dict(self) -> dict:
-        return {"schema": SCHEMA, "ok": False, "error": {"code": self.code, "message": self.message, **self.details}}
 
 
 def shown(pkg: Package, rel: str) -> str:
@@ -521,9 +509,9 @@ def _start(
         where = f" in {claim.worktree}" if claim.worktree else ""
         raise WorkError("claimed", f"{ident} is already claimed by branch {claim.branch}{where}",
                         details={"id": ident, "claim": claim.to_dict()})
-    if item.status == "in-progress":
+    if item.status == "in-progress" and (claiming or not force):  # --force here records the start again
         raise WorkError("already_started", f"{ident} is already in-progress", details={"id": ident})
-    if item.status != "todo" and not (force and item.status == "blocked"):
+    if item.status not in ("todo", "in-progress") and not (force and item.status == "blocked"):
         raise WorkError("bad_status", f"{ident} is {item.status or 'missing a status'}; only todo items can be started",
                         details={"id": ident, "status": item.status})
     base_item = next((i for i in v.items if i.id == ident), item)
@@ -708,15 +696,15 @@ def red_on_parent(pkg: Package, ident: str, inspection: gate.Inspection, verify_
         here = tree / prefix if prefix else tree
         setup = policy.commands.get("setup")
         if setup and setup.strip() != "true":
-            prepared = run_check(Check("setup", setup), here)
+            prepared = run_check(Check("setup", setup), here, policy.run)
             if not prepared["passed"]:
                 return {"ran": False, "reason": "setup failed on the parent", "files": [c.path for c in tests],
                         "command": command}
-        result = run_check(Check("verify", command), here)
+        result = run_check(Check("verify", command), here, policy.run)
     except gate.GateError as exc:
         return {"ran": False, "reason": str(exc), "files": [c.path for c in tests]}
     finally:
-        subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=top, capture_output=True)
+        gitx.run(top, "worktree", "remove", "--force", str(tree))
         shutil.rmtree(scratch, ignore_errors=True)
     files = [c.path for c in tests]
     if result["passed"]:
@@ -746,8 +734,7 @@ def hide_acceptance(pkg: Package, worktree: Path, base: str) -> str | None:
     folder = prefix + policy.acceptance
     if not gate.run_git(pkg.root, "ls-tree", "-d", "--name-only", base, "--", folder.rstrip("/"), check=False).strip():
         return None
-    proc = subprocess.run(["git", "sparse-checkout", "set", "--no-cone", "/*", f"!/{folder}"], cwd=worktree,
-                          capture_output=True, text=True, encoding="utf-8", errors="replace")
+    proc = gitx.run(worktree, "sparse-checkout", "set", "--no-cone", "/*", f"!/{folder}")
     if proc.returncode != 0:
         raise WorkError("git_error", f"couldn't hide {folder} from the worktree: {proc.stderr.strip()}",
                         details={"worktree": str(worktree)})
@@ -785,8 +772,7 @@ def gate_target(pkg: Package, ident: str) -> tuple[str | None, str | None]:
     fork = None
     if here is not None and here == name:
         fork = cl.fork_of(pkg.root, ident)
-        if fork and subprocess.run(["git", "merge-base", "--is-ancestor", fork, "HEAD"], cwd=pkg.root,
-                                   capture_output=True).returncode != 0:
+        if fork and not gitx.ok(pkg.root, "merge-base", "--is-ancestor", fork, "HEAD"):
             raise WorkError("gate_error", f"{ident} can't be checked: the commit it started from ({fork[:10]}) is no "
                             f"longer in {name}'s history; start it again", EXIT_CHECK_FAILED, {"id": ident})
     return ref, fork
@@ -795,27 +781,11 @@ def gate_target(pkg: Package, ident: str) -> tuple[str | None, str | None]:
 def inspect_item(pkg: Package, ident: str) -> gate.Inspection:
     """Run the gate's comparison for an item, refusing (never passing) when git can't answer."""
     ref, fork = gate_target(pkg, ident)
+    waiver_ref = trust.last_waiver(pkg.root, integration_branch(pkg), fork) if fork else None
     try:
-        return gate.inspect(pkg, ident, ref, fork=fork)
+        return gate.inspect(pkg, ident, ref, fork=fork, waiver_ref=waiver_ref)
     except gate.GateError as exc:
         raise WorkError("gate_error", f"{ident} can't be checked: {exc}", EXIT_CHECK_FAILED, {"id": ident}) from exc
-
-
-OVERRIDE_ENV = "ITS_ALLOW_OVERRIDES"
-
-
-def check_override(flag: str, reason: str | None) -> str:
-    """A waiver of the gate needs a reason and a person: an interactive terminal, or ITS_ALLOW_OVERRIDES=1 set by
-    whoever runs the agent. It returns the reason, which is recorded on the item."""
-    reason = (reason or "").strip()
-    if not reason:
-        raise WorkError("override_reason", f"{flag} needs a reason, e.g. {flag}='the old test checked removed "
-                        "behaviour'; it is recorded on the item", details={"flag": flag})
-    if os.environ.get(OVERRIDE_ENV) != "1" and not is_terminal(0):
-        raise WorkError("override_needs_person", f"{flag} waives the done gate, so a person has to run it: from a "
-                        f"terminal, or with {OVERRIDE_ENV}=1 set by whoever runs the agent. An agent that can't "
-                        "finish honestly should run its block <ID> --reason '...' instead", details={"flag": flag})
-    return reason
 
 
 def is_terminal(fd: int) -> bool:
@@ -856,9 +826,9 @@ def gate_error(ident: str, blocking: list[dict], inspection: gate.Inspection,
                checks: list[dict] | None = None) -> WorkError:
     """The refusal for findings that aren't allowed: test changes first, since they matter most. `checks` are the
     checks that ran, for a refusal that comes from what their test reports say."""
-    tests = [f for f in blocking if f["kind"] in gate.TEST_KINDS]
-    code = "test_changes" if tests else "outside_touches"
-    worst = tests or blocking
+    code = gate.refusal(blocking)
+    group = {"test_changes": gate.TEST_KINDS, "dependency_changes": gate.DEPENDENCY_KINDS}.get(code, ())
+    worst = [f for f in blocking if f["kind"] in group] or blocking
     fix = ("Make the tests run to the end and report honestly (look for code that exits early, skips, or rewrites "
            "results)" if worst[0]["kind"] in RESULT_KINDS else "Undo that change")
     message = (f"{ident} is not done: {worst[0]['message']}"
@@ -878,8 +848,6 @@ def done(
     *,
     verify: bool = True,
     check_only: bool = False,
-    allow_test_changes: str | None = None,
-    allow_outside_touches: str | None = None,
     on_check: Callable[[Check], None] | None = None,
     run: dict | None = None,
 ) -> dict:
@@ -888,11 +856,10 @@ def done(
     started = time.monotonic()
     extra = dict(run or {})
     try:
-        payload = _done(pkg, ident, verify=verify, check_only=check_only, allow_test_changes=allow_test_changes,
-                        allow_outside_touches=allow_outside_touches, on_check=on_check)
+        payload = _done(pkg, ident, verify=verify, check_only=check_only, on_check=on_check)
     except WorkError as err:
         target = err.details.get("id") or ident
-        if target and err.code in ("check_failed", "test_changes", "outside_touches", "gate_error"):
+        if target and err.code in ("check_failed", "gate_error", "no_fork_point", *gate.REFUSALS):
             kinds = sorted({f["kind"] for f in err.details.get("findings", [])})
             ledger.record(pkg, target, "done", err.code, findings=kinds, check_only=check_only or None,
                           checks=[c["name"] for c in err.details.get("checks", []) if not c["passed"]] or None,
@@ -920,17 +887,17 @@ def _done(
     *,
     verify: bool = True,
     check_only: bool = False,
-    allow_test_changes: str | None = None,
-    allow_outside_touches: str | None = None,
     on_check: Callable[[Check], None] | None = None,
 ) -> dict:
     """Check the item and, if it passes, set it `done`. With no ID, uses the item of the claim branch that is
     checked out, else the only `in-progress` item.
 
     First the branch is compared with the integration branch (`gate.inspect`): the Verify command comes from there,
-    and test tampering or changes outside Touches refuse the item unless allowed. Then Verify, test and lint run,
-    only in a scaffolded repo (a planning package has no code to test). `check_only` does all of that but leaves
-    the status alone, so it can run again on a done item (the Stop hook does).
+    and test tampering or changes outside Touches refuse the item unless the integration branch's copy of the item
+    has a Waiver that covers them (`its waive`). Then Verify, test and lint run, only in a scaffolded repo (a
+    planning package has no code to test). `check_only` does all of that but leaves the status alone, so it can run
+    again on a done item (the Stop hook does). Without `verify` the item is set done unchecked, and its Verified
+    field says so: `its drift` can't vouch for it, and `its land` still runs the checks.
     """
     items = load_backlog(pkg)
     if ident is None:
@@ -949,16 +916,15 @@ def _done(
     if "status" not in item.fields:
         raise WorkError("no_status", f"{ident} has no **Status:** field; add one, then run its done again",
                         details={"id": ident})
-    waivers = {}
-    if allow_test_changes is not None:
-        waivers["test and plan changes"] = check_override("--allow-test-changes", allow_test_changes)
-    if allow_outside_touches is not None:
-        waivers["changes outside Touches"] = check_override("--allow-outside-touches", allow_outside_touches)
     inspection = inspect_item(pkg, ident)
+    if item.status != "done" and _on_base_checkout(pkg) and cl.fork_of(pkg.root, ident) is None:
+        raise WorkError(
+            "no_fork_point", f"{ident} is {item.status} on {integration_branch(pkg)}, but no start was recorded for "
+            f"it, so the gate can't tell which commits are its work; run its start {ident} --force to record where "
+            "it starts from, or work on it in a claim (its start --worktree)", EXIT_CHECK_FAILED, {"id": ident})
     if item.status == "done":  # re-checking finished work (its verify, the Stop hook): it needn't change anything
         inspection.findings = [f for f in inspection.findings if f["kind"] != "no_changes"]
-    blocking = inspection.blocking(allow_test_changes=allow_test_changes is not None,
-                                   allow_outside_touches=allow_outside_touches is not None)
+    blocking = inspection.blocking()
     if blocking:
         raise gate_error(ident, blocking, inspection)
     verify_command = inspection.verify_command  # always the integration branch's, even when changes are waived
@@ -972,7 +938,7 @@ def _done(
         for check in checks_for(pkg, item, verify_command, inspection.policy.commands):
             if on_check:
                 on_check(check)
-            results.append(run_check(check, pkg.root))
+            results.append(run_check(check, pkg.root, inspection.policy.run))
         failed = [r["name"] for r in results if not r["passed"]]
         if failed:
             raise WorkError(
@@ -981,15 +947,13 @@ def _done(
             )
         for finding in result_findings(results, changed_tests(pkg, inspection)):
             inspection.add(finding)
-        blocking = [f for f in inspection.blocking(allow_test_changes=allow_test_changes is not None)
-                    if f["kind"] in RESULT_KINDS]
+        blocking = [f for f in inspection.blocking() if f["kind"] in RESULT_KINDS]
         if blocking:
             raise gate_error(ident, blocking, inspection, checks=results)
     red = None
     if not skipped and item.status != "done":
         red = red_on_parent(pkg, ident, inspection, verify_command)
-        blocking = [f for f in inspection.blocking(allow_test_changes=allow_test_changes is not None)
-                    if f["kind"] == "tests_pass_on_parent"]
+        blocking = [f for f in inspection.blocking() if f["kind"] == "tests_pass_on_parent"]
         if blocking:
             raise gate_error(ident, blocking, inspection)
     manual = item.verify if item.verify and not item.verify_command else None
@@ -1006,19 +970,20 @@ def _done(
         "red_on_parent": red,
     }
     common["warnings"] = inspection.warnings  # checks in warn mode: reported, never refusing
-    waived = [f for f in inspection.findings if f.get("mode") != "warn"]  # any other finding refused the item above
+    waived = inspection.waived  # every other enforced finding refused the item above
+    if waived:
+        common["override"] = {"waived": sorted({f["kind"] for f in waived}), "waiver": inspection.waiver.to_dict()}
     if check_only:
         return {**common, "checked_only": True, "status": item.status, "previous_status": item.status}
     try:
         with _locked(pkg):
             previous = set_status(pkg, ident, "done")
-            verified = mark_verified(pkg, ident, inspection)
+            verified = mark_verified(pkg, ident, inspection, skipped=skipped == "--no-verify")
             if waived:
-                kinds = sorted({f["kind"] for f in waived})
-                note = "; ".join(f"{what}: {why}" for what, why in waivers.items())
-                set_field(pkg, ident, "Override", f"{date.today().isoformat()}, waived {', '.join(kinds)} ({note})",
+                waiver = inspection.waiver
+                set_field(pkg, ident, "Override", f"{date.today().isoformat()}, waived "
+                          f"{', '.join(common['override']['waived'])} (waiver of {waiver.date}: {waiver.reason})",
                           add=True)
-                common["override"] = {"waived": kinds, "reasons": waivers}
     except BacklogError as exc:
         raise WorkError("bad_backlog", str(exc), details={"id": ident}) from exc
     if cl.in_git(pkg.root):
@@ -1035,10 +1000,17 @@ def _done(
     }
 
 
-def mark_verified(pkg: Package, ident: str, inspection: gate.Inspection) -> str:
+SKIPPED_MARK = "skipped (--no-verify)"
+
+
+def mark_verified(pkg: Package, ident: str, inspection: gate.Inspection, *, skipped: bool = False) -> str:
     """Write the item's `Verified` field: the date its checks passed, the integration-branch commit the work was
     built on, and a hash of the files in its Touches as they were checked. `its drift` compares that hash with the
-    files now, so it needs no history, and re-verifying changed code always writes a new value."""
+    files now, so it needs no history, and re-verifying changed code always writes a new value. When the checks were
+    skipped, it says that instead, so nothing reads the item as checked."""
+    if skipped:
+        set_field(pkg, ident, "Verified", SKIPPED_MARK, add=True)
+        return SKIPPED_MARK
     base = inspection.merge_base
     value = date.today().isoformat() + (f", base {base[:10]}" if base else "")
     tree = touches_hash(pkg, inspection.touches)
@@ -1092,6 +1064,18 @@ def touches_hash(pkg: Package, touches: list[str]) -> str | None:
     return digest.hexdigest()[:12]
 
 
+def _on_base_checkout(pkg: Package) -> bool:
+    """Whether this is the lead's checkout of the integration branch: on that branch, in the repository's main
+    worktree (not a linked one, where agents work), and not a claim's."""
+    if not cl.in_git(pkg.root) or cl.current_branch(pkg.root) != integration_branch(pkg):
+        return False
+    if cl.claim_of_worktree(pkg.root):
+        return False
+    git_dir = gitx.out(pkg.root, "rev-parse", "--absolute-git-dir", check=False)
+    common = git_common_dir(pkg.root)
+    return bool(git_dir) and common is not None and Path(git_dir).resolve() == common.resolve()
+
+
 def _off_integration_branch(pkg: Package) -> bool:
     """Whether work here only counts once merged: a git checkout that isn't on the integration branch."""
     if not cl.in_git(pkg.root):
@@ -1104,7 +1088,9 @@ def _off_integration_branch(pkg: Package) -> bool:
 def write_backlog_json(pkg: Package) -> Path:
     """Write the backlog mirror next to the backlog. It is generated, gitignored and never edited by hand."""
     path = pkg.path_of(BACKLOG_JSON)
-    path.write_text(json.dumps(backlog_payload(pkg), indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")  # written whole, then swapped in: never half a file
+    temp.write_text(json.dumps(backlog_payload(pkg), indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    os.replace(temp, path)
     return path
 
 
@@ -1134,6 +1120,10 @@ def renumber(pkg: Package, ids: list[str] | None = None, *, dry_run: bool = Fals
 
 def _renumber(pkg: Package, ids: list[str] | None, *, dry_run: bool) -> dict:
     items = load_backlog(pkg)
+    problems = proposal_problems(pkg)
+    if problems:
+        raise WorkError("bad_proposal", f"{problems[0]}" + (f" (and {len(problems) - 1} more)" if len(problems) > 1
+                        else "") + "; fix the proposal files, then renumber", details={"problems": problems})
     proposals = load_proposals(pkg)
     proposal_of = {item.id: path for path, item in proposals}
     known = {i.id for i in items} | set(proposal_of)
@@ -1184,7 +1174,7 @@ def _renumber(pkg: Package, ids: list[str] | None, *, dry_run: bool) -> dict:
     if pairs and not dry_run:
         backlog_path = pkg.path_of(BACKLOG)
         renumbering = {old for old, _ in pairs}
-        appended = [path for path, item in proposals if item.id in renumbering]
+        appended = list(dict.fromkeys(path for path, item in proposals if item.id in renumbering))
         if appended:  # move each renumbered proposal to the end of the backlog, then delete its file
             text = read_raw(backlog_path)
             eol = "\r\n" if "\r\n" in text else "\n"

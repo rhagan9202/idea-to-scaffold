@@ -11,12 +11,21 @@ the exit code:
 - `no_tests_ran`: the report has no tests, or every test was skipped.
 - `tests_skipped`: tests the item's Verify ran, or tests in test files the branch changed, were skipped.
 
-The checks run without any `PYTEST_ADDOPTS` or `PYTEST_PLUGINS` from the caller's environment, so an agent can't
-switch pytest to `--collect-only` from its own shell.
+A check runs code from the branch, and `its land` runs it as the lead. So a check gets only the environment
+variables on an allow-list (`ALLOWED_ENV`: the path, the locale, temporary folders, the OS's own variables, proxies
+and certificate bundles, toolchain homes), plus the names the integration branch's `gate.env` adds. A token in the
+lead's shell, such as `GH_TOKEN`, never reaches the code under test. `PYTEST_ADDOPTS` and `PYTEST_PLUGINS` are never
+passed, so an agent can't switch pytest to `--collect-only` from its own shell.
+
+A check also has a time limit (`gate.timeout`, `DEFAULT_TIMEOUT` seconds by default). It runs in a process group of
+its own (a new session on POSIX, a new process group on Windows), and when the limit passes the whole group is
+killed, not only the shell, so a test that started a server or a `sleep` in the background doesn't outlive it. Its
+output goes to a temporary file rather than a pipe, so a background process that keeps the output open can't hold
+the check up after the shell exits.
 
 This raises the cost of faking a pass; it doesn't make faking one impossible. Code that runs inside the test
-process can still write a report of its own, and the checks still run with the caller's environment otherwise and
-without a time limit.
+process can still write a report of its own, and it can still read whatever the lead's account can read on disk,
+such as `~/.config/gh` or `~/.ssh`: the allow-list keeps secrets out of the environment, not off the file system.
 """
 from __future__ import annotations
 
@@ -24,6 +33,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
@@ -36,7 +46,35 @@ from .package import Package
 OUTPUT_TAIL = 40          # lines of a failed check's output to keep
 REPORT_LIMIT = 64 << 20   # bytes of JUnit XML read at most
 LIST_LIMIT = 20           # test names kept in a finding or a summary
-SCRUBBED_ENV = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS")
+OUTPUT_READ = 256 << 10   # bytes of a check's output read back (its end)
+DEFAULT_TIMEOUT = 1200    # seconds a check may run before its process tree is killed
+KILL_GRACE = 5            # seconds between asking a timed-out check to stop and killing it
+TIMED_OUT = 124           # the exit code a timed-out check reports
+NEVER_ENV = frozenset({"PYTEST_ADDOPTS", "PYTEST_PLUGINS"})  # set by run_check itself, never passed through
+# The variables a check gets from the caller's environment. Names compare without case (Windows has no case in
+# them; on POSIX the lower-case proxy names are the usual ones).
+ALLOWED_ENV = frozenset(name.upper() for name in (
+    # POSIX basics
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TZ", "TMPDIR", "LANG", "LANGUAGE", "COLUMNS", "LINES",
+    "NO_COLOR", "FORCE_COLOR", "CI", "__CF_USER_TEXT_ENCODING",
+    "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR",
+    # Python and other toolchains
+    "PYTHONUTF8", "PYTHONIOENCODING", "PYTHONDONTWRITEBYTECODE", "VIRTUAL_ENV", "CONDA_PREFIX", "CONDA_DEFAULT_ENV",
+    "JAVA_HOME", "GOPATH", "GOROOT", "GOCACHE", "GOMODCACHE", "GOFLAGS", "CARGO_HOME", "RUSTUP_HOME",
+    # the network: proxies and certificate bundles
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "PIP_CERT",
+    # the commit identity, for tests that make commits
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+    # Windows
+    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "USERNAME", "USERPROFILE",
+    "USERDOMAIN", "COMPUTERNAME", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "ALLUSERSPROFILE",
+    "PUBLIC", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)",
+    "COMMONPROGRAMW6432", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "OS",
+))
+# Families of variables a check gets, except a name that looks like it holds a secret.
+ALLOWED_PREFIXES = ("LC_", "UV_")
+SECRET_RE = re.compile(r"TOKEN|SECRET|PASSW(?:OR)?D|CREDENTIAL|API_?KEY|ACCESS_KEY|PRIVATE_KEY|AUTH", re.I)
 RESULT_KINDS = ("no_test_report", "failures_hidden", "no_tests_ran", "tests_skipped")
 
 # A command that runs pytest: `pytest`, `py.test`, `uv run pytest`, `python -m pytest`, `.venv/bin/pytest`.
@@ -49,6 +87,22 @@ JUNIT_OPTION_RE = re.compile(r"--junit-?xml(?:=|\s+)(\"[^\"]+\"|'[^']+'|[^\s;&|]
 class Check:
     name: str
     command: str
+
+
+@dataclass(frozen=True)
+class Settings:
+    """How checks run: the integration branch's `gate.env` (extra variables to pass) and `gate.timeout`."""
+    env: tuple[str, ...] = ()
+    timeout: float = DEFAULT_TIMEOUT
+
+    @classmethod
+    def of(cls, gate: dict) -> Settings:
+        names = gate.get("env")
+        names = tuple(str(n).strip() for n in names if str(n).strip()) if isinstance(names, list) else ()
+        timeout = gate.get("timeout")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            timeout = DEFAULT_TIMEOUT
+        return cls(names, float(timeout))
 
 
 def checks_for(pkg: Package, item: BacklogItem, verify: str | None | bool = True,
@@ -72,18 +126,27 @@ def runs_pytest(command: str) -> bool:
     return bool(PYTEST_RE.search(command))
 
 
-def check_env(base: dict[str, str] | None = None) -> dict[str, str]:
-    """The environment a check runs in: the caller's, without the variables that change what pytest runs."""
-    env = dict(os.environ if base is None else base)
-    for name in SCRUBBED_ENV:
-        env.pop(name, None)
-    return env
+def check_env(base: dict[str, str] | None = None, extra: tuple[str, ...] | list[str] = ()) -> dict[str, str]:
+    """The environment a check runs in: the caller's variables that are on the allow-list (`ALLOWED_ENV`, or in an
+    `ALLOWED_PREFIXES` family without a secret-looking name), or that `extra` names (the project's `gate.env`)."""
+    wanted = {n.upper() for n in extra} - NEVER_ENV
+    out = {}
+    for name, value in (os.environ if base is None else base).items():
+        key = name.upper()
+        if key in NEVER_ENV:
+            continue
+        if (key in ALLOWED_ENV or key in wanted
+                or (key.startswith(ALLOWED_PREFIXES) and not SECRET_RE.search(key))):
+            out[name] = value
+    return out
 
 
-def run_check(check: Check, cwd: Path) -> dict:
-    """Run one check in `cwd`. When the command runs pytest, the result also carries `results`, the summary of the
-    JUnit report it wrote (`{"report": False}` when it wrote none)."""
-    env = check_env()
+def run_check(check: Check, cwd: Path, settings: Settings | None = None) -> dict:
+    """Run one check in `cwd`, with the allow-listed environment and the time limit from `settings`. When the
+    command runs pytest, the result also carries `results`, the summary of the JUnit report it wrote
+    (`{"report": False}` when it wrote none). A check that runs out of time has `timed_out: True` and fails."""
+    settings = settings or Settings()
+    env = check_env(extra=settings.env)
     folder = report = None
     if runs_pytest(check.command):
         folder = Path(tempfile.mkdtemp(prefix="its-report-"))
@@ -91,22 +154,87 @@ def run_check(check: Check, cwd: Path) -> dict:
         # pytest splits PYTEST_ADDOPTS with shlex, so the path is quoted for it and uses forward slashes on Windows
         env["PYTEST_ADDOPTS"] = f"--junitxml={shlex.quote(report.as_posix())} -o junit_family=xunit1"
     try:
-        proc = subprocess.run(check.command, shell=True, cwd=cwd, capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", stdin=subprocess.DEVNULL, env=env)
-        output = (proc.stdout + proc.stderr).rstrip("\n").split("\n")
+        code, output, timed_out = run_command(check.command, cwd, env, settings.timeout)
         result = {
             "name": check.name,
             "command": check.command,
-            "exit_code": proc.returncode,
-            "passed": proc.returncode == 0,
-            "output": "\n".join(output[-OUTPUT_TAIL:]) if proc.returncode else "",
+            "exit_code": code,
+            "passed": code == 0 and not timed_out,
+            "output": output if code or timed_out else "",
         }
+        if timed_out:
+            result["timed_out"] = True
+            result["output"] = (output + "\n" if output else "") + (
+                f"[its] {check.name} ran for more than {settings.timeout:g} s; its process tree was killed "
+                "(gate.timeout in package.yaml sets the limit)")
+            return result
         if report is not None:
             result["results"] = read_report(_report_path(check.command, cwd, report))
         return result
     finally:
         if folder is not None:
             shutil.rmtree(folder, ignore_errors=True)
+
+
+def run_command(command: str, cwd: Path, env: dict[str, str], timeout: float) -> tuple[int, str, bool]:
+    """Run a shell command in a process group of its own: (exit code, the end of its output, whether it timed
+    out). Past `timeout` seconds, or if `its` itself is interrupted, the whole group is killed."""
+    group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+             else {"start_new_session": True})
+    with tempfile.TemporaryFile() as sink:
+        proc = subprocess.Popen(command, shell=True, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=sink,
+                                stderr=subprocess.STDOUT, **group)
+        timed_out = False
+        try:
+            code = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            kill_tree(proc)
+            code = proc.returncode if proc.returncode is not None else TIMED_OUT
+        except BaseException:
+            kill_tree(proc)
+            raise
+        return (TIMED_OUT if timed_out else code), _tail(sink), timed_out
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    """Stop a check's process and everything it started: the process group on POSIX (TERM, then KILL after
+    `KILL_GRACE` seconds), `taskkill /T /F` on Windows."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        proc.wait()
+        return
+    for sig, wait in ((signal.SIGTERM, KILL_GRACE), (signal.SIGKILL, None)):
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.wait(timeout=wait)
+            if sig == signal.SIGTERM:  # the shell is gone; make sure nothing else in its group is left
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _tail(sink) -> str:
+    """The last `OUTPUT_TAIL` lines of what a check wrote, read from the end of its output file."""
+    size = sink.seek(0, os.SEEK_END)
+    sink.seek(max(0, size - OUTPUT_READ))
+    data = sink.read().decode("utf-8", errors="replace").replace("\r\n", "\n")
+    lines = data.rstrip("\n").split("\n")
+    if size > OUTPUT_READ:
+        lines = lines[1:]  # the first line was cut part way through
+    return "\n".join(lines[-OUTPUT_TAIL:])
 
 
 def _report_path(command: str, cwd: Path, ours: Path) -> Path:
