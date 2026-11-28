@@ -247,17 +247,19 @@ def _nothing_reason(items: list[BacklogItem], ready: list[BacklogItem], waiting:
     return "complete"
 
 
-def next_payload(pkg: Package, *, base: str | None = None, parallel: int | None = None) -> dict:
+def next_payload(pkg: Package, *, base: str | None = None, parallel: int | None = None,
+                 skip: set[str] | frozenset[str] = frozenset()) -> dict:
     """The next item that can start now, every ready item, and why the rest are waiting. Claimed items are never
     offered, and neither is an item that might overlap running work, so `its start` never refuses what `its next`
-    offers."""
+    offers. `skip` counts as claimed too: items another machine just won."""
     v = view(pkg, base)
     items = v.items
     _check_unique(items)
-    ready = ready_items(items, v.claimed)
+    claimed = set(v.claimed) | set(skip)
+    ready = ready_items(items, claimed)
     waiting = [
         {"id": i.id, "title": i.title, "blocked_by": blocked_by(i, items)}
-        for i in items if i.status == "todo" and i.id not in v.claimed and i not in ready
+        for i in items if i.status == "todo" and i.id not in claimed and i not in ready
     ]
     startable, _ = _parallel(v, ready, len(ready) or 1)
     first = startable[0] if startable else None
@@ -495,40 +497,52 @@ def _begin(
     `push_claims: false` in package.yaml, keeps it local.
     """
     previous_branch = cl.current_branch(pkg.root) if cl.in_git(pkg.root) else None
-    with _locked(pkg):
-        if ident is None:
-            ident = _pick_next(pkg, base)
-        payload = _start(pkg, ident, force=force, branch=branch, worktree=worktree, agent=agent, base=base,
-                         allow_overlap=allow_overlap)
-    claim = payload.get("claim")
-    if push is None:
-        push = pkg.get("push_claims") is not False
-    payload["pushed"] = False
-    if not claim or payload.get("claim_held_here") or not push:
+    picking, lost = ident is None, []  # `start --next` tries the next item when another machine won the race
+    while True:
+        with _locked(pkg):
+            if picking:
+                ident = _pick_next(pkg, base, skip=set(lost))
+            payload = _start(pkg, ident, force=force, branch=branch, worktree=worktree, agent=agent, base=base,
+                             allow_overlap=allow_overlap)
+        if lost:
+            payload["lost_to_others"] = list(lost)
+        claim = payload.get("claim")
+        if push is None:
+            push = pkg.get("push_claims") is not False
+        payload["pushed"] = False
+        if not claim or payload.get("claim_held_here") or not push:
+            return payload
+        remote = remote_of(pkg)
+        if remote is None:
+            return payload
+        try:  # outside the lock: a slow network never holds up other agents on this machine
+            cl.push_claim(pkg.root, remote, ident, claim["branch"])
+        except cl.PushRejected as exc:
+            with contextlib.suppress(cl.GitError):
+                if claim["worktree"] is None and previous_branch:  # --branch checked it out here: go back first
+                    cl.git(pkg.root, "switch", "--quiet", previous_branch)
+                cl.release_claim(pkg.root, ident, force=True)
+            if picking and len(lost) < PICK_RETRIES:
+                lost.append(ident)
+                continue
+            theirs = {"id": ident, "branch": exc.branch, "remote": remote} if exc.branch else None
+            raise WorkError("claimed", f"{exc}; your local claim was undone",
+                            details={"id": ident, "remote": remote, "claim": theirs, "lost_to_others": lost or None}) \
+                from exc
+        except cl.GitError as exc:
+            payload["push_error"] = str(exc)
+            return payload
+        payload["pushed"] = True
+        payload["remote"] = remote
         return payload
-    remote = remote_of(pkg)
-    if remote is None:
-        return payload
-    try:  # outside the lock: a slow network never holds up other agents on this machine
-        cl.push_claim(pkg.root, remote, ident, claim["branch"])
-    except cl.PushRejected as exc:
-        with contextlib.suppress(cl.GitError):
-            if claim["worktree"] is None and previous_branch:  # --branch checked it out here: go back first
-                cl.git(pkg.root, "switch", "--quiet", previous_branch)
-            cl.release_claim(pkg.root, ident, force=True)
-        raise WorkError("claimed", f"{exc}; your local claim was undone", details={"id": ident, "remote": remote}) \
-            from exc
-    except cl.GitError as exc:
-        payload["push_error"] = str(exc)
-        return payload
-    payload["pushed"] = True
-    payload["remote"] = remote
-    return payload
 
 
-def _pick_next(pkg: Package, base: str | None) -> str:
-    """The item `its next` would offer, for `start --next`."""
-    out = next_payload(pkg, base=base)
+PICK_RETRIES = 5  # items `start --next` gives up to other machines before it stops trying
+
+
+def _pick_next(pkg: Package, base: str | None, skip: set[str] | frozenset[str] = frozenset()) -> str:
+    """The item `its next` would offer, for `start --next`, passing over `skip` (lost to another machine)."""
+    out = next_payload(pkg, base=base, skip=skip)
     if out["item"] is None:
         raise WorkError("nothing_ready", f"nothing can start now ({out['reason']})",
                         EXIT_COMPLETE if out["reason"] == "complete" else EXIT_NOTHING_READY,
@@ -975,7 +989,8 @@ def _done(
                         details={"in_progress": active})
     item = _find(items, ident)
     if item.status == "done" and not check_only:
-        raise WorkError("already_done", f"{ident} is already done", details={"id": ident})
+        raise WorkError("already_done", f"{ident} is already done; to check a change to it again and refresh its "
+                        f"Verified mark, run its verify {ident}", details={"id": ident})
     if item.status in ("proposed", "dropped") or item.placeholder:
         raise WorkError("bad_status", f"{ident} is {item.status}; it can't be done before it is scheduled",
                         details={"id": ident, "status": item.status})

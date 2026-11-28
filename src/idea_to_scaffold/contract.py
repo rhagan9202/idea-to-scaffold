@@ -96,6 +96,8 @@ ERRORS: dict[str, Code] = {
     "launch_settings_changed": Code("`done --result`: the headless launch files were changed during the run, so it "
                                     "may have had no Stop hook or sandbox; nothing was marked", (EXIT_CHECK_FAILED,),
                                     ("files", "result_file")),
+    "link_outdated": Code("`link --check`: generated links, the index or the commands blocks are out of date",
+                          fields=("changed",)),
     "locked": Code("another `its` command holds the package lock"),
     "no_base": Code("`start --claim`, `gate-audit`: there is no integration branch"),
     "no_changes": Code("`done`: the branch changes nothing outside the planning folder, so nothing shows the item "
@@ -117,6 +119,7 @@ ERRORS: dict[str, Code] = {
     "not_verified": Code("`verify --drifted`, `verify --all`: some items failed their checks again; the rest were "
                          "re-verified", (EXIT_CHECK_FAILED,), ("failed",)),
     "not_placeholder": Code("`renumber`: the ID is permanent already"),
+    "not_utf8": Code("`link`: a planning file isn't valid UTF-8 text"),
     "nothing_ready": Code("`start --next`: nothing can start, and `reason` says why; exit 9 when every item is done",
                           (EXIT_NOTHING_READY, EXIT_COMPLETE), ("reason",)),
     "nothing_to_review": Code("`review`: the branch only changes the backlog"),

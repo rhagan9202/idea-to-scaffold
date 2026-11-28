@@ -668,6 +668,7 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `incomplete` | 1 | `promote`: the item has no Done when or Touches | `missing` |
 | `internal_error` | 1 | a bug in `its`; the message says what to report | `version` |
 | `launch_settings_changed` | 5 | `done --result`: the headless launch files were changed during the run, so it may have had no Stop hook or sandbox; nothing was marked | `files`, `result_file` |
+| `link_outdated` | 1 | `link --check`: generated links, the index or the commands blocks are out of date | `changed` |
 | `locked` | 1 | another `its` command holds the package lock |  |
 | `no_base` | 1 | `start --claim`, `gate-audit`: there is no integration branch |  |
 | `no_changes` | 5 | `done`: the branch changes nothing outside the planning folder, so nothing shows the item was implemented | `findings`, `warnings` |
@@ -682,6 +683,7 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `not_integration_branch` | 1 | `land`, `renumber`: run it on the integration branch | `branch`, `integration_branch` |
 | `not_on_base` | 1 | `waive`: run it in the main checkout, on the integration branch | `branch`, `integration_branch` |
 | `not_placeholder` | 1 | `renumber`: the ID is permanent already |  |
+| `not_utf8` | 1 | `link`: a planning file isn't valid UTF-8 text |  |
 | `not_verified` | 5 | `verify --drifted`, `verify --all`: some items failed their checks again; the rest were re-verified | `failed` |
 | `nothing_ready` | 3, 9 | `start --next`: nothing can start, and `reason` says why; exit 9 when every item is done | `reason` |
 | `nothing_to_review` | 1 | `review`: the branch only changes the backlog |  |

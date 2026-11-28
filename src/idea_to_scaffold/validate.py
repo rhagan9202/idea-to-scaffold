@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from . import blocks
 from .backlog import bad_touches, find_cycles, load_backlog, proposal_problems
 from .ids import (
     ID_RE,
@@ -279,9 +280,16 @@ def validate(pkg: Package, *, check_links_current: bool = True) -> Report:
     for rel, body in planning.items():
         _check_links(pkg, rel, body, r, slug_cache)
     if check_links_current and not r.errors:
-        stale = link_package(pkg, check=True)
-        if stale:
-            r.warnings.append(f"cross-links are out of date in {', '.join(stale)} (run `its link`)")
+        stale = link_package(pkg, check=True, commands=True)
+        links = [x for x in stale if x not in blocks.FILES]
+        if links:
+            r.warnings.append(f"cross-links are out of date in {', '.join(links)} (run `its link`)")
+        commands = [x for x in stale if x in blocks.FILES]
+        if commands:
+            r.warnings.append(f"the commands in {', '.join(commands)} don't match package.yaml (run `its link`)")
+    for line in blocks.disagreements(pkg):
+        r.warnings.append(f"{line}; package.yaml is the source (put the list between its:commands markers and run "
+                          "`its link` to keep them in step)")
 
     # AGENTS.md sections
     agents = pkg.path_of("AGENTS.md")

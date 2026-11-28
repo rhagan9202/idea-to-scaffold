@@ -559,3 +559,35 @@ def test_the_integration_branch_can_require_a_review(claim: Path, repo: Path, tm
     assert code == 0 and out["current"]
     code, out = run_json(capsys, "land", "--dir", str(repo), "--dry-run")
     assert code == 0 and out["skipped"][0]["reason"] == "dry_run", out
+
+
+def test_start_next_takes_the_next_item_when_another_machine_won_the_race(repo: Path, remote: Path,  # noqa: F811
+                                                                          tmp_path: Path, capsys):
+    other = tmp_path / "laptop"
+    git(tmp_path, "clone", "-q", str(remote), str(other))
+    _, out = run_json(capsys, "start", "T-2.1", str(repo), "--branch")
+    winner = out["claim"]["branch"]
+    code, out = run_json(capsys, "start", "T-2.1", str(other), "--branch")  # named: the error says who has it
+    assert code == 1 and out["error"]["code"] == "claimed" and out["error"]["claim"]["branch"] == winner
+    code, out = run_json(capsys, "start", "--next", str(other), "--worktree")  # it hasn't fetched, so it tries T-2.1
+    assert code == 0 and out["id"] == "T-2.2" and out["lost_to_others"] == ["T-2.1"] and out["pushed"], out
+    assert {c.id for c in cl.list_claims(other) if not c.remote} == {"T-2.2"}
+
+
+def test_a_closed_pipe_ends_quietly(tmp_path: Path):  # B12: `its status | head`
+    script = tmp_path / "flood.py"
+    script.write_text("import sys\nfrom idea_to_scaffold import cli\n"
+                      "def flood(args):\n    for _ in range(200000):\n        print('x' * 80)\n    return 0\n"
+                      "cli.cmd_stats = flood\nsys.exit(cli.main(['stats', '.']))\n")
+    env = {**os.environ, "PYTHONPATH": str(Path(idea_to_scaffold.__file__).parent.parent)}
+    writer = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env=env, cwd=tmp_path)
+    writer.stdout.read(100)
+    writer.stdout.close()  # the reader goes away, as head does
+    err = writer.stderr.read().decode("utf-8", "replace")
+    assert writer.wait(timeout=120) == 1 and "Traceback" not in err and "Broken" not in err, err
+
+
+def test_done_on_a_done_item_points_to_verify(repo: Path, capsys):  # noqa: F811
+    code, out = run_json(capsys, "done", "T-1.1", str(repo))
+    assert code == 1 and out["error"]["code"] == "already_done" and "its verify T-1.1" in out["error"]["message"]

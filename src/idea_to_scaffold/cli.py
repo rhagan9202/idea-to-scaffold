@@ -3,6 +3,7 @@ and the backlog commands."""
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -18,6 +19,7 @@ from .contract import (
     EXIT_CHECK_FAILED,
     EXIT_COMPLETE,
     EXIT_DRIFT,
+    EXIT_ERROR,
     EXIT_NOT_LANDED,
     EXIT_NOTHING_READY,
     EXIT_USAGE,
@@ -283,24 +285,36 @@ def cmd_link(args: argparse.Namespace) -> int:
     if pkg is None:
         return 1
     try:
-        changed = link_package(pkg, check=args.check)
+        # in a claim's checkout the commands are the lead's: rewriting AGENTS.md there would be an agent config change
+        changed = link_package(pkg, check=args.check, adopt=True, commands=not _claim_checkout(pkg))
     except UnicodeDecodeError as exc:
-        print(f"error: a planning file is not valid UTF-8 text ({exc.reason})", file=sys.stderr)
-        return 1
+        return _fail(args, WorkError("not_utf8", f"a planning file is not valid UTF-8 text ({exc.reason})"))
     changed = [shown(pkg, rel) for rel in changed]
+    if args.json:
+        if args.check and changed:
+            return _fail(args, WorkError("link_outdated", f"{len(changed)} file(s) are out of date; run `its link` "
+                                         "and commit the result", details={"changed": changed}))
+        _emit({"schema": SCHEMA, "ok": True, "check": args.check, "changed": changed})
+        return 0
     if args.check:
         if changed:
-            print("cross-links are out of date in:")
+            print("generated links or commands are out of date in:")
             for rel in changed:
                 print(f"  {rel}")
             print("run `its link` and commit the result")
             return 1
-        print("cross-links are up to date")
+        print("cross-links and commands are up to date")
         return 0
     print(f"updated {len(changed)} file(s)" if changed else "already up to date")
     for rel in changed:
         print(f"  {rel}")
     return 0
+
+
+def _claim_checkout(pkg: Package) -> bool:
+    if not cl.in_git(pkg.root):
+        return False
+    return bool(cl.claim_of_worktree(pkg.root) or cl.item_of_branch(cl.current_branch(pkg.root) or ""))
 
 
 def _load(args: argparse.Namespace) -> Package | None:
@@ -1071,9 +1085,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true", help=f"print JSON (schema {SCHEMA}) instead of text")
     s.set_defaults(func=cmd_validate)
 
-    s = sub.add_parser("link", help="cross-link IDs, refresh nav blocks and the planning index")
+    s = sub.add_parser("link", help="cross-link IDs, refresh nav blocks, the planning index and the commands blocks")
     s.add_argument("dir", nargs="?", default=".", help="package folder or scaffolded repo (default: .)")
     s.add_argument("--check", action="store_true", help="don't write; exit 1 if anything is out of date (for CI)")
+    s.add_argument("--json", action="store_true", help=f"print JSON (schema {SCHEMA}) instead of text")
     s.set_defaults(func=cmd_link)
 
     dir_help = "package folder or scaffolded repo (default: .)"
@@ -1374,6 +1389,10 @@ def main(argv: list[str] | None = None) -> int:
                 setattr(args, name, str(Path(args.chdir) / value))
     try:
         return args.func(args)
+    except BrokenPipeError:  # `its status | head`: the reader stopped reading, so stop writing, quietly
+        with contextlib.suppress(OSError, ValueError, AttributeError):
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return EXIT_ERROR
     except WorkError as err:
         return _fail(args, err)
     except BacklogError as exc:

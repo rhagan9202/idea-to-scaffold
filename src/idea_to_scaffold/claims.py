@@ -91,7 +91,11 @@ def fetch(cwd: Path, remote: str, base: str) -> None:
 
 
 class PushRejected(GitError):
-    """The claim branch already exists on the remote: someone else claimed the item first."""
+    """The claim branch already exists on the remote: someone else claimed the item first (`branch`, when known)."""
+
+    def __init__(self, message: str, branch: str | None = None):
+        super().__init__(message)
+        self.branch = branch
 
 
 def push_claim(cwd: Path, remote: str, ident: str, branch: str) -> None:
@@ -103,13 +107,14 @@ def push_claim(cwd: Path, remote: str, ident: str, branch: str) -> None:
     taken = [line.split("refs/heads/", 1)[1] for line in proc.stdout.splitlines() if "refs/heads/" in line]
     taken = [b for b in taken if item_of_branch(b) == ident]
     if taken:
-        raise PushRejected(f"{ident} is already claimed on {remote} by branch {taken[0]}")
+        raise PushRejected(f"{ident} is already claimed on {remote} by branch {taken[0]}", taken[0])
     proc = gitx.run(cwd, "push", "--quiet", "--set-upstream", f"--force-with-lease=refs/heads/{branch}:", remote,
                     f"refs/heads/{branch}:refs/heads/{branch}")
     if proc.returncode != 0:
         err = proc.stderr.strip()
         if "stale info" in err or "rejected" in err or "already exists" in err:
-            raise PushRejected(f"{ident} was claimed on {remote} first ({err.splitlines()[-1] if err else 'rejected'})")
+            raise PushRejected(f"{ident} was claimed on {remote} first ({err.splitlines()[-1] if err else 'rejected'})",
+                               branch)
         raise GitError(f"couldn't push {branch} to {remote}: {err}")
 
 

@@ -1,6 +1,6 @@
 """Cross-link a planning package so agents can traverse it and drift is visible.
 
-`its link` does three things, all idempotent:
+`its link` does four things, all idempotent:
 
 1. **ID links.** Every bare ID reference (``FR-003``) in a planning doc becomes a relative link to where the ID is
    defined (``[FR-003](03-requirements.md#fr-003--check-in-for-today)``). Existing ID links are re-pointed if the
@@ -9,6 +9,8 @@
    docs it depends on, the next doc in reading order, and the docs that reference it (backlinks).
 3. **Planning index.** ``planning/README.md`` is regenerated: reading order with each doc's status, decisions,
    wireframes and where every ID is defined. It carries no backlog status, which `its next` answers live.
+4. **Commands.** The blocks between ``its:commands`` markers in AGENTS.md, HANDOFF.md and the CI workflow are
+   rewritten from package.yaml, its one source (see `blocks.py`).
 
 With ``check=True`` nothing is written; the list of files that *would* change is returned. A non-empty list means the
 docs have drifted from their links, which CI can fail on.
@@ -20,6 +22,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .blocks import sync as sync_blocks
 from .ids import (
     ID_PATTERN,
     ID_RE,
@@ -351,8 +354,10 @@ def _write_raw(path: Path, text: str) -> None:
         fh.write(text)
 
 
-def link_package(pkg: Package, *, check: bool = False) -> list[str]:
-    """Link the package in place. Returns the logical paths that changed (or would change, with check=True)."""
+def link_package(pkg: Package, *, check: bool = False, adopt: bool = False, commands: bool = False) -> list[str]:
+    """Link the package in place. Returns the logical paths that changed (or would change, with check=True).
+    `commands` also rewrites the generated command blocks (blocks.py), as `its link` and scaffold do, and `adopt`
+    puts their markers around a command list that has none."""
     docs = _load_docs(pkg)
     index = build_index(pkg, docs)
     refs = _references(docs, index)
@@ -377,4 +382,4 @@ def link_package(pkg: Package, *, check: bool = False) -> list[str]:
         if not check:
             readme.parent.mkdir(parents=True, exist_ok=True)
             readme.write_text(content, encoding="utf-8", newline="\n")
-    return changed
+    return changed + (sync_blocks(pkg, check=check, adopt_unmarked=adopt and not check) if commands else [])

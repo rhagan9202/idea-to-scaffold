@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
 
-from . import gitx
+from . import blocks, gitx
 from .gate import DEFAULT_MODES
 from .linker import link_package
 from .package import GENERATED_MARKER, Package, parse_front_matter, templates_dir
@@ -218,8 +218,7 @@ def _handoff(pkg: Package, report: Report) -> str:
     """The first-session brief. It names no item's status: `its next` answers that live, so this file never goes
     stale as the backlog moves."""
     first = str(pkg.get("first_task") or "").strip()
-    cmds = pkg.commands
-    cmd_lines = "\n".join(f"- **{k.title()}:** `{v}`" for k, v in cmds.items()) or "- (none set in package.yaml)"
+    cmd_lines = blocks.md_block(blocks.command_lines(pkg))
     open_items = "\n".join(f"- {w}" for w in report.warnings) or "- None."
     if first:
         pick = f"Start with {first}, as the plan asks."
@@ -349,7 +348,7 @@ def scaffold(
     _write(root, "AGENTS.md", _fill_agents_md(pkg, agents_md), written)
     _adapters(pkg, root, written)
     repo_pkg = Package.load(root)
-    link_package(repo_pkg)  # cross-link docs in their repo locations and write docs/planning/README.md
+    link_package(repo_pkg, adopt=True, commands=True)  # cross-link docs in their repo locations, write the index
     if "docs/planning/README.md" not in written:
         written.append("docs/planning/README.md")
     _write(root, "HANDOFF.md", _handoff(repo_pkg, report), written)
