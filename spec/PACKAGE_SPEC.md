@@ -495,7 +495,7 @@ into a full one by adding the missing docs and changing `profile`.
 
 `its backlog`, `next`, `show`, `start`, `done`, `claims`, `release`,
 `renumber`, `land`, `propose`, `promote`, `block`, `unblock`, `drop`,
-`set-status`, `review`, `hooks`, `drift`, `verify`, `status`, `stats`, `gate-audit`, `link` and `validate` take `--json`. Output is one
+`set-status`, `waive`, `review`, `hooks`, `drift`, `verify`, `status`, `stats`, `gate-audit`, `link` and `validate` take `--json`. Output is one
 JSON object on stdout, so agents never parse text or stderr, even when `its` hits a bug (`internal_error`) or the
 command line is wrong (`usage`, exit 2). The global `-C DIR` runs any command as if from `DIR`: it is put in front
 of the command's relative folder arguments.
@@ -548,19 +548,25 @@ the file's own line endings.
   `finished` or `orphaned`.
 - `status`: `{project, source, branch, base, counts, next, next_reason, ready,
   blocked, in_progress, proposals: [{id, title, file}], claims,
-  ready_to_land, to_release, drift: {drifted, unknown}}`. `claims` are the
+  ready_to_land, to_release, drift: {drifted, unknown}, warnings}`. `claims` are the
   active ones, with the fields above; `blocked` adds a `branch` for an item
   blocked on its claim branch; `in_progress` lists items in progress without
-  a claim; `drift` is `null` outside git or when it can't be computed. `release`: `{id, released, deleted_branches,
+  a claim; `drift` is `null` outside git or when it can't be computed.
+  `warnings` is `[{kind, message, ...}]`: `main_moved` (with `commits`) when
+  the integration branch has commits nothing vouches for, which `its land`
+  would refuse (section 17). `release`: `{id, released, deleted_branches,
   removed_worktree, deleted_remote_branches, remote_branches}`. `renumber`: `{dry_run, renumbered:
   [{from, to}], files, proposals_moved}`.
-- `land`: `{base, dry_run, landed, skipped, released, pushed, proposals}`.
+- `land`: `{base, dry_run, landed, skipped, released, pushed, proposals,
+  base_trust}`. `base_trust` says why the integration branch was trusted
+  (section 17): `trusted`, `first_use` or `accepted` (`--accept-base`).
   Each entry is `{id, branch, landed, ...}`: a landed one has `commit` and
   `checks`; a skipped one has `reason` (`conflict` with `files`,
-  `check_failed` with `checks`, `test_changes` or `outside_touches` with
-  `findings`, `gate_error`, `base_moved`, `checkout_blocked`, `git_error`,
-  `waiting` with `blocked_by`, `no_claim`, `no_commits`, `not_done` or
-  `dry_run`) and `message`.
+  `check_failed` with `checks`, `test_changes`, `dependency_changes` or
+  `outside_touches` with `findings`, `gate_error`, `base_moved`,
+  `base_untrusted` (the integration branch moved during the land),
+  `checkout_blocked`, `git_error`, `waiting` with `blocked_by`, `no_claim`,
+  `no_commits`, `not_done` or `dry_run`) and `message`.
 - `validate`: `{valid, ready, errors, warnings}`, plus `trace` with
   `--trace`: `{checked, criteria, requirements: [{id, title, file, criteria:
   [{ac, text, tests: [{file, line}], by_requirement}]}], uncovered: [{id, ac,
@@ -586,20 +592,27 @@ the file's own line endings.
   `acceptance_changed` or `tests_pass_on_parent` (phase 7), `test_removed`
   (phase 9, with `tests`), `no_test_report`, `failures_hidden`,
   `no_tests_ran` or `tests_skipped` (phase 9, from the test report, with
-  `check`), or `no_changes` (the branch changes nothing outside the planning
+  `check`), `proposal_invalid` (with `file`: a proposal the branch changed isn't
+  well formed, one finding per problem; it counts as a test change), `dependency_added` (with `file` and `added`: the
+  entries the branch adds or changes in a manifest, empty for a lockfile or
+  other whole file), or `no_changes` (the branch changes nothing outside the planning
   folder, so nothing shows the item was implemented; it is dropped when
-  re-verifying a done item). A refusal's error carries the refusing findings
+  re-verifying a done item). `test_config_changed` has `hidden: true` when the
+  file is ignored by git, so it isn't in the diff at all. A refusal's error carries the refusing findings
   in `findings` and the rest in `warnings`.
 - `propose`: `{id, file, item}`. `promote`: `{id, status, renumbered_from}`,
   plus `committed` (the short commit) when the change was committed: by default
   for `promote` and `renumber`, and with `--commit` for `block`, `unblock`,
   `drop`, `set-status` and `verify`.
   `block`, `unblock`, `drop`, `set-status`: `{id, previous_status, status}`,
-  plus `deleted_file` when a proposal was dropped.
+  plus `deleted_file` when a proposal was dropped. `waive`: `{id, waiver:
+  {date, groups, reason}, committed, trusted}`; `trusted` says whether the
+  commit was recorded as trusted (section 17).
 - `done`: `{id, previous_status, status, checks: [{name, command, exit_code,
   passed, output, results?}], checks_skipped, manual_verify, verify_source, touches_checked,
   findings, warnings, red_on_parent, verified, now_ready, merge_needed}`; `verified` is the value
-  written to the item's Verified field. `verify_source` is where the Verify
+  written to the item's Verified field (`skipped (--no-verify)` when the checks were skipped, which
+  `drift` then reports as `unknown` with reason `not_verified`). `verify_source` is where the Verify
   command was read (the integration branch's ref, or `working tree`);
   `findings` are the done gate's findings that were allowed. With `--check`:
   `{id, status, checks, ..., checked_only: true}`, and nothing is written. Checks are the
@@ -613,24 +626,76 @@ the file's own line endings.
   [{id, file, reason}], files}`, or `{report: false, reason}` when it wrote
   none.
 - An error is `{"schema": 1, "ok": false, "error": {"code", "message", ...}}`.
-  Codes: `not_found`, `placeholder`, `not_placeholder`, `bad_status`,
-  `already_started`, `already_done`, `blocked` (with `blocked_by`), `claimed`
-  (with `claim`), `overlap` (with `overlaps`, `touches_listed`,
-  `overlapping_touches`), `which_item`, `check_failed` (with `checks`),
-  `no_status`, `duplicate_id`, `bad_backlog`, `no_package`, `no_base`,
-  `not_git`, `not_integration_branch`, `worktree_exists`, `locked`,
-  `nothing_ready` (with `reason`), `fetch_failed`, `push_failed`, `dirty`,
-  `diverged`, `exists`, `bad_name`, `bad_title`, `no_reason`, `usage`,
-  `test_changes` and `outside_touches` (with `findings`), `bad_hooks_file`,
-  `bad_agent`, `bad_review`, `incomplete` (`promote`: the item has no Done when or Touches; with
-  `missing`), `nothing_to_review` (`review`: the branch only changes the backlog),
-  `gate_error` (the gate couldn't compare the branch, so it
-  refused), `override_reason` and `override_needs_person` (a waiver without a
-  reason, or without a person), `git_error`, `internal_error`. `done` returns
-  `override: {waived, reasons}` when a person waived findings.
+  An error about an item also has its `id`, and a gate refusal carries the
+  refusing findings in `findings` and the rest in `warnings`. The codes, with
+  the exit code each comes with, are in the table below.
+- `done` returns `override: {waived, waiver: {date, groups, reason}}` when it
+  let findings through on the lead's waiver (section 17), and writes the same to
+  the item's Override field.
+
+The error codes. This table and the next are generated from
+`src/idea_to_scaffold/contract.py` (`python -m idea_to_scaffold.contract
+spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
+
+<!-- contract:errors -->
+| Code | Exit | Meaning | Also has |
+| ---- | ---- | ------- | -------- |
+| `already_done` | 1 | `done`: the item is already done |  |
+| `already_started` | 1 | `start`: the item is already in progress |  |
+| `bad_agent` | 1 | `hooks`: no Stop hook is known for that agent |  |
+| `bad_backlog` | 1 | the backlog can't be read or changed as asked |  |
+| `bad_hooks_file` | 1 | `hooks`: the agent's settings file isn't a JSON object |  |
+| `bad_name` | 1 | `propose`: a placeholder name is lowercase letters, digits and hyphens | `name` |
+| `bad_proposal` | 1 | `promote`, `renumber`: a proposal file isn't well formed | `problems` |
+| `bad_result` | 1 | `done --result`: the result file can't be read, isn't JSON or doesn't match the schema | `result_file` |
+| `bad_review` | 1 | `review --reply`: the reply doesn't match the reply schema | `problems` |
+| `bad_status` | 1 | the status isn't a backlog status, or the item's status doesn't allow the command | `status` |
+| `bad_title` | 1 | `propose`: a proposal needs a title |  |
+| `base_untrusted` | 7 | `land`: the integration branch has commits that `its` didn't record and that aren't on the remote; a person looks, then `land --accept-base` trusts them | `integration_branch`, `commits` |
+| `blocked` | 4 | `start`: a dependency isn't done | `blocked_by` |
+| `check_failed` | 5 | `done`: a check failed | `checks` |
+| `claimed` | 1 | `start`: another branch holds the item's claim | `claim` |
+| `dependency_changes` | 5 | `done`: the done gate refused the branch's dependency changes (`dependency_added` enforced); the lead waives them with `its waive <ID> --dependencies` | `findings`, `warnings` |
+| `dirty` | 1 | `land`, `waive`: uncommitted or staged changes are in the way |  |
+| `diverged` | 1 | `land --fetch`: the integration branch and its remote copy have diverged |  |
+| `duplicate_id` | 1 | an ID is defined more than once in the backlog | `ids` |
+| `exists` | 1 | `propose`: that proposal exists already |  |
+| `fetch_failed` | 1 | `--fetch`: fetching the remote failed | `remote` |
+| `gate_error` | 5, 1 | `done`, `review`: the gate couldn't compare the branch, so it refused (exit 1 from `review`) |  |
+| `git_error` | 1 | a git command failed |  |
+| `incomplete` | 1 | `promote`: the item has no Done when or Touches | `missing` |
+| `internal_error` | 1 | a bug in `its`; the message says what to report | `version` |
+| `launch_settings_changed` | 5 | `done --result`: the headless launch files were changed during the run, so it may have had no Stop hook or sandbox; nothing was marked | `files`, `result_file` |
+| `locked` | 1 | another `its` command holds the package lock |  |
+| `no_base` | 1 | `start --claim`, `gate-audit`: there is no integration branch |  |
+| `no_fork_point` | 5 | `done` on the integration branch: no start was recorded for the item, so the gate can't tell which commits are its work; `its start <ID> --force` records one |  |
+| `no_package` | 1 | no planning package was found |  |
+| `no_reason` | 1 | `block`, `waive`: `--reason` is missing |  |
+| `no_result` | 1 | `done --result`: the agent's run ended without a result; nothing was marked | `result_file` |
+| `no_status` | 1 | `done`: the item has no Status field |  |
+| `no_waiver_group` | 1 | `waive`: name what is waived (`--test-changes`, `--outside-touches`, `--dependencies`) |  |
+| `not_found` | 1 | no such ID, or a file `its` was given can't be read | `mentioned_in` |
+| `not_git` | 1 | the command needs a git repository |  |
+| `not_integration_branch` | 1 | `land`, `renumber`: run it on the integration branch | `branch`, `integration_branch` |
+| `not_on_base` | 1 | `waive`: run it in the main checkout, on the integration branch | `branch`, `integration_branch` |
+| `not_placeholder` | 1 | `renumber`: the ID is permanent already |  |
+| `nothing_ready` | 3, 9 | `start --next`: nothing can start, and `reason` says why; exit 9 when every item is done | `reason` |
+| `nothing_to_review` | 1 | `review`: the branch only changes the backlog |  |
+| `outside_touches` | 5 | `done`: the done gate refused the branch's scope changes (files outside Touches, or Touches changed); the lead waives them with `its waive <ID> --outside-touches` | `findings`, `warnings` |
+| `overlap` | 6 | `start`: the item may change the same files as one already running | `overlaps`, `touches_listed`, `overlapping_touches` |
+| `placeholder` | 1 | the item has a placeholder ID; `its promote` gives it a permanent one |  |
+| `push_failed` | 1 | `land --push`: the branches landed locally, but the push failed | `landed`, `skipped` |
+| `result_mismatch` | 1 | `done --result`: the result is for another item | `result_id`, `result_file` |
+| `test_changes` | 5 | `done`: the done gate refused the branch's test changes (tests, test config, or how the item is verified); the lead waives them with `its waive <ID> --test-changes` | `findings`, `warnings` |
+| `usage` | 2 | the command line is wrong |  |
+| `use_waive` | 1 | an `--allow-*` flag, which is gone: the lead waives with `its waive` | `flag` |
+| `which_item` | 1 | `done`, `review`: name the item; none could be inferred | `in_progress` |
+| `worktree_exists` | 1 | `start --claim`: the worktree's folder exists already | `worktree` |
+<!-- /contract:errors -->
 
 Exit codes, the same with or without `--json`:
 
+<!-- contract:exit-codes -->
 | Code | Meaning |
 | ---- | ------- |
 | 0 | ok |
@@ -638,12 +703,13 @@ Exit codes, the same with or without `--json`:
 | 2 | bad command-line usage |
 | 3 | `next`, `start --next`, `land`: nothing is ready (with `--parallel`: nothing can start alongside the claims) |
 | 4 | `start`: a dependency isn't done |
-| 5 | `done`: a check or the done gate failed; the status is unchanged |
+| 5 | `done`: a check or the done gate failed, or a headless run's launch settings were changed; the status is unchanged |
 | 6 | `start`: the item may change the same files as one already running |
-| 7 | `land`: a branch could not land (it conflicted, failed the done gate or its checks, isn't done, has no commits, or the base moved); branches only waiting on dependencies don't count |
+| 7 | `land`: a branch could not land (it conflicted, failed the done gate or its checks, isn't done, has no commits, or the base moved), or the integration branch has commits nothing vouches for (`base_untrusted`); branches only waiting on dependencies don't count |
 | 8 | `drift --check`: a done item's files changed after it was verified |
 | 9 | `next`, `start --next`: every item is done |
 | 10 | `gate-audit`: a seeded cheat was missed, or only warned about (unless `--allow-warn`) |
+<!-- /contract:exit-codes -->
 
 `its backlog --write` saves the `its backlog --json` object as
 `planning/backlog.json` (`docs/planning/backlog.json` in a repo), and `start`
@@ -678,9 +744,22 @@ or Codex in each; it never launches an agent itself.
   OS file lock on `claims.lock` in `$(git rev-parse --git-common-dir)/its/`,
   the directory every worktree shares. Every backlog status write holds the
   same lock, so concurrent `start` and `done` never lose a change. The OS frees
-  the lock when its holder exits, even after a crash. `claims.json` there
-  records each claim's worktree, agent and start time. Outside git the lock
+  the lock when its holder exits, even after a crash. Outside git the lock
   lives in the system temp folder.
+- **`its` keeps its state outside the repository.** Claims (`claims.json`:
+  each claim's worktree, agent and start time), fork points (`forks.json`),
+  the run ledger (`runs/`), the headless launch files (`launch/`) and the
+  trusted commits (`trust.json`) live in a state folder per repository,
+  shared by its worktrees: `$XDG_STATE_HOME/its/<repo>-<hash>` when
+  `XDG_STATE_HOME` is set, otherwise under `~/.local/state/its/` on Linux,
+  `~/Library/Application Support/its/` on macOS and `%LOCALAPPDATA%\its\` on
+  Windows. A linked worktree can write the repository's git folder, so state
+  kept there would be state an agent could rewrite (its own fork point, the
+  next run's launch settings); a sandbox that limits writes to the working
+  folders, such as Claude Code's, keeps the agent out of the state folder.
+  State an older `its` kept in `<git common dir>/its/` is copied over once.
+  The lock stays in the git folder, where an agent's own `its done` can take
+  it; the worst an agent can do with it is hold it.
 - **`in-progress` isn't committed on claim branches.** The branch already says
   so. The item's `done` is committed with the work (`its done` with no ID uses
   the item of the claim branch that is checked out).
@@ -715,6 +794,13 @@ or Codex in each; it never launches an agent itself.
   the docs are re-linked. `--dry-run` shows the new IDs first. It refuses to
   run off the integration branch (unless `--force`) or when a placeholder is
   proposed twice, and never reuses a number still mentioned in any doc.
+  A proposal skips the gate's item-by-item diff, so `promote`, `renumber` and
+  `validate` check each proposal file first (`bad_proposal`, with
+  `problems`): it holds exactly one item, whose placeholder ID is the file's
+  name, with status `proposed` and none of the Verified, Override, Waiver or
+  Blocked fields. The done gate reports a changed proposal that breaks these
+  as `proposal_invalid`, a test change. So a proposal can't enter the backlog
+  already done, or under a real item's ID.
 - **The done gate.** An agent can edit the files its checks read, so before
   running any check `its done` compares the branch with what the item allows.
   The diff runs from the fork point to the working tree (uncommitted and
@@ -724,8 +810,10 @@ or Codex in each; it never launches an agent itself.
   branch itself (a plain `its start`), it is the commit recorded at start,
   outside the working tree, so committed work is still checked.
   - The rules come from the integration branch: the item's Verify and
-    Touches, and the `commands` and `test_paths` in `package.yaml`. A branch
-    that edits `package.yaml` is refused (`policy_changed`).
+    Touches, its waiver, and the `commands`, `test_paths` and `gate` settings
+    in `package.yaml`. A branch that edits `package.yaml` is refused
+    (`policy_changed`). `its land` checks the integration branch itself
+    before it trusts those rules (the trust boundary, below).
   - The plan is diffed item by item. A branch may change its own item's
     Status, Verified, Blocked and Override fields and add proposals. Changing
     its Verify (`verify_changed`) or Touches (`touches_changed`), any other
@@ -768,7 +856,12 @@ or Codex in each; it never launches an agent itself.
     plugin entry point; a `sitecustomize.py`, `usercustomize.py` or `.pth`
     file; or a changed Jest, Vitest, Mocha or test-script setting
     (`test_config_changed`). New test files are checked against nothing, so a
-    weak test the branch added itself is found too.
+    weak test the branch added itself is found too. A file git ignores (by
+    `.gitignore` or `.git/info/exclude`) is in no diff, so the gate also looks
+    for ignored files with these names (`conftest.py`, `pytest.ini`,
+    `sitecustomize.py`, `*.pth`, `jest.config.*`, ...) in the checkout, outside
+    dot-folders and install folders such as `node_modules` and `venv`, and
+    reports each as `test_config_changed` with `hidden: true`.
   - **The runner's report.** A check's exit code comes from the code under
     test, so it isn't trusted alone. When a check runs pytest (`pytest`,
     `py.test`, `python -m pytest`, `uv run pytest`, ...), it runs with
@@ -785,6 +878,25 @@ or Codex in each; it never launches an agent itself.
     makes faking a pass harder, not impossible: code running inside the test
     process can still write a report of its own. A report with a `DOCTYPE`
     or entities, or one over 64 MB, counts as no report.
+  - **Dependencies.** `its land` runs `commands.setup` as the lead, and
+    installing a package runs its build hooks. So a branch that adds a
+    dependency, changes where one comes from, or rewrites a lockfile is
+    reported (`dependency_added`, with `file` and `added`). Manifests are
+    compared entry by entry, so only what the branch adds or changes counts:
+    `pyproject.toml` (project, optional and group dependencies,
+    `[build-system]`, Poetry, uv and PDM tables), `setup.cfg`,
+    `requirements*.txt` and `constraints*.txt`, `Pipfile`, `package.json`
+    (the dependency maps, `overrides`, `resolutions` and the install
+    scripts), `Cargo.toml` (the dependency tables, `[patch]`, `[replace]`) and
+    `go.mod`. Any change counts in a lockfile (`uv.lock`, `poetry.lock`,
+    `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`,
+    `go.sum`, ...), `setup.py`, and package-index settings (`uv.toml`,
+    `pip.conf`, `.npmrc`, `.yarnrc.yml`). Removing a dependency isn't
+    reported. It warns by default, and new scaffolds write `warn` for it too,
+    since the first `uv sync` writes a lockfile; set
+    `gate.checks.dependency_added: enforce` once the lockfile is committed.
+    Enforced, the gate refuses with `dependency_changes`, and the lead's `its
+    waive <ID> --dependencies` lets the branch through.
   - **How checks run.** A check runs code from the branch, and `its land`
     runs it as the lead, so a check gets only the caller's environment
     variables on an allow-list: the path, home and user, the locale (`LANG`,
@@ -863,19 +975,32 @@ or Codex in each; it never launches an agent itself.
 
   The gate fails closed: with no integration branch, a shallow clone, a fork
   point that left the history, or a git error, `its done` refuses with
-  `gate_error` (exit 5) instead of passing.
+  `gate_error` (exit 5) instead of passing. On the integration branch with no
+  start recorded for the item, it refuses with `no_fork_point` (exit 5), since
+  nothing says which commits are the item's; `its start <ID> --force`
+  records one.
 
-  A person can waive a group: `--allow-test-changes=REASON` (test, plan and
-  agent-config findings) or `--allow-outside-touches=REASON` (scope
-  findings). A waiver needs a reason and a person: it is refused without an
-  interactive terminal unless `ITS_ALLOW_OVERRIDES=1` is set by whoever runs
-  the agent. On Windows the terminal has to be a console, since NUL, the stdin
-  an agent's tool usually gets, also counts as a terminal there. The waived kinds and the reason are written to the item's
-  `Override` field, and the waived findings are still reported. Verify is
-  always the integration branch's, even when test changes are waived. A
-  refusal never names the waiver flags; an agent that can't finish honestly
-  runs `its block <ID> --reason`. `its land` runs the same gate on each
-  branch before merging it.
+  Only the lead waives, on the integration branch: `its waive <ID>
+  --test-changes` (test, plan and agent-config findings), `--outside-touches`
+  (scope findings) or `--dependencies` (`dependency_added`), with `--reason`.
+  It runs in the main checkout (`not_on_base` elsewhere) and commits
+  `**Waiver:** <date>; <groups>; <reason>` on the item there, leaving the rest
+  of the working tree alone. A branch can't write a waiver for itself: the
+  gate reads the plan from the integration branch and refuses a branch that
+  changes the item's other fields. On the plain flow, where the agent commits
+  on the integration branch too, only the last waiver commit `its waive` made
+  after the item's start counts. `done` and `land` let the waived groups'
+  findings through, still reported, and `done` writes the waived kinds and the
+  waiver to the item's `Override` field. Verify is always the integration
+  branch's, even when test changes are waived. The old `--allow-*` flags are
+  refused (`use_waive`), and a refusal never names `its waive`; an agent that
+  can't finish honestly runs `its block <ID> --reason`. `its land` runs the
+  same gate on each branch before merging it.
+
+  `done --no-verify` still marks the item done, but writes `skipped
+  (--no-verify)` as Verified, which `its drift` reports as `unknown`
+  (`not_verified`) rather than as verified work. `land --no-verify` is the
+  lead's own choice.
 - **Review and hooks.** `its review <ID>` prints an evidence bundle for a second
   agent: the item, the text of each requirement it satisfies, the gate's
   findings and the diff, with instructions to review once, only the diff, and
@@ -926,6 +1051,46 @@ or Codex in each; it never launches an agent itself.
   releases each landed claim, `--dry-run` reports what would land. `its claims`
   shows each claim's conflicts with the base and with other claims ahead of
   time.
+- **The trust boundary.** An agent works in a linked worktree of the lead's
+  repository, and `its land` runs as the lead, so the agent's work must not
+  become the lead's actions. `its land` is where the rules are enforced;
+  `its done` in the agent's checkout is a pre-check, and a pull request
+  merged without `its land` skips the gate. The plain flow, where an agent
+  works on the integration branch itself, isn't enforced: nothing stands
+  between that agent and the branch.
+  - **Git runs no repository code.** Every git command `its` runs sets
+    `core.hooksPath` to an empty folder and `core.fsmonitor=false`, drops
+    `GIT_*` variables other than the commit identity and the SSH and askpass
+    settings, never waits for a credential prompt, and times out (300 s, or
+    600 s for fetch and push). So a hook an agent planted in the shared git
+    folder never runs in the lead's `its land`, and the project's own hooks
+    don't run on `its`'s commits either. Other programs the repository's
+    config can name (`filter.*`, `diff.external`) would still run if an agent
+    could write that config; Claude Code's sandbox denies it.
+  - **The integration branch is checked, not assumed.** A worktree shares the
+    lead's refs, so an agent can move the integration branch (`git
+    update-ref`), and that branch holds the gate's rules. A commit on it is
+    trusted when it is on the remote's copy (`<remote>/<branch>`), or behind a
+    tip `its` recorded itself: the result of a land, a waiver, or a planning
+    commit (`promote`, `renumber`, `block --commit`, ...) made on trusted
+    work. The record is `trust.json` in the state folder. With nothing
+    recorded yet, the first land trusts the branch as it is. `its land`
+    refuses (`base_untrusted`, exit 7, with `commits`) while the branch has
+    any other commit, and skips a branch (`base_untrusted`) if the
+    integration branch moved that way during the run. After a person has
+    looked, `its land --accept-base` trusts them; the payload's `base_trust`
+    says which case applied. `its status` warns (`main_moved`). A commit the
+    lead made by hand counts as untrusted until it is pushed or accepted:
+    nothing in git tells it apart from an agent's.
+  - **What this doesn't cover.** `its land` runs the branch's code as the
+    lead: `commands.setup`, the checks and the code under test. The
+    allow-listed environment keeps tokens in the lead's shell away from that
+    code, but not files: anything the lead's account can read
+    (`~/.config/gh`, `~/.ssh`, cloud credentials) is readable to it. An agent
+    without a sandbox can write anything its user can, the state folder and
+    the repository's git config included. Running each agent in a separate
+    clone, which shares no refs or git folder with the lead's, closes more of
+    this; `its` doesn't set that up yet.
 
 - **Unattended runs.** `its` never launches an agent; `its start` prints
   commands that do it safely (`commands.headless`):
@@ -933,9 +1098,11 @@ or Codex in each; it never launches an agent itself.
     --json-schema SCHEMA --max-budget-usd N --permission-mode acceptEdits
     --permission-prompts none`. `--bare` skips the project's hooks, so the
     settings file carries the Stop hook (`its hook stop`) and turns the OS
-    sandbox on. It is written to `<git common dir>/its/launch/`, outside
-    every worktree, so the agent can't edit it. The budget is
-    `launch.budget_usd` (default 5).
+    sandbox on. It is written to the state folder's `launch/`, outside the
+    repository, so a sandboxed agent can't edit it, and `its done --result`
+    refuses a run whose launch files no longer match what `its` wrote
+    (`launch_settings_changed`, exit 5). The budget is `launch.budget_usd`
+    (default 5).
   - `codex exec --sandbox workspace-write --output-schema FILE -o RESULT
     PROMPT`.
   - Push and registry tokens (`GH_TOKEN`, `GITHUB_TOKEN`, `NPM_TOKEN`, AWS
@@ -956,8 +1123,8 @@ or Codex in each; it never launches an agent itself.
     returns `result` and `run: {agent, cost_usd, turns, duration_ms,
     session_id}`.
 - **The run ledger.** `start`, `done`, `block`, `land` and the Stop hook
-  each append `{ts, item, event, outcome, ...}` to
-  `<git common dir>/its/runs/<ID>.jsonl`: shared by every worktree on the
+  each append `{ts, item, event, outcome, ...}` to `runs/<ID>.jsonl` in the
+  state folder: shared by every worktree on the
   machine, never committed and never in a diff, so recording can't trip the
   gate (an `.its/` folder in the checkout would be agent configuration) or
   conflict at land. `done` records its outcome (`passed`, `check_failed`,

@@ -28,8 +28,9 @@ from . import claims as cl
 from . import gate, gitx, tamper
 from .backlog import BACKLOG, BacklogItem, parse_backlog, set_field
 from .checks import Check, checks_for, result_findings, run_check, runs_pytest
+from .contract import SCHEMA, WorkError
 from .package import Package
-from .work import SCHEMA, WorkError, base_ref, changed_tests
+from .work import base_ref, changed_tests
 
 
 @dataclass

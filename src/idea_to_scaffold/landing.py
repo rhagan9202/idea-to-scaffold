@@ -26,22 +26,11 @@ from . import claims as cl
 from . import gate, gitx, ledger, trust
 from .backlog import BacklogItem, blocked_by, load_backlog, load_proposals, parse_backlog
 from .checks import RESULT_KINDS, Check, checks_for, result_findings, run_check
+from .contract import EXIT_NOT_LANDED, SCHEMA, WorkError
 from .ids import META_FILES
 from .linker import link_package
 from .package import Package
-from .work import (
-    BACKLOG,
-    BACKLOG_JSON,
-    EXIT_NOT_LANDED,
-    SCHEMA,
-    WorkError,
-    _locked,
-    _refresh_mirror,
-    changed_tests,
-    integration_branch,
-    remote_of,
-    shown,
-)
+from .work import BACKLOG, BACKLOG_JSON, _locked, _refresh_mirror, changed_tests, integration_branch, remote_of, shown
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:

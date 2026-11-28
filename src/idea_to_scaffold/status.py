@@ -12,8 +12,9 @@ from collections import Counter
 from . import claims as cl
 from . import gitx, trust
 from .backlog import load_proposals
+from .contract import SCHEMA, WorkError
 from .package import Package
-from .work import SCHEMA, WorkError, claims_payload, integration_branch, next_payload, remote_of, shown, view
+from .work import claims_payload, integration_branch, next_payload, remote_of, shown, view
 
 STATE_LABELS = {
     "ready_to_land": "ready to land",

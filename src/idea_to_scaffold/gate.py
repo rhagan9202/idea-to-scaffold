@@ -68,6 +68,8 @@ def refusal(blocking: list[dict]) -> str:
     if found & set(TEST_KINDS):
         return "test_changes"
     return "dependency_changes" if found & set(DEPENDENCY_KINDS) else "outside_touches"
+
+
 OWN_FIELDS = set(BRANCH_FIELDS)  # what a branch may change on its own item
 MODES = ("enforce", "warn", "off")
 # Checks that can misfire on honest work start in warn mode: they are reported but don't refuse the item until a

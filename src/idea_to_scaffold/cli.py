@@ -12,6 +12,17 @@ from . import __version__, trust
 from . import claims as cl
 from .audit import gate_audit
 from .backlog import BacklogError
+from .contract import (
+    EXIT_AUDIT_MISSED,
+    EXIT_CHECK_FAILED,
+    EXIT_COMPLETE,
+    EXIT_DRIFT,
+    EXIT_NOT_LANDED,
+    EXIT_NOTHING_READY,
+    EXIT_USAGE,
+    SCHEMA,
+    WorkError,
+)
 from .drift import drift
 from .edits import apply_result, block, drop, promote, propose, set_item_status, unblock, waive
 from .hooks import hook_agents, hook_dir, install_hooks, parse_event, stop_hook
@@ -28,14 +39,6 @@ from .status import STATE_LABELS, render, status_payload
 from .trace import trace
 from .validate import validate
 from .work import (
-    EXIT_AUDIT_MISSED,
-    EXIT_CHECK_FAILED,
-    EXIT_COMPLETE,
-    EXIT_DRIFT,
-    EXIT_NOT_LANDED,
-    EXIT_NOTHING_READY,
-    SCHEMA,
-    WorkError,
     _on_base_checkout,
     backlog_payload,
     claims_payload,
@@ -221,7 +224,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if args.drifted or args.all:
         return _verify_many(args, pkg, announce)
     if args.id is None:
-        return _fail(args, WorkError("usage", "name the item to verify, or pass --drifted or --all", 2))
+        return _fail(args, WorkError("usage", "name the item to verify, or pass --drifted or --all", EXIT_USAGE))
     try:
         payload = verify(pkg, args.id, on_check=announce)
     except WorkError as err:
@@ -438,7 +441,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     if args.next and args.id and args.dir == ".":  # `its start --next <dir>`
         args.dir, args.id = args.id, None
     if not args.next and not args.id:
-        return _fail(args, WorkError("usage", "name the item to start, or pass --next", 2))
+        return _fail(args, WorkError("usage", "name the item to start, or pass --next", EXIT_USAGE))
     pkg = _load(args)
     if pkg is None:
         return 1
@@ -921,7 +924,7 @@ def cmd_hook(args: argparse.Namespace) -> int:
 def cmd_scaffold(args: argparse.Namespace) -> int:
     if args.no_git and args.github is not None:
         print("error: --github needs git; drop --no-git or --github", file=sys.stderr)
-        return 2
+        return EXIT_USAGE
     github = None
     if args.github is not None:
         github = args.github  # "" means use the slug
@@ -969,8 +972,8 @@ class _Parser(argparse.ArgumentParser):
 
     def error(self, message: str):  # type: ignore[override]
         if _Parser.json_errors:
-            _emit(WorkError("usage", f"{self.prog}: {message}", 2).to_dict())
-            raise SystemExit(2)
+            _emit(WorkError("usage", f"{self.prog}: {message}", EXIT_USAGE).to_dict())
+            raise SystemExit(EXIT_USAGE)
         super().error(message)
 
 
@@ -1292,7 +1295,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = build_parser().parse_args(argv)
     except SystemExit as exc:  # usage errors, --help and --version: return the code rather than exiting
-        return exc.code if isinstance(exc.code, int) else 2
+        return exc.code if isinstance(exc.code, int) else EXIT_USAGE
     finally:
         _Parser.json_errors = False
     if args.chdir:

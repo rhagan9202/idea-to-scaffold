@@ -47,40 +47,27 @@ from .checks import (  # noqa: F401 - re-exported: check running lived here befo
     result_findings,
     run_check,
 )
+from .contract import (  # noqa: F401 - re-exported: the contract lived here before phase 10
+    EXIT_AUDIT_MISSED,
+    EXIT_BLOCKED,
+    EXIT_CHECK_FAILED,
+    EXIT_COMPLETE,
+    EXIT_DRIFT,
+    EXIT_ERROR,
+    EXIT_NOT_LANDED,
+    EXIT_NOTHING_READY,
+    EXIT_OK,
+    EXIT_OVERLAP,
+    SCHEMA,
+    WorkError,
+)
 from .ids import KIND_LABELS, META_FILES, definition_on_line, id_kind, is_placeholder, scan_lines, strip_links
 from .linker import NAV_BLOCK_RE, Doc, Target, _load_docs, link_package, scan_package
 from .locking import LockTimeout, git_common_dir, git_store_dir, package_lock
 from .package import Package
 from .touches import covered
 
-SCHEMA = 1
 BACKLOG_JSON = "planning/backlog.json"
-
-EXIT_OK = 0
-EXIT_ERROR = 1
-EXIT_NOTHING_READY = 3
-EXIT_BLOCKED = 4
-EXIT_CHECK_FAILED = 5
-EXIT_OVERLAP = 6
-EXIT_NOT_LANDED = 7
-EXIT_DRIFT = 8
-EXIT_COMPLETE = 9
-EXIT_AUDIT_MISSED = 10  # gate-audit: the gate missed a seeded cheat  # `next`: nothing left, every item is done
-
-
-
-@dataclass
-class WorkError(Exception):
-    code: str
-    message: str
-    exit_code: int = EXIT_ERROR
-    details: dict = field(default_factory=dict)
-
-    def __str__(self) -> str:
-        return self.message
-
-    def to_dict(self) -> dict:
-        return {"schema": SCHEMA, "ok": False, "error": {"code": self.code, "message": self.message, **self.details}}
 
 
 def shown(pkg: Package, rel: str) -> str:

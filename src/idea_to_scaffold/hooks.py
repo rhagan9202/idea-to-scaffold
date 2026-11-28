@@ -13,9 +13,10 @@ from pathlib import Path
 
 from . import ledger
 from .backlog import load_backlog
+from .contract import SCHEMA, WorkError
 from .package import Package
 from .results import HOOK_TIMEOUT
-from .work import SCHEMA, WorkError, done, failure_report, item_here
+from .work import done, failure_report, item_here
 
 HOOK_COMMAND = "its hook stop"
 HOOK_FILES = {"claude": ".claude/settings.json", "codex": ".codex/hooks.json"}

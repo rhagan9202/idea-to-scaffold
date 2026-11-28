@@ -24,15 +24,13 @@ from .backlog import (
     set_field,
     set_status,
 )
+from .contract import EXIT_CHECK_FAILED, SCHEMA, WorkError
 from .gate import WAIVER_FIELD, WAIVER_GROUPS, Waiver
 from .ids import is_placeholder
 from .locking import LockTimeout, package_lock
 from .package import BACKLOG_STATUSES, Package
 from .work import (
     BACKLOG,
-    EXIT_CHECK_FAILED,
-    SCHEMA,
-    WorkError,
     _find,
     _locked,
     _on_base_checkout,
