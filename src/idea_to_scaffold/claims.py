@@ -14,6 +14,7 @@ otherwise): an item's dependency counts as done when it is done there, that is, 
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -90,7 +91,11 @@ def fetch(cwd: Path, remote: str, base: str) -> None:
 
 
 class PushRejected(GitError):
-    """The claim branch already exists on the remote: someone else claimed the item first."""
+    """The claim branch already exists on the remote: someone else claimed the item first (`branch`, when known)."""
+
+    def __init__(self, message: str, branch: str | None = None):
+        super().__init__(message)
+        self.branch = branch
 
 
 def push_claim(cwd: Path, remote: str, ident: str, branch: str) -> None:
@@ -102,14 +107,37 @@ def push_claim(cwd: Path, remote: str, ident: str, branch: str) -> None:
     taken = [line.split("refs/heads/", 1)[1] for line in proc.stdout.splitlines() if "refs/heads/" in line]
     taken = [b for b in taken if item_of_branch(b) == ident]
     if taken:
-        raise PushRejected(f"{ident} is already claimed on {remote} by branch {taken[0]}")
+        raise PushRejected(f"{ident} is already claimed on {remote} by branch {taken[0]}", taken[0])
     proc = gitx.run(cwd, "push", "--quiet", "--set-upstream", f"--force-with-lease=refs/heads/{branch}:", remote,
                     f"refs/heads/{branch}:refs/heads/{branch}")
     if proc.returncode != 0:
         err = proc.stderr.strip()
         if "stale info" in err or "rejected" in err or "already exists" in err:
-            raise PushRejected(f"{ident} was claimed on {remote} first ({err.splitlines()[-1] if err else 'rejected'})")
+            raise PushRejected(f"{ident} was claimed on {remote} first ({err.splitlines()[-1] if err else 'rejected'})",
+                               branch)
         raise GitError(f"couldn't push {branch} to {remote}: {err}")
+
+
+def commit_all(cwd: Path, message: str, paths: list[str] | None = None) -> str | None:
+    """Stage every change in the checkout (only those under `paths`, if given), new files included, and commit them.
+    Returns the new commit, or None when there was nothing to commit. Ignored files stay out, as in `git add -A`."""
+    spec = ["--", *paths] if paths else []
+    proc = gitx.run(cwd, "add", "--all", *spec)
+    if proc.returncode != 0:
+        raise GitError(f"couldn't stage the changes: {proc.stderr.strip()}")
+    if gitx.run(cwd, "diff", "--cached", "--quiet", *spec).returncode == 0:
+        return None
+    proc = gitx.run(cwd, "commit", "--quiet", "-m", message, *spec)
+    if proc.returncode != 0:
+        raise GitError(f"couldn't commit: {proc.stderr.strip() or proc.stdout.strip()}")
+    return git(cwd, "rev-parse", "HEAD")
+
+
+def push_branch(cwd: Path, remote: str, branch: str) -> None:
+    """Push a branch's new commits to the remote. Never forced: a branch someone else moved there is refused."""
+    proc = gitx.run(cwd, "push", "--quiet", remote, f"refs/heads/{branch}:refs/heads/{branch}")
+    if proc.returncode != 0:
+        raise GitError(f"couldn't push {branch} to {remote}: {proc.stderr.strip()}")
 
 
 def conflicting_files(cwd: Path, ours: str, theirs: str) -> list[str] | None:
@@ -348,7 +376,7 @@ def release_claim(
         if not local and not entry and not (remote and pushed):
             if force:
                 return {"id": ident, "deleted_branches": [], "removed_worktree": None, "deleted_remote_branches": [],
-                        "remote_branches": remote_claim_branches(run_dir, ident), "released": False}
+                        "remote_branches": pushed, "released": False}
             hint = f" (it has pushed branches: {', '.join(pushed)}; add --remote)" if pushed else ""
             raise GitError(f"{ident} has no local claim{hint}")
 
@@ -362,9 +390,11 @@ def release_claim(
         for claim in local:
             if claim.branch == checked_out:
                 raise GitError(f"{claim.branch} is checked out in {run_dir}; switch to another branch first")
+        setup_only = False  # the worktree holds nothing but what its's setup wrote: removing it loses no work
         if not force:
-            if wt is not None and git(wt, "status", "--porcelain", check=False):
+            if wt is not None and uncommitted(wt, ident, store):
                 raise GitError(f"{wt} has uncommitted changes; commit them, or add --force to discard them")
+            setup_only = wt is not None and bool(git(wt, "status", "--porcelain", check=False))
             if ident not in closed:
                 unmerged = [c.branch for c in local if not _merged(run_dir, f"refs/heads/{c.branch}", base_ref)]
                 if remote:
@@ -375,7 +405,7 @@ def release_claim(
 
         removed_worktree = None
         if wt is not None:
-            git(run_dir, "worktree", "remove", *(["--force"] if force else []), str(wt))
+            git(run_dir, "worktree", "remove", *(["--force"] if force or setup_only else []), str(wt))
             removed_worktree = str(wt)
         elif worktree:
             git(run_dir, "worktree", "prune", check=False)  # deleted by hand: forget it
@@ -396,8 +426,22 @@ def release_claim(
             f":refs/heads/{branch}")
         deleted_remote.append(name)
     return {"id": ident, "deleted_branches": deleted, "removed_worktree": removed_worktree,
-            "deleted_remote_branches": deleted_remote, "remote_branches": remote_claim_branches(run_dir, ident),
+            "deleted_remote_branches": deleted_remote, "remote_branches": still_pushed(run_dir, ident),
             "released": True}
+
+
+def still_pushed(cwd: Path, ident: str) -> list[str]:
+    """The item's pushed claim branches that are really still on the remote. A remote-tracking ref for a branch
+    someone deleted there (`land --release` on another machine) is stale: it is removed, not reported."""
+    out = []
+    for name in remote_claim_branches(cwd, ident):
+        try:
+            if _refresh_remote(cwd, name) is None:
+                continue
+        except GitError:
+            pass  # the remote can't be reached: report what we last saw
+        out.append(name)
+    return out
 
 
 def claim_entry(cwd: Path, ident: str) -> dict:
@@ -486,3 +530,97 @@ def touches_overlap(a: list[str], b: list[str]) -> bool:
     if not a or not b:
         return True
     return any(paths_overlap(x, y) for x in a for y in b)
+
+
+# --- what `its`'s own setup wrote -----------------------------------------------------------------------------
+# `its start` runs the setup command in a new worktree, as the lead and before any agent runs. A lockfile that setup
+# writes (`uv.lock` on a project without one) isn't the agent's dependency change, so the gate lets it through when
+# its content is still what setup wrote. The record lives in the state folder, outside every checkout.
+
+def record_setup(cwd: Path, ident: str, files: dict[str, str]) -> None:
+    """Remember the lockfiles `its`'s setup wrote for an item: repository path to content digest."""
+    store = _store_dir(cwd)
+    data = _load_json(store / "setup.json")
+    if files:
+        data[ident] = files
+    else:
+        data.pop(ident, None)
+    _save_json(store, "setup.json", data)
+
+
+def content_digest(text: str | None) -> str:
+    """A digest of a file's text as the gate reads it, for the setup record."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16] if text is not None else ""
+
+
+def uncommitted(checkout: Path, ident: str | None = None, store: Path | None = None) -> list[str]:
+    """The paths with uncommitted changes in `checkout`, without the lockfiles `its`'s setup wrote there for `ident`
+    that still hold what it wrote: those aren't anyone's work, so they don't keep a claim from being released."""
+    proc = gitx.run(checkout, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if proc.returncode != 0:
+        raise GitError(f"couldn't read the status of {checkout}: {proc.stderr.strip()}")
+    written = {}
+    if ident:
+        entry = _load_json((store or _store_dir(checkout)) / "setup.json").get(ident)
+        written = entry if isinstance(entry, dict) else {}
+    entries, out = iter(proc.stdout.split("\0")), []
+    for entry in entries:
+        if len(entry) < 4:
+            continue
+        if entry[0] in "RC":
+            next(entries, None)  # the rename's old path
+        path = entry[3:]
+        if path in written and entry[:2] in ("??", " M"):
+            try:
+                text = (checkout / path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = None
+            if text is not None and written[path] == content_digest(text):
+                continue
+        out.append(path)
+    return out
+
+
+def setup_of(cwd: Path, ident: str) -> dict[str, str]:
+    try:
+        entry = _load_json(_store_dir(cwd) / "setup.json").get(ident)
+    except GitError:
+        return {}
+    return {str(k): str(v) for k, v in entry.items()} if isinstance(entry, dict) else {}
+
+
+def _load_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+# --- review verdicts ---------------------------------------------------------------------------------------------
+# `its review` notes what it put in front of the reviewer, and `its review --reply` the verdict, per item, so that
+# `its land` and `its status` can act on it (review.py). Like the setup record, it is the lead's record, not proof.
+
+def record_review(cwd: Path, ident: str, *, prompt: dict | None = None, verdict: dict | None = None) -> None:
+    """Record the review prompt `its review` made for an item, or the verdict on it."""
+    store = _store_dir(cwd)
+    data = _load_json(store / "reviews.json")
+    entry = data.get(ident) if isinstance(data.get(ident), dict) else {}
+    if prompt is not None:
+        entry["prompt"] = prompt
+    if verdict is not None:
+        entry["verdict"] = verdict
+    data[ident] = entry
+    _save_json(store, "reviews.json", data)
+
+
+def reviews_of(cwd: Path, ident: str) -> dict:
+    entry = _load_json(_store_dir(cwd) / "reviews.json").get(ident)
+    return entry if isinstance(entry, dict) else {}
+
+
+def _save_json(store: Path, name: str, data: dict) -> None:
+    store.mkdir(parents=True, exist_ok=True)
+    tmp = store / f"{name}.tmp"
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    os.replace(tmp, store / name)

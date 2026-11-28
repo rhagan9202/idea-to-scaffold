@@ -35,10 +35,10 @@ item whose dependencies are `done` is next.
 - **Status:** todo
 - **Satisfies:** NFR-001
 - **Depends on:** —
-- **Do:** Install dependencies; confirm the test and lint commands pass on the fresh scaffold; add CI.
-- **Done when:** CI runs on push and passes.
+- **Do:** Confirm the test and lint commands pass on the fresh scaffold (`its start --worktree` runs the setup command first); commit the lockfile setup writes; make the smoke test in `tests/` run the real entry point. The scaffold already wrote CI; changing it is the lead's job, on the integration branch.
+- **Done when:** Test and lint pass on a fresh checkout, the lockfile is committed, and CI passes on push.
 - **Verify:** `<test command>`
-- **Touches:** `.github/workflows/`
+- **Touches:** `tests/`
 
 ### T-1.2 — <title>
 - **Milestone:** M2

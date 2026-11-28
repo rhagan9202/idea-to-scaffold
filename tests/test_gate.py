@@ -333,6 +333,16 @@ def test_a_failing_test_is_reported_once():
     assert "lint" not in report
 
 
+def test_a_second_different_failure_is_shown_too():  # B8
+    from idea_to_scaffold.work import failure_report
+    report = failure_report([
+        {"name": "test", "command": "pytest", "exit_code": 1, "passed": False, "output": "E   assert 1 == 2"},
+        {"name": "lint", "command": "ruff check .", "exit_code": 1, "passed": False,
+         "output": "app.py:1:8: F401 `os` imported but unused"},
+    ])
+    assert "assert 1 == 2" in report and "F401" in report and "same output" not in report
+
+
 def test_the_stop_hook_blocks_until_the_gate_passes(claim: Path, repo: Path, capsys):  # noqa: F811
     pkg = Package.load(claim)
     (claim / TEST).unlink()
@@ -343,9 +353,13 @@ def test_the_stop_hook_blocks_until_the_gate_passes(claim: Path, repo: Path, cap
     git(claim, "checkout", "--", TEST)
     decision = stop_hook(pkg, "{}")
     assert decision["decision"] == "block" and "no files outside the planning folder" in decision["reason"]
+    assert "Make the change the item asks for" in decision["reason"] and "Undo" not in decision["reason"]  # B13
+    headless = stop_hook(pkg, "{}", headless=True)
+    assert "its done T-2.1 --check" in headless["reason"] and "end with status blocked" in headless["reason"]
     (claim / "src/streak/store.py").write_text("def add(): ...\n")
     decision = stop_hook(pkg, "{}")
     assert decision["decision"] == "block" and "isn't marked done" in decision["reason"]
+    assert stop_hook(pkg, "{}", headless=True) is None  # unattended: its done --result marks it once the agent ends
     assert main(["done", "T-2.1", str(claim)]) == 0
     assert stop_hook(pkg, "{}") is None
     assert stop_hook(Package.load(repo), "{}") is None  # on main nothing is in progress: let it stop
@@ -413,24 +427,38 @@ def test_review_leaves_out_the_authors_own_account(claim: Path, capsys):
     assert "NOTES.md (not shown: the author's own notes)" in out["prompt"]
 
 
-REPLY = {"verdict": "approve", "requirements": [{"id": "FR-001", "status": "met", "evidence": "test_add"}],
+MET = [{"id": r, "status": "met", "evidence": "test_add"} for r in ("FR-001", "FR-002", "NFR-002")]  # T-2.1's
+REPLY = {"verdict": "approve", "requirements": MET,
          "findings": [{"severity": "minor", "file": "src/streak/store.py", "line": 1, "message": "name it better"}]}
 
 
-def test_a_review_reply_is_checked_against_a_severity_cut_off(tmp_path: Path, capsys):
+def test_a_review_reply_is_checked_against_a_severity_cut_off(claim: Path, tmp_path: Path, capsys):
     reply = tmp_path / "review.json"
     reply.write_text("Here is my review:\n```json\n" + json.dumps(REPLY) + "\n```\n")
-    code, out = run_json(capsys, "review", "--reply", str(reply))
-    assert code == 0 and out["passed"] and out["blocking"] == []
-    code, out = run_json(capsys, "review", "--reply", str(reply), "--min-severity", "minor")
+    code, out = run_json(capsys, "review", "--reply", str(reply), str(claim))  # the item is this claim's
+    assert code == 0 and out["passed"] and out["blocking"] == [] and out["id"] == "T-2.1"
+    code, out = run_json(capsys, "review", "T-2.1", str(claim), "--reply", str(reply), "--min-severity", "minor")
     assert code == 5 and not out["passed"] and len(out["blocking"]) == 1
     envelope = {"type": "result", "result": json.dumps({**REPLY, "requirements": [
-        {"id": "FR-001", "status": "cant_tell", "evidence": ""}]})}
+        {"id": "FR-001", "status": "cant_tell", "evidence": ""}, *MET[1:]]})}
     reply.write_text(json.dumps(envelope))  # claude -p --output-format json
-    code, out = run_json(capsys, "review", "--reply", str(reply))
+    code, out = run_json(capsys, "review", "T-2.1", str(claim), "--reply", str(reply))
     assert code == 5 and out["unmet"] == ["FR-001"]
     reply.write_text('{"verdict": "lgtm"}')
-    code, out = run_json(capsys, "review", "--reply", str(reply))
+    code, out = run_json(capsys, "review", "T-2.1", str(claim), "--reply", str(reply))
     assert code == 1 and out["error"]["code"] == "bad_review"
+
+
+def test_a_reply_that_leaves_out_a_requirement_doesnt_pass(claim: Path, repo: Path, tmp_path: Path,  # noqa: F811
+                                                            capsys):  # F1
+    reply = tmp_path / "review.json"
+    reply.write_text(json.dumps({"verdict": "approve", "requirements": [], "findings": []}))
+    code, out = run_json(capsys, "review", "T-2.1", str(claim), "--reply", str(reply))
+    assert code == 5 and not out["passed"] and out["missing"] == out["unmet"] == ["FR-001", "FR-002", "NFR-002"]
+    reply.write_text(json.dumps({**REPLY, "requirements": MET[:2]}))  # NFR-002 left out
+    code, out = run_json(capsys, "review", "T-2.1", str(claim), "--reply", str(reply))
+    assert code == 5 and out["missing"] == ["NFR-002"]
+    code, out = run_json(capsys, "review", "--reply", str(reply), str(repo))  # on main, no item to judge it against
+    assert code == 1 and out["error"]["code"] == "which_item"
     capsys.readouterr()
     assert main(["review", "--schema"]) == 0 and json.loads(capsys.readouterr().out)["type"] == "object"

@@ -14,12 +14,15 @@ from . import gitx, trust
 from .backlog import load_proposals
 from .contract import SCHEMA, WorkError
 from .package import Package
+from .review import claim_review
 from .work import claims_payload, integration_branch, next_payload, remote_of, shown, view
 
 STATE_LABELS = {
     "ready_to_land": "ready to land",
     "blocked": "blocked",
     "working": "working",
+    "changes_requested": "done, but its review requested changes",
+    "not_reviewed": "done, waiting for an approving review (gate.require_review)",
     "conflicts": "done, but conflicts with the integration branch",
     "waiting": "done, waiting on dependencies",
     "no_commits": "done, but no commits yet",
@@ -28,13 +31,16 @@ STATE_LABELS = {
 }
 
 
+REVIEWED = ("ready_to_land", "waiting", "conflicts")  # done on the branch, so a review can count for it
+
+
 def status_payload(pkg: Package, base: str | None = None) -> dict:
     v = view(pkg, base)
     counts = Counter(i.status or "missing" for i in v.items)
     nxt = next_payload(pkg, base=base)
     out: dict = {
         "schema": SCHEMA, "ok": True, "project": pkg.name or pkg.slug or pkg.root.name, "source": v.source,
-        "branch": v.branch, "base": v.base, "counts": dict(sorted(counts.items())),
+        "branch": v.branch, "base": v.base, "behind": v.behind or None, "counts": dict(sorted(counts.items())),
         "next": nxt["item"]["id"] if nxt["item"] else None, "next_reason": nxt["reason"],
         "ready": [i["id"] for i in nxt["ready"]],
         "blocked": nxt["blocked"],
@@ -44,6 +50,12 @@ def status_payload(pkg: Package, base: str | None = None) -> dict:
     }
     if cl.in_git(pkg.root):
         claims = claims_payload(pkg, base)["claims"]
+        for c in claims:  # what its land would say about the review of what it would merge
+            c["review"] = claim_review(pkg, c, v.base) if v.base and c["state"] in REVIEWED else None
+            if c["state"] == "ready_to_land" and c["review"] and c["review"]["current"] and not c["review"]["passed"]:
+                c["state"] = "changes_requested"
+            elif c["state"] == "ready_to_land" and c["review"] and c["review"]["required"] and not c["review"]["current"]:
+                c["state"] = "not_reviewed"
         out["claims"] = [c for c in claims if c["state"] not in ("finished", "orphaned")]
         out["ready_to_land"] = [c["id"] for c in claims if c["state"] == "ready_to_land"]
         out["to_release"] = [c["id"] for c in claims if c["state"] in ("finished", "orphaned")]
@@ -76,6 +88,9 @@ def render(payload: dict) -> list[str]:
     lines = [f"{payload['project']}{where}: {summary or 'no items'}"]
     if payload["source"] != "working tree":
         lines.append(f"  (backlog read from {payload['source']})")
+    if payload.get("behind"):
+        lines.append(f"  {payload['branch']} is {payload['behind']} commit(s) behind {payload['base']}: "
+                     "pull before starting work here (git pull --ff-only)")
     if payload["claims"]:
         lines.append("claims:")
         for c in payload["claims"]:
@@ -88,7 +103,13 @@ def render(payload: dict) -> list[str]:
                 label += f" in {', '.join(c['conflicts_with_base'])}"
             last = c["last_commit"]
             tail = f"  {c['ahead']} commit(s), last {last['date'][:10]} \"{last['subject']}\"" if last and c["ahead"] else ""
+            review = c.get("review")
+            if review and c["state"] not in ("changes_requested", "not_reviewed"):
+                label += f"; review: {review['label']}"
             lines.append(f"  {c['id']:<8} {label}")
+            if c["state"] == "changes_requested":
+                why = [*review["unmet"], *review["blocking"]]
+                lines.append(f"           review: {', '.join(why) or 'changes requested'}")
             lines.append(f"           {c['branch']}{tail}" + (f"  ({c['worktree']})" if c["worktree"] else ""))
             for other in c.get("conflicts_with", []):
                 lines.append(f"           would conflict with {other['id']} in {', '.join(other['files'])}")

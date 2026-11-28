@@ -60,6 +60,8 @@ _REFUSAL = "`done`: the done gate refused the branch's "
 ERRORS: dict[str, Code] = {
     "already_done": Code("`done`: the item is already done"),
     "already_started": Code("`start`: the item is already in progress"),
+    "audit_missed": Code("`gate-audit`: the gate missed a seeded cheat, or only warned about one (unless "
+                         "`--allow-warn`)", (EXIT_AUDIT_MISSED,), ("missed", "warned")),
     "bad_agent": Code("`hooks`: no Stop hook is known for that agent"),
     "bad_backlog": Code("the backlog can't be read or changed as asked"),
     "bad_hooks_file": Code("`hooks`: the agent's settings file isn't a JSON object"),
@@ -74,6 +76,8 @@ ERRORS: dict[str, Code] = {
     "base_untrusted": Code("`land`: the integration branch has commits that `its` didn't record and that aren't on "
                            "the remote; a person looks, then `land --accept-base` trusts them",
                            (EXIT_NOT_LANDED,), ("integration_branch", "commits")),
+    "behind_remote": Code("`start` on the integration branch: it is behind its remote copy, so its backlog is "
+                          "stale; pull first", fields=("branch", "base", "behind")),
     "blocked": Code("`start`: a dependency isn't done", (EXIT_BLOCKED,), ("blocked_by",)),
     "check_failed": Code("`done`: a check failed", (EXIT_CHECK_FAILED,), ("checks",)),
     "claimed": Code("`start`: another branch holds the item's claim", fields=("claim",)),
@@ -92,8 +96,12 @@ ERRORS: dict[str, Code] = {
     "launch_settings_changed": Code("`done --result`: the headless launch files were changed during the run, so it "
                                     "may have had no Stop hook or sandbox; nothing was marked", (EXIT_CHECK_FAILED,),
                                     ("files", "result_file")),
+    "link_outdated": Code("`link --check`: generated links, the index or the commands blocks are out of date",
+                          fields=("changed",)),
     "locked": Code("another `its` command holds the package lock"),
     "no_base": Code("`start --claim`, `gate-audit`: there is no integration branch"),
+    "no_changes": Code("`done`: the branch changes nothing outside the planning folder, so nothing shows the item "
+                       "was implemented", (EXIT_CHECK_FAILED,), ("findings", "warnings")),
     "no_fork_point": Code("`done` on the integration branch: no start was recorded for the item, so the gate can't "
                           "tell which commits are its work; `its start <ID> --force` records one", (EXIT_CHECK_FAILED,)),
     "no_package": Code("no planning package was found"),
@@ -108,7 +116,10 @@ ERRORS: dict[str, Code] = {
                                    fields=("branch", "integration_branch")),
     "not_on_base": Code("`waive`: run it in the main checkout, on the integration branch",
                         fields=("branch", "integration_branch")),
+    "not_verified": Code("`verify --drifted`, `verify --all`: some items failed their checks again; the rest were "
+                         "re-verified", (EXIT_CHECK_FAILED,), ("failed",)),
     "not_placeholder": Code("`renumber`: the ID is permanent already"),
+    "not_utf8": Code("`link`: a planning file isn't valid UTF-8 text"),
     "nothing_ready": Code("`start --next`: nothing can start, and `reason` says why; exit 9 when every item is done",
                           (EXIT_NOTHING_READY, EXIT_COMPLETE), ("reason",)),
     "nothing_to_review": Code("`review`: the branch only changes the backlog"),
@@ -120,6 +131,8 @@ ERRORS: dict[str, Code] = {
     "placeholder": Code("the item has a placeholder ID; `its promote` gives it a permanent one"),
     "push_failed": Code("`land --push`: the branches landed locally, but the push failed", fields=("landed", "skipped")),
     "result_mismatch": Code("`done --result`: the result is for another item", fields=("result_id", "result_file")),
+    "status_changed": Code("`done`: the item's status changed while its checks ran (a `block`, say), and that "
+                           "change is kept", fields=("status", "was")),
     "test_changes": Code(_REFUSAL + "test changes (tests, test config, or how the item is verified); the lead waives "
                          "them with `its waive <ID> --test-changes`", (EXIT_CHECK_FAILED,), ("findings", "warnings")),
     "usage": Code("the command line is wrong", (EXIT_USAGE,)),

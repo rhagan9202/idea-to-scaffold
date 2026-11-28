@@ -28,10 +28,12 @@ can go in with your work; the playbook says how. `draft` docs are guidance.
 ## Stack & commands
 - **Language / runtime:** <language> <runtime>
 - **Framework:** <framework>
+<!-- its:commands (generated from package.yaml by `its link`; edit package.yaml, not this block) -->
 - **Setup:** `<setup>`
 - **Test:** `<test>`
 - **Lint:** `<lint>`
 - **Run:** `<run>`
+<!-- /its:commands -->
 
 Run test and lint before declaring any task done.
 

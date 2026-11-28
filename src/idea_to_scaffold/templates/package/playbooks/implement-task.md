@@ -21,6 +21,8 @@ depends_on: []
 7. Run `its done <ID>`. It runs the item's **Verify** command (read from the integration branch) and the test and lint commands, and sets **Status** to `done` only if they all pass and the change keeps every test, adds no skips, leaves the item's Verify alone and stays inside its **Touches**. Without `its`, run them yourself and set the status by hand. If you discovered follow-up work, run `its propose "Title"` for each item (without `its`, add a backlog item with a placeholder ID, `T-new-<short-name>`, and `Status: proposed`). If you can't finish, run `its block <ID> --reason "..."` and stop; never weaken a test to pass. Run `its link .` if available.
 8. Commit: `<type>(<scope>): <summary> [T-n.m]` with `Refs: <requirement IDs>`. If you clarified a planning doc on the way (see `update-plan`), add a `Plan: <doc> — <what changed>` line.
 
+**In an unattended run** (started with the launcher script `its start --worktree` prints): stop after `its done <ID> --check` passes and end with the result JSON. Don't set the status or commit: `its done --result` checks the work again, marks the item done, commits it and pushes the branch. If you can't finish, end with status `blocked` or `needs_human` and the reason.
+
 **Done check:** tests and lint pass, every listed requirement has a test, the backlog status is `done`, the commit references the item.
 
 If a requirement is ambiguous or conflicts with the architecture, use `update-plan` instead of guessing. A clarification that changes no ID and no scope can go in with this change; anything bigger waits for review.

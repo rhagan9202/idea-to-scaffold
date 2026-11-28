@@ -3,12 +3,15 @@ and the backlog commands."""
 from __future__ import annotations
 
 import argparse
+import contextlib
+import errno
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-from . import __version__, trust
+from . import __version__, gate, trust
 from . import claims as cl
 from .audit import gate_audit
 from .backlog import BacklogError
@@ -17,6 +20,7 @@ from .contract import (
     EXIT_CHECK_FAILED,
     EXIT_COMPLETE,
     EXIT_DRIFT,
+    EXIT_ERROR,
     EXIT_NOT_LANDED,
     EXIT_NOTHING_READY,
     EXIT_USAGE,
@@ -32,7 +36,7 @@ from .landing import land
 from .ledger import stats
 from .linker import link_package
 from .package import BACKLOG_STATUSES, PROFILES, Package, PackageError, new_package
-from .review import REPLY_SCHEMA, read_reply, review
+from .review import REPLY_SCHEMA, judge, review
 from .scaffold import ScaffoldError, scaffold
 from .sizing import sizing
 from .status import STATE_LABELS, render, status_payload
@@ -57,6 +61,7 @@ from .work import (
     stale_note,
     start,
     verify,
+    verify_many,
     write_backlog_json,
 )
 
@@ -187,6 +192,12 @@ def cmd_gate_audit(args: argparse.Namespace) -> int:
         return _fail(args, err)
     ok = payload["ok"] or (args.allow_warn and not payload["missed"])
     code = 0 if ok else EXIT_AUDIT_MISSED
+    payload["ok"] = ok
+    if not ok:  # an ok: false object always has an error (section 16)
+        missed = payload["missed"] or payload["warned"]
+        payload["error"] = WorkError("audit_missed", f"the gate {'missed' if payload['missed'] else 'only warned about'} "
+                                     f"{len(missed)} seeded cheat(s): {', '.join(missed)}", EXIT_AUDIT_MISSED,
+                                     {"missed": payload["missed"], "warned": payload["warned"]}).to_dict()["error"]
     if args.json:
         _emit(payload)
         return code
@@ -247,17 +258,13 @@ def _verify_many(args: argparse.Namespace, pkg: Package, announce) -> int:
     else:
         from .backlog import load_backlog
         ids = [i.id for i in load_backlog(pkg) if i.status == "done" and i.touches]
-    verified, failed = [], []
-    for ident in ids:
-        if not args.json:
-            print(f"{ident}:")
-        try:
-            verified.append(verify(pkg, ident, on_check=announce))
-        except WorkError as err:
-            failed.append({"id": ident, **err.to_dict()["error"]})
-            if not args.json:
-                print(f"  not verified: {err.message}")
+    verified, failed = verify_many(pkg, ids, on_check=announce,
+                                   on_item=None if args.json else (lambda ident: print(f"{ident}:")))
     result = {"schema": SCHEMA, "ok": not failed, "verified": verified, "failed": failed}
+    if failed:  # an ok: false object always has an error (section 16)
+        result["error"] = WorkError("not_verified", f"{len(failed)} item(s) failed their checks again: "
+                                    + ", ".join(f["id"] for f in failed), EXIT_CHECK_FAILED,
+                                    {"failed": [f["id"] for f in failed]}).to_dict()["error"]
     if verified:
         _commit(args, pkg, result, "Re-verify " + ", ".join(v["id"] for v in verified))
     if args.json:
@@ -265,9 +272,12 @@ def _verify_many(args: argparse.Namespace, pkg: Package, announce) -> int:
     elif not ids:
         print("nothing to verify" + (": no item has drifted" if args.drifted else ""))
     else:
+        for f in failed:
+            print(f"  not verified: {f['id']}: {f['message']}")
         print(f"verified again: {', '.join(v['id'] for v in verified) or 'none'}"
               + (f"; failed: {', '.join(f['id'] for f in failed)}" if failed else "")
-              + (" (commit the backlog to record it)" if verified else ""))
+              + ((f" (committed {result['committed']})" if result.get("committed") else
+                  " (commit the backlog to record it)") if verified else ""))
     return EXIT_CHECK_FAILED if failed else 0
 
 
@@ -276,24 +286,36 @@ def cmd_link(args: argparse.Namespace) -> int:
     if pkg is None:
         return 1
     try:
-        changed = link_package(pkg, check=args.check)
+        # in a claim's checkout the commands are the lead's: rewriting AGENTS.md there would be an agent config change
+        changed = link_package(pkg, check=args.check, adopt=True, commands=not _claim_checkout(pkg))
     except UnicodeDecodeError as exc:
-        print(f"error: a planning file is not valid UTF-8 text ({exc.reason})", file=sys.stderr)
-        return 1
+        return _fail(args, WorkError("not_utf8", f"a planning file is not valid UTF-8 text ({exc.reason})"))
     changed = [shown(pkg, rel) for rel in changed]
+    if args.json:
+        if args.check and changed:
+            return _fail(args, WorkError("link_outdated", f"{len(changed)} file(s) are out of date; run `its link` "
+                                         "and commit the result", details={"changed": changed}))
+        _emit({"schema": SCHEMA, "ok": True, "check": args.check, "changed": changed})
+        return 0
     if args.check:
         if changed:
-            print("cross-links are out of date in:")
+            print("generated links or commands are out of date in:")
             for rel in changed:
                 print(f"  {rel}")
             print("run `its link` and commit the result")
             return 1
-        print("cross-links are up to date")
+        print("cross-links and commands are up to date")
         return 0
     print(f"updated {len(changed)} file(s)" if changed else "already up to date")
     for rel in changed:
         print(f"  {rel}")
     return 0
+
+
+def _claim_checkout(pkg: Package) -> bool:
+    if not cl.in_git(pkg.root):
+        return False
+    return bool(cl.claim_of_worktree(pkg.root) or cl.item_of_branch(cl.current_branch(pkg.root) or ""))
 
 
 def _load(args: argparse.Namespace) -> Package | None:
@@ -368,6 +390,9 @@ def cmd_next(args: argparse.Namespace) -> int:
     note = stale_note(payload["stale_remote"])
     if note and not args.json:
         print(note, file=sys.stderr)
+    if payload["behind"] and not args.json:
+        print(f"note: {payload['source']} is ahead of this checkout by {payload['behind']} commit(s); the backlog is "
+              f"read from there. Pull before starting work here: git pull --ff-only", file=sys.stderr)
     nothing = EXIT_COMPLETE if payload["reason"] == "complete" else EXIT_NOTHING_READY
     if args.parallel is not None:
         code = 0 if payload["parallel"] else nothing
@@ -450,7 +475,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     try:
         payload = start(pkg, None if args.next else args.id, force=args.force, branch=args.branch,
                         worktree=args.worktree, agent=args.agent, base=args.base, allow_overlap=args.allow_overlap,
-                        push=False if args.no_push else None)
+                        push=False if args.no_push else None, setup=not args.no_setup)
     except WorkError as err:
         if err.code == "blocked" and not args.json:
             print(f"error: {err.message} (use --force to start it anyway)", file=sys.stderr)
@@ -472,15 +497,25 @@ def cmd_start(args: argparse.Namespace) -> int:
             print(f"  pushed to {payload['remote']}, so other machines see the claim")
         elif payload.get("push_error"):
             print(f"  warning: the claim is only local; pushing it failed: {payload['push_error']}")
+        setup = payload.get("setup")
+        if setup and setup["passed"]:
+            wrote = f"; it wrote {', '.join(setup['lockfiles'])}, which done lets through" if setup["lockfiles"] else ""
+            print(f"  ran setup in the worktree: {setup['command']}{wrote}")
+        elif setup:
+            print(f"  warning: setup failed in the worktree (exit {setup['exit_code']}): {setup['command']}")
+            for line in (setup.get("output") or "").splitlines()[-5:]:
+                print(f"    {line}")
         print("start an agent on it:")
         print(f"  {payload['commands']['claude']}")
         print(f"  {payload['commands']['codex']}")
         headless = payload["commands"].get("headless")
         if headless:
-            print(f"or unattended (sandboxed, budget ${headless['budget_usd']:g}, push tokens unset; it ends with "
-                  "`its done --result`):")
+            print(f"or unattended (sandboxed, budget ${headless['budget_usd']:g}, push tokens unset; the script ends "
+                  "with `its done --result`, which commits the work and pushes the branch):")
             print(f"  {headless['claude']}")
             print(f"  {headless['codex']}")
+            if os.name == "nt":
+                print(f"  (from cmd you can also run {headless['scripts']['claude']['cmd']})")
     else:
         print(f"{_item_line(item)} is now in-progress (was {payload['previous_status']})")
     if item["verify"]:
@@ -603,14 +638,19 @@ def cmd_done(args: argparse.Namespace) -> int:
     options = {"verify": not args.no_verify, "check_only": args.check, "on_check": announce}
     try:
         if args.result:
-            payload = apply_result(pkg, args.id, args.result, **options)
+            payload = apply_result(pkg, args.id, args.result, push=False if args.no_push else None, **options)
             if payload["status"] == "blocked":
-                args.commit = True  # nobody is at an unattended run to commit the block
-                return _edited(args, payload, pkg)
+                if not args.json:
+                    print(f"{payload['id']} is now blocked (was {payload['previous_status']})")
+                    print(f"  reason: {payload['reason']}")
+                    _print_run_commit(payload)
+                    return 0
+                _emit(payload)
+                return 0
         else:
             payload = done(pkg, args.id, **options)
     except WorkError as err:
-        if err.code in ("test_changes", "dependency_changes", "outside_touches") and not args.json \
+        if err.code in gate.REFUSALS and not args.json \
                 and len(err.details["findings"]) > 1:
             for finding in err.details["findings"]:
                 print(f"  {finding['kind']}: {finding['message']}")
@@ -630,15 +670,38 @@ def cmd_done(args: argparse.Namespace) -> int:
     if payload.get("checked_only"):
         print(f"{payload['id']} passes its checks (status unchanged: {payload['status']})")
         return 0
+    if payload.get("already_done"):
+        print(f"{payload['id']} was already done; its checks pass again and its Verified mark is {payload['verified']}")
+        _print_run_commit(payload)
+        return 0
     print(f"{payload['id']} is now done (was {payload['previous_status']})")
     if payload["manual_verify"]:
         print(f"  check by hand: {payload['manual_verify']}")
     if payload["now_ready"]:
         when = "ready once this branch is merged" if payload["merge_needed"] else "now ready"
         print(f"  {when}: {', '.join(payload['now_ready'])}")
-    elif payload["merge_needed"]:
+    elif payload["merge_needed"] and "committed" not in payload:
         print("  commit, then merge this branch; dependent items become ready once it is merged")
+    _print_run_commit(payload)
     return 0
+
+
+def _print_run_commit(payload: dict) -> None:
+    """What `done --result` did with the run's work: the commit and the push."""
+    if "committed" not in payload:
+        return
+    if payload.get("commit_error"):
+        print(f"  warning: the work isn't committed: {payload['commit_error']}")
+    elif payload.get("commit_skipped"):
+        print(f"  {payload['commit_skipped']}")
+    elif payload["committed"]:
+        print(f"  committed {payload['committed']}")
+    if payload.get("pushed"):
+        print(f"  pushed {payload['branch']} to {payload['remote']}; land it from the integration branch: its land --fetch")
+    elif payload.get("push_error"):
+        print(f"  warning: the branch isn't pushed: {payload['push_error']}")
+    elif payload.get("push_skipped"):
+        print(f"  not pushed: {payload['push_skipped']}")
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
@@ -662,6 +725,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
         print("refused for: " + ", ".join(f"{k} {v}" for k, v in out["refusals"].items()))
     if out["land"]:
         print("land: " + ", ".join(f"{k} {v}" for k, v in out["land"].items()))
+    if out["reviews"]:
+        print("reviews: " + ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in out["reviews"].items()))
     if out["cost_usd"]:
         p90 = f", p90 per run ${out['cost_p90_usd']:.2f}" if out["cost_p90_usd"] is not None else ""
         print(f"agent cost ${out['cost_usd']:.2f}{p90}")
@@ -683,7 +748,8 @@ def cmd_land(args: argparse.Namespace) -> int:
         return _fail(args, gone)
     try:
         payload = land(pkg, args.ids or None, verify=not args.no_verify, fetch=args.fetch, push=args.push,
-                       release=args.release, dry_run=args.dry_run, accept_base=args.accept_base, on_check=announce)
+                       release=args.release, dry_run=args.dry_run, accept_base=args.accept_base,
+                       require_review=args.require_review, on_check=announce)
     except WorkError as err:
         if err.code == "base_untrusted" and not args.json:
             for line in err.details["commits"]:
@@ -856,9 +922,12 @@ def cmd_review(args: argparse.Namespace) -> int:
         print(json.dumps(REPLY_SCHEMA, indent=None if args.json else 2))
         return 0
     if args.reply:
+        pkg = _load(args)
+        if pkg is None:
+            return 1
         try:
             text = sys.stdin.read() if args.reply == "-" else Path(args.reply).read_text(encoding="utf-8")
-            payload = read_reply(text, min_severity=args.min_severity)
+            payload = judge(pkg, args.id, text, min_severity=args.min_severity, base=args.base)
         except OSError as exc:
             return _fail(args, WorkError("not_found", f"can't read {args.reply}: {exc}"))
         except WorkError as err:
@@ -867,13 +936,19 @@ def cmd_review(args: argparse.Namespace) -> int:
         if args.json:
             _emit(payload)
             return code
-        print(f"review: {payload['verdict']}" + ("" if payload["passed"] else " (not passed)"))
+        print(f"review of {payload['id']}: {payload['verdict']}" + ("" if payload["passed"] else " (not passed)"))
         for ident in payload["unmet"]:
-            print(f"  {ident}: not met")
+            print(f"  {ident}: " + ("not in the reply" if ident in payload["missing"] else "not met"))
         for f in payload["findings"]:
             mark = "!" if f in payload["blocking"] else " "
             print(f" {mark}{f['severity']:<8} {f['file']}{':' + str(f['line']) if f.get('line') else ''}  "
                   f"{f['message']}")
+        if not payload["current"]:
+            print(f"{payload['id']} changed since the review prompt was made: this verdict counts only for what the "
+                  "reviewer saw")
+        elif payload["recorded"]:
+            print("recorded: its land " + ("will take it" if payload["passed"] else
+                                           "refuses this version until it changes and is reviewed again"))
         return code
     pkg = _load(args)
     if pkg is None:
@@ -913,7 +988,7 @@ def cmd_hook(args: argparse.Namespace) -> int:
     try:
         stdin = "" if sys.stdin.isatty() else sys.stdin.read()
         pkg = Package.find(hook_dir(parse_event(stdin), args.dir))
-        decision = stop_hook(pkg, stdin)
+        decision = stop_hook(pkg, stdin, headless=args.headless)
     except Exception:  # noqa: BLE001 - a broken hook must not trap the agent
         return 0
     if decision:
@@ -1011,9 +1086,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true", help=f"print JSON (schema {SCHEMA}) instead of text")
     s.set_defaults(func=cmd_validate)
 
-    s = sub.add_parser("link", help="cross-link IDs, refresh nav blocks and the planning index")
+    s = sub.add_parser("link", help="cross-link IDs, refresh nav blocks, the planning index and the commands blocks")
     s.add_argument("dir", nargs="?", default=".", help="package folder or scaffolded repo (default: .)")
     s.add_argument("--check", action="store_true", help="don't write; exit 1 if anything is out of date (for CI)")
+    s.add_argument("--json", action="store_true", help=f"print JSON (schema {SCHEMA}) instead of text")
     s.set_defaults(func=cmd_link)
 
     dir_help = "package folder or scaffolded repo (default: .)"
@@ -1064,6 +1140,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-overlap", action="store_true",
         help="start it even though its Touches don't confirm it is apart from the items already running",
     )
+    s.add_argument("--no-setup", action="store_true",
+                   help="with --worktree: don't run the setup command (commands.setup) in the new worktree")
     s.add_argument("--no-push", action="store_true",
                    help="keep a claim local (by default it is pushed to the remote, if there is one)")
     s.add_argument("--base", help=base_help)
@@ -1097,6 +1175,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--dry-run", action="store_true", help="show what would land, changing nothing")
     s.add_argument("--accept-base", action="store_true",
                    help="trust the integration branch's commits that its didn't make, after you have looked at them")
+    s.add_argument("--require-review", action="store_true",
+                   help="land only items with an approving its review of exactly what would merge "
+                        "(gate.require_review in package.yaml does this always)")
     s.add_argument("--allow-test-changes", **allow)
     s.add_argument("--allow-outside-touches", **allow)
     s.add_argument("--json", action="store_true", help=json_help)
@@ -1196,7 +1277,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-verify", action="store_true", help="don't run Verify, test and lint first")
     s.add_argument("--check", action="store_true", help="run every check but leave the status alone (exit 5 if any fails)")
     s.add_argument("--result", metavar="FILE",
-                   help="act on a headless agent's result JSON: done runs the checks, blocked or needs_human blocks it")
+                   help="act on a headless agent's result JSON: done runs the checks, blocked or needs_human blocks "
+                        "it; in a claim checkout the work is then committed and the branch pushed")
+    s.add_argument("--no-push", action="store_true", help="with --result: commit, but don't push the claim branch")
     s.add_argument("--allow-test-changes", **allow)
     s.add_argument("--allow-outside-touches", **allow)
     s.add_argument("--json", action="store_true", help=json_help)
@@ -1238,8 +1321,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--base", help="the ref to diff against (default: the integration branch)")
     s.add_argument("--schema", action="store_true", help="print the JSON schema the reviewer's reply must follow")
-    s.add_argument("--reply", metavar="FILE", help="read a reviewer's JSON reply (- for stdin) and say if it passes "
-                                                   "(exit 5 if not)")
+    s.add_argument("--reply", metavar="FILE", help="read a reviewer's JSON reply to the item's review (- for stdin), "
+                                                   "record the verdict, and say if it passes (exit 5 if not)")
     s.add_argument("--min-severity", default="major", choices=["blocker", "major", "minor"],
                    help="with --reply: the lowest severity that fails the review (default: major)")
     s.add_argument("--json", action="store_true", help=json_help)
@@ -1254,6 +1337,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("hook", help="run a hook (what the files written by its hooks call)")
     s.add_argument("event", choices=["stop"])
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--headless", action="store_true",
+                   help="an unattended run: ask only for passing checks; its done --result marks and commits")
     s.set_defaults(func=cmd_hook)
 
     s = sub.add_parser("scaffold", help="create the project repo from a package")
@@ -1288,6 +1373,22 @@ def _utf8_streams() -> None:
             continue
 
 
+def _stdout_closed() -> bool:
+    """Whether stdout's reader has gone: the write that failed left its bytes in the buffer, so flushing again fails
+    the same way. An EINVAL from anything else leaves stdout able to flush."""
+    try:
+        sys.stdout.flush()
+    except OSError:
+        return True
+    return False
+
+
+def _reader_gone() -> int:
+    with contextlib.suppress(OSError, ValueError, AttributeError):
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    return EXIT_ERROR
+
+
 def main(argv: list[str] | None = None) -> int:
     _utf8_streams()
     argv = sys.argv[1:] if argv is None else list(argv)
@@ -1305,6 +1406,8 @@ def main(argv: list[str] | None = None) -> int:
                 setattr(args, name, str(Path(args.chdir) / value))
     try:
         return args.func(args)
+    except BrokenPipeError:  # `its status | head`: the reader stopped reading, so stop writing, quietly
+        return _reader_gone()
     except WorkError as err:
         return _fail(args, err)
     except BacklogError as exc:
@@ -1312,6 +1415,8 @@ def main(argv: list[str] | None = None) -> int:
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as exc:  # the JSON contract holds even for a bug: agents always get an error envelope
+        if isinstance(exc, OSError) and os.name == "nt" and exc.errno == errno.EINVAL and _stdout_closed():
+            return _reader_gone()  # on Windows a write to a closed pipe fails with EINVAL, not EPIPE
         if not getattr(args, "json", False):
             raise
         return _fail(args, WorkError("internal_error", f"{type(exc).__name__}: {exc}",

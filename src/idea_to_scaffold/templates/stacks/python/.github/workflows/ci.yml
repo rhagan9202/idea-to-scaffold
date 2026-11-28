@@ -13,9 +13,11 @@ jobs:
         with:
           python-version: "${runtime}"
       - uses: astral-sh/setup-uv@v5
+      # its:commands (generated from package.yaml by `its link`; edit package.yaml, not these steps)
       - run: ${cmd_setup}
       - run: ${cmd_lint}
       - run: ${cmd_test}
+      # /its:commands
   plan:
     runs-on: ubuntu-latest
     steps:

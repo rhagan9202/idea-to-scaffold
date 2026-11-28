@@ -141,10 +141,11 @@ def check_env(base: dict[str, str] | None = None, extra: tuple[str, ...] | list[
     return out
 
 
-def run_check(check: Check, cwd: Path, settings: Settings | None = None) -> dict:
+def run_check(check: Check, cwd: Path, settings: Settings | None = None, *, ignore: list[str] = ()) -> dict:
     """Run one check in `cwd`, with the allow-listed environment and the time limit from `settings`. When the
     command runs pytest, the result also carries `results`, the summary of the JUnit report it wrote
-    (`{"report": False}` when it wrote none). A check that runs out of time has `timed_out: True` and fails."""
+    (`{"report": False}` when it wrote none), and pytest skips the `ignore` paths (held-out tests of items that
+    aren't done: `heldout.py`). A check that runs out of time has `timed_out: True` and fails."""
     settings = settings or Settings()
     env = check_env(extra=settings.env)
     folder = report = None
@@ -152,7 +153,8 @@ def run_check(check: Check, cwd: Path, settings: Settings | None = None) -> dict
         folder = Path(tempfile.mkdtemp(prefix="its-report-"))
         report = folder / "junit.xml"
         # pytest splits PYTEST_ADDOPTS with shlex, so the path is quoted for it and uses forward slashes on Windows
-        env["PYTEST_ADDOPTS"] = f"--junitxml={shlex.quote(report.as_posix())} -o junit_family=xunit1"
+        env["PYTEST_ADDOPTS"] = " ".join([f"--junitxml={shlex.quote(report.as_posix())} -o junit_family=xunit1",
+                                          *(f"--ignore={shlex.quote(p)}" for p in ignore)])
     try:
         code, output, timed_out = run_command(check.command, cwd, env, settings.timeout)
         result = {

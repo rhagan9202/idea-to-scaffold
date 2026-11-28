@@ -23,7 +23,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from . import claims as cl
-from . import gate, gitx, ledger, results, trust
+from . import deps, gate, gitx, heldout, ledger, results, trust
 from .backlog import (
     BACKLOG,
     BacklogError,
@@ -64,7 +64,7 @@ from .contract import (  # noqa: F401 - re-exported: the contract lived here bef
 from .ids import KIND_LABELS, META_FILES, definition_on_line, id_kind, is_placeholder, scan_lines, strip_links
 from .linker import NAV_BLOCK_RE, Doc, Target, _load_docs, link_package, scan_package
 from .locking import LockTimeout, git_common_dir, git_store_dir, package_lock
-from .package import Package
+from .package import Package, PackageError
 from .touches import covered
 
 BACKLOG_JSON = "planning/backlog.json"
@@ -112,6 +112,7 @@ class View:
     base: str | None = None          # the integration branch's ref, if this is a git repo that has one
     branch: str | None = None        # the checked-out branch
     claims: list[cl.Claim] = field(default_factory=list)  # active claims (unmerged claim branches), orphans included
+    behind: int = 0                  # on the integration branch: commits its remote copy has that it lacks
 
     @property
     def claimed(self) -> set[str]:
@@ -175,7 +176,11 @@ def stale_note(stale: dict | None) -> str | None:
 
 def view(pkg: Package, base: str | None = None) -> View:
     """Read the backlog for readiness. On the integration branch, or outside git, that is the working tree. On any
-    other branch it is the integration branch's copy, so a dependency counts as done only once it is merged."""
+    other branch it is the integration branch's copy, so a dependency counts as done only once it is merged.
+
+    On the integration branch when it is only behind its remote copy (another machine landed work, and this one
+    fetched but didn't pull), it is the remote copy too, with `behind` set: what landed there is done, and nothing
+    is offered or claimed again from the stale copy."""
     items = load_backlog(pkg)
     if not cl.in_git(pkg.root):
         return View(items, "working tree")
@@ -183,12 +188,16 @@ def view(pkg: Package, base: str | None = None) -> View:
     base_ref = cl.resolve_base(pkg.root, name, remote_of(pkg) or "origin")
     branch = cl.current_branch(pkg.root)
     source = "working tree"
-    if base_ref is not None and branch not in (name, base_ref):
+    behind = 0
+    if base_ref is not None and branch == name and base_ref != name:
+        behind = cl.ahead(pkg.root, base_ref, name)
+    if base_ref is not None and (branch not in (name, base_ref) or behind):
         text = cl.read_at(pkg.root, base_ref, pkg.path_of(BACKLOG))
         if text is not None:
             items, source = parse_backlog(text), base_ref
     claims = cl.active_claims(cl.list_claims(pkg.root, _closed(items), {i.id for i in items}))
-    return View(items, source, base_ref, branch, claims)
+    return View(items, source, base_ref, branch, claims, behind)
+
 
 
 def _closed(items: list[BacklogItem]) -> set[str]:
@@ -238,17 +247,19 @@ def _nothing_reason(items: list[BacklogItem], ready: list[BacklogItem], waiting:
     return "complete"
 
 
-def next_payload(pkg: Package, *, base: str | None = None, parallel: int | None = None) -> dict:
+def next_payload(pkg: Package, *, base: str | None = None, parallel: int | None = None,
+                 skip: set[str] | frozenset[str] = frozenset()) -> dict:
     """The next item that can start now, every ready item, and why the rest are waiting. Claimed items are never
     offered, and neither is an item that might overlap running work, so `its start` never refuses what `its next`
-    offers."""
+    offers. `skip` counts as claimed too: items another machine just won."""
     v = view(pkg, base)
     items = v.items
     _check_unique(items)
-    ready = ready_items(items, v.claimed)
+    claimed = set(v.claimed) | set(skip)
+    ready = ready_items(items, claimed)
     waiting = [
         {"id": i.id, "title": i.title, "blocked_by": blocked_by(i, items)}
-        for i in items if i.status == "todo" and i.id not in v.claimed and i not in ready
+        for i in items if i.status == "todo" and i.id not in claimed and i not in ready
     ]
     startable, _ = _parallel(v, ready, len(ready) or 1)
     first = startable[0] if startable else None
@@ -256,6 +267,7 @@ def next_payload(pkg: Package, *, base: str | None = None, parallel: int | None 
         "schema": SCHEMA,
         "ok": True,
         "source": v.source,
+        "behind": v.behind or None,
         "item": item_payload(pkg, first, items) if first else None,
         "reason": None if first else _nothing_reason(items, ready, waiting, v),
         "ready": [item_payload(pkg, i, items) for i in ready],
@@ -401,14 +413,60 @@ def _commands(pkg: Package, ident: str, worktree: str | None) -> dict:
     return commands
 
 
-def start(pkg: Package, ident: str | None, **kwargs) -> dict:
-    """`_begin`, recorded in the run ledger."""
+def start(pkg: Package, ident: str | None, *, setup: bool = True, **kwargs) -> dict:
+    """`_begin`, recorded in the run ledger. A new worktree then gets the setup command (`commands.setup`), as the
+    lead and before any agent runs in it, unless `setup` is False (`--no-setup`); a failed setup is reported, and
+    the claim is kept."""
     payload = _begin(pkg, ident, **kwargs)
     claim = payload.get("claim") or {}
+    if claim.get("worktree") and not payload.get("claim_held_here"):
+        payload["setup"] = run_setup(pkg, payload["id"], Path(claim["worktree"])) if setup else None
+    elif not claim and cl.in_git(pkg.root):
+        record_setup_output(pkg, payload["id"], cl.toplevel(pkg.root))  # the plain flow: setup ran here already
     ledger.record(pkg, payload["id"], "start", "claimed" if claim else "in-progress", agent=kwargs.get("agent"),
                   branch=claim.get("branch"), worktree=claim.get("worktree"),
                   touches=len(payload["item"]["touches"]) if payload.get("item", {}).get("touches") else None)
     return payload
+
+
+def run_setup(pkg: Package, ident: str, worktree: Path) -> dict | None:
+    """Run the integration branch's setup command in a new claim worktree, then record the lockfiles it wrote
+    (`claims.record_setup`), so the gate doesn't take them for the agent's dependency changes. None when there is
+    nothing to run (a planning package, or no setup command)."""
+    if not pkg.repo_layout:
+        return None
+    rel = pkg.root.resolve().relative_to(cl.toplevel(pkg.root).resolve())
+    try:
+        here = Package.find(worktree / rel)
+    except PackageError:
+        return None
+    command = (here.commands.get("setup") or "").strip()
+    if not command or command == "true":
+        return None
+    settings = gate.Policy.of(here.manifest, "worktree").run
+    result = run_check(Check("setup", command), here.root, settings)
+    result["lockfiles"] = sorted(record_setup_output(pkg, ident, worktree))
+    return result
+
+
+def record_setup_output(pkg: Package, ident: str, checkout: Path) -> dict[str, str]:
+    """Record the lockfiles that differ from HEAD in `checkout` (new or changed) as setup's output for `ident`."""
+    out = gitx.run(checkout, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    files = {}
+    if out.returncode == 0:
+        for entry in out.stdout.split("\0"):
+            path = entry[3:]
+            if len(entry) > 3 and deps.kind_of(path) == "lock" and entry[:2] != " D":
+                try:
+                    text = (checkout / path).read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                files[path] = gate.content_digest(text)
+    try:
+        cl.record_setup(pkg.root, ident, files)
+    except (OSError, cl.GitError):
+        return {}
+    return files
 
 
 def _begin(
@@ -439,40 +497,52 @@ def _begin(
     `push_claims: false` in package.yaml, keeps it local.
     """
     previous_branch = cl.current_branch(pkg.root) if cl.in_git(pkg.root) else None
-    with _locked(pkg):
-        if ident is None:
-            ident = _pick_next(pkg, base)
-        payload = _start(pkg, ident, force=force, branch=branch, worktree=worktree, agent=agent, base=base,
-                         allow_overlap=allow_overlap)
-    claim = payload.get("claim")
-    if push is None:
-        push = pkg.get("push_claims") is not False
-    payload["pushed"] = False
-    if not claim or payload.get("claim_held_here") or not push:
+    picking, lost = ident is None, []  # `start --next` tries the next item when another machine won the race
+    while True:
+        with _locked(pkg):
+            if picking:
+                ident = _pick_next(pkg, base, skip=set(lost))
+            payload = _start(pkg, ident, force=force, branch=branch, worktree=worktree, agent=agent, base=base,
+                             allow_overlap=allow_overlap)
+        if lost:
+            payload["lost_to_others"] = list(lost)
+        claim = payload.get("claim")
+        if push is None:
+            push = pkg.get("push_claims") is not False
+        payload["pushed"] = False
+        if not claim or payload.get("claim_held_here") or not push:
+            return payload
+        remote = remote_of(pkg)
+        if remote is None:
+            return payload
+        try:  # outside the lock: a slow network never holds up other agents on this machine
+            cl.push_claim(pkg.root, remote, ident, claim["branch"])
+        except cl.PushRejected as exc:
+            with contextlib.suppress(cl.GitError):
+                if claim["worktree"] is None and previous_branch:  # --branch checked it out here: go back first
+                    cl.git(pkg.root, "switch", "--quiet", previous_branch)
+                cl.release_claim(pkg.root, ident, force=True)
+            if picking and len(lost) < PICK_RETRIES:
+                lost.append(ident)
+                continue
+            theirs = {"id": ident, "branch": exc.branch, "remote": remote} if exc.branch else None
+            raise WorkError("claimed", f"{exc}; your local claim was undone",
+                            details={"id": ident, "remote": remote, "claim": theirs, "lost_to_others": lost or None}) \
+                from exc
+        except cl.GitError as exc:
+            payload["push_error"] = str(exc)
+            return payload
+        payload["pushed"] = True
+        payload["remote"] = remote
         return payload
-    remote = remote_of(pkg)
-    if remote is None:
-        return payload
-    try:  # outside the lock: a slow network never holds up other agents on this machine
-        cl.push_claim(pkg.root, remote, ident, claim["branch"])
-    except cl.PushRejected as exc:
-        with contextlib.suppress(cl.GitError):
-            if claim["worktree"] is None and previous_branch:  # --branch checked it out here: go back first
-                cl.git(pkg.root, "switch", "--quiet", previous_branch)
-            cl.release_claim(pkg.root, ident, force=True)
-        raise WorkError("claimed", f"{exc}; your local claim was undone", details={"id": ident, "remote": remote}) \
-            from exc
-    except cl.GitError as exc:
-        payload["push_error"] = str(exc)
-        return payload
-    payload["pushed"] = True
-    payload["remote"] = remote
-    return payload
 
 
-def _pick_next(pkg: Package, base: str | None) -> str:
-    """The item `its next` would offer, for `start --next`."""
-    out = next_payload(pkg, base=base)
+PICK_RETRIES = 5  # items `start --next` gives up to other machines before it stops trying
+
+
+def _pick_next(pkg: Package, base: str | None, skip: set[str] | frozenset[str] = frozenset()) -> str:
+    """The item `its next` would offer, for `start --next`, passing over `skip` (lost to another machine)."""
+    out = next_payload(pkg, base=base, skip=skip)
     if out["item"] is None:
         raise WorkError("nothing_ready", f"nothing can start now ({out['reason']})",
                         EXIT_COMPLETE if out["reason"] == "complete" else EXIT_NOTHING_READY,
@@ -539,6 +609,11 @@ def _start(
         )
     forced = bool(waiting) or item.status != "todo" or bool(clash)
     if not claiming:
+        if v.behind:
+            raise WorkError("behind_remote", f"{v.branch} is {v.behind} commit{'s' if v.behind != 1 else ''} behind "
+                            f"{v.base}, so this backlog is stale; pull first (git pull --ff-only), or claim the item "
+                            f"from {v.base} with its start {ident} --worktree",
+                            details={"id": ident, "branch": v.branch, "base": v.base, "behind": v.behind})
         try:
             previous = set_status(pkg, ident, "in-progress")
         except BacklogError as exc:
@@ -783,7 +858,7 @@ def inspect_item(pkg: Package, ident: str) -> gate.Inspection:
     ref, fork = gate_target(pkg, ident)
     waiver_ref = trust.last_waiver(pkg.root, integration_branch(pkg), fork) if fork else None
     try:
-        return gate.inspect(pkg, ident, ref, fork=fork, waiver_ref=waiver_ref)
+        return gate.inspect(pkg, ident, ref, fork=fork, waiver_ref=waiver_ref, setup_files=cl.setup_of(pkg.root, ident))
     except gate.GateError as exc:
         raise WorkError("gate_error", f"{ident} can't be checked: {exc}", EXIT_CHECK_FAILED, {"id": ident}) from exc
 
@@ -829,8 +904,13 @@ def gate_error(ident: str, blocking: list[dict], inspection: gate.Inspection,
     code = gate.refusal(blocking)
     group = {"test_changes": gate.TEST_KINDS, "dependency_changes": gate.DEPENDENCY_KINDS}.get(code, ())
     worst = [f for f in blocking if f["kind"] in group] or blocking
-    fix = ("Make the tests run to the end and report honestly (look for code that exits early, skips, or rewrites "
-           "results)" if worst[0]["kind"] in RESULT_KINDS else "Undo that change")
+    if worst[0]["kind"] in RESULT_KINDS:
+        fix = ("Make the tests run to the end and report honestly (look for code that exits early, skips, or rewrites "
+               "results)")
+    elif worst[0]["kind"] == "no_changes":
+        fix = "Make the change the item asks for, then run its done again"
+    else:
+        fix = "Undo that change"
     message = (f"{ident} is not done: {worst[0]['message']}"
                + (f" (and {len(blocking) - 1} more)" if len(blocking) > 1 else "")
                + f". {fix}; if you can't finish without it, run its block {ident} --reason '...' and "
@@ -909,7 +989,8 @@ def _done(
                         details={"in_progress": active})
     item = _find(items, ident)
     if item.status == "done" and not check_only:
-        raise WorkError("already_done", f"{ident} is already done", details={"id": ident})
+        raise WorkError("already_done", f"{ident} is already done; to check a change to it again and refresh its "
+                        f"Verified mark, run its verify {ident}", details={"id": ident})
     if item.status in ("proposed", "dropped") or item.placeholder:
         raise WorkError("bad_status", f"{ident} is {item.status}; it can't be done before it is scheduled",
                         details={"id": ident, "status": item.status})
@@ -935,10 +1016,11 @@ def _done(
     elif not pkg.repo_layout:
         skipped = "this is a planning package, not a scaffolded repo"
     else:
+        ignore = heldout.ignored_folders(pkg.root, inspection.policy.acceptance, items)
         for check in checks_for(pkg, item, verify_command, inspection.policy.commands):
             if on_check:
                 on_check(check)
-            results.append(run_check(check, pkg.root, inspection.policy.run))
+            results.append(run_check(check, pkg.root, inspection.policy.run, ignore=ignore))
         failed = [r["name"] for r in results if not r["passed"]]
         if failed:
             raise WorkError(
@@ -967,6 +1049,7 @@ def _done(
         "verify_source": inspection.verify_source,
         "touches_checked": inspection.touches_checked,
         "findings": inspection.findings,
+        "setup_files": inspection.setup_files,
         "red_on_parent": red,
     }
     common["warnings"] = inspection.warnings  # checks in warn mode: reported, never refusing
@@ -977,6 +1060,11 @@ def _done(
         return {**common, "checked_only": True, "status": item.status, "previous_status": item.status}
     try:
         with _locked(pkg):
+            now = _find(load_backlog(pkg), ident)
+            if now.status != item.status:  # a person (or its block) changed it while the checks ran: theirs wins
+                raise WorkError("status_changed", f"{ident} became {now.status or 'statusless'} while its checks ran "
+                                f"(it was {item.status}), so it wasn't set done; run its done again if it should be",
+                                details={"id": ident, "status": now.status, "was": item.status})
             previous = set_status(pkg, ident, "done")
             verified = mark_verified(pkg, ident, inspection, skipped=skipped == "--no-verify")
             if waived:
@@ -1020,25 +1108,51 @@ def mark_verified(pkg: Package, ident: str, inspection: gate.Inspection, *, skip
     return value
 
 
-def verify(pkg: Package, ident: str, *, on_check: Callable[[Check], None] | None = None) -> dict:
+def verify(pkg: Package, ident: str, *, on_check: Callable[[Check], None] | None = None,
+           run: dict | None = None, mark: bool = True) -> dict:
     """`its verify`: re-run a done item's checks on the current code and, if they pass, refresh its Verified mark, so
-    `its drift` stops reporting changes that have now been checked."""
+    `its drift` stops reporting changes that have now been checked. `run` is a headless run's report, for the ledger."""
     items = load_backlog(pkg)
     item = _find(items, ident)
     if item.status != "done":
         raise WorkError("bad_status", f"{ident} is {item.status}; only a done item can be re-verified (use its done)",
                         details={"id": ident, "status": item.status})
-    result = done(pkg, ident, check_only=True, on_check=on_check)
+    result = done(pkg, ident, check_only=True, on_check=on_check, run=run)
+    result.pop("checked_only", None)
+    result["previous_verified"] = item.get("Verified") or None
+    if not mark:
+        return result
     try:
         with _locked(pkg):
-            previous = item.get("Verified") or None
             result["verified"] = mark_verified(pkg, ident, inspect_item(pkg, ident))
     except BacklogError as exc:
         raise WorkError("bad_backlog", str(exc), details={"id": ident}) from exc
     _refresh_mirror(pkg)
-    result.pop("checked_only", None)
-    result["previous_verified"] = previous
     return result
+
+
+def verify_many(pkg: Package, ids: list[str], *, on_check: Callable[[Check], None] | None = None,
+                on_item: Callable[[str], None] | None = None) -> tuple[list[dict], list[dict]]:
+    """`its verify --drifted` or `--all`: check every item first, then refresh the marks of those that passed. Marking
+    one as it passed would change the backlog, and the next item's gate would take that edit for its own change to
+    another item (B7). Returns (verified, failed: the error objects)."""
+    passed: list[dict] = []
+    failed: list[dict] = []
+    for ident in ids:
+        if on_item:
+            on_item(ident)
+        try:
+            passed.append(verify(pkg, ident, on_check=on_check, mark=False))
+        except WorkError as err:
+            failed.append({"id": ident, **err.to_dict()["error"]})
+    try:
+        with _locked(pkg):
+            for result in passed:
+                result["verified"] = mark_verified(pkg, result["id"], inspect_item(pkg, result["id"]))
+    except BacklogError as exc:
+        raise WorkError("bad_backlog", str(exc)) from exc
+    _refresh_mirror(pkg)
+    return passed, failed
 
 
 def touched_files(pkg: Package, touches: list[str]) -> list[str]:
@@ -1061,6 +1175,25 @@ def touches_hash(pkg: Package, touches: list[str]) -> str | None:
     digest = hashlib.sha1()
     for path, blob in zip(files, blobs, strict=False):
         digest.update(f"{path}\0{blob}\n".encode())
+    return digest.hexdigest()[:12]
+
+
+def touches_hash_at(pkg: Package, touches: list[str], ref: str) -> str | None:
+    """`touches_hash` of the files as committed at `ref` rather than on disk: the same digest when they match, since
+    both use git's blob ids. Land marks a landed item with it, from the merged commit."""
+    if not touches or not cl.in_git(pkg.root):
+        return None
+    out = gate.run_git(pkg.root, "ls-tree", "-r", "-z", ref, check=False)
+    planning = gate._planning_prefix(pkg)
+    blobs = {}
+    for entry in out.split("\0"):
+        meta, _, path = entry.partition("\t")
+        parts = meta.split()
+        if len(parts) == 3 and parts[1] == "blob" and not (planning and path.startswith(planning)):
+            blobs[path] = parts[2]
+    digest = hashlib.sha1()
+    for path in sorted(p for p in blobs if covered(p, touches)):
+        digest.update(f"{path}\0{blobs[path]}\n".encode())
     return digest.hexdigest()[:12]
 
 

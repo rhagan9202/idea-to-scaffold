@@ -1,8 +1,9 @@
 r"""Where `its` keeps its own state, and the one lock for everything that reads then writes shared state.
 
 **State.** Claims (`claims.json`), fork points (`forks.json`), the run ledger (`runs/`), the headless launch files
-(`launch/`) and the trusted integration-branch commits (`trust.json`) live in a folder per repository *outside* the
-repository and its git folder (`state_dir`):
+(`launch/`), the trusted integration-branch commits (`trust.json`), the lockfiles `its start`'s setup wrote
+(`setup.json`) and review verdicts (`reviews.json`) live in a folder per repository *outside* the repository and its
+git folder (`state_dir`):
 
 - `$XDG_STATE_HOME/its/<repo>` when `XDG_STATE_HOME` is set, on any OS;
 - otherwise `~/.local/state/its/<repo>` on Linux, `~/Library/Application Support/its/<repo>` on macOS and

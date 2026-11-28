@@ -59,15 +59,18 @@ DEPENDENCY_KINDS = ("dependency_added",)
 # What `its waive --<group>` waives.
 WAIVER_GROUPS = {"test-changes": TEST_KINDS, "outside-touches": SCOPE_KINDS, "dependencies": DEPENDENCY_KINDS}
 WAIVER_FIELD = "Waiver"
-REFUSALS = ("test_changes", "dependency_changes", "outside_touches")  # the error codes a gate refusal has
+REFUSALS = ("test_changes", "dependency_changes", "outside_touches", "no_changes")  # a gate refusal's error codes
 
 
 def refusal(blocking: list[dict]) -> str:
-    """The error code for refused findings, by the group of the worst: tests first, then dependencies, then scope."""
+    """The error code for refused findings, by the group of the worst: tests first, then dependencies, then scope.
+    A branch whose only finding is that it changes nothing is `no_changes`: there is nothing to undo."""
     found = {f["kind"] for f in blocking}
     if found & set(TEST_KINDS):
         return "test_changes"
-    return "dependency_changes" if found & set(DEPENDENCY_KINDS) else "outside_touches"
+    if found & set(DEPENDENCY_KINDS):
+        return "dependency_changes"
+    return "no_changes" if found == {"no_changes"} else "outside_touches"
 
 
 OWN_FIELDS = set(BRANCH_FIELDS)  # what a branch may change on its own item
@@ -120,6 +123,7 @@ class Policy:
     modes: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MODES))
     acceptance: str = DEFAULT_ACCEPTANCE   # held-out tests: run by land, hidden from agents' worktrees
     run: Settings = field(default_factory=Settings)  # how checks run: gate.env and gate.timeout
+    require_review: bool = False  # gate.require_review: land needs an approving review of what it merges
 
     @classmethod
     def of(cls, manifest: dict, source: str) -> Policy:
@@ -137,7 +141,7 @@ class Policy:
                     modes[str(kind)] = str(mode)
         acceptance = gate.get("acceptance_path")
         acceptance = str(acceptance).strip().strip("/") + "/" if acceptance else DEFAULT_ACCEPTANCE
-        return cls(cmds, globs, source, modes, acceptance, Settings.of(gate))
+        return cls(cmds, globs, source, modes, acceptance, Settings.of(gate), gate.get("require_review") is True)
 
     def mode(self, kind: str) -> str:
         return self.modes.get(kind, "enforce")
@@ -183,6 +187,7 @@ class Inspection:
     policy: Policy = field(default_factory=Policy)
     planned: BacklogItem | None = None  # the item as the integration branch has it
     waiver_item: BacklogItem | None = None  # the item in the last waive commit, on the plain flow
+    setup_files: list[str] = field(default_factory=list)  # lockfiles let through as `its start`'s setup output
 
     @property
     def waiver(self) -> Waiver | None:
@@ -214,7 +219,7 @@ class Inspection:
 
     def to_dict(self) -> dict:
         return {"base": self.base, "merge_base": self.merge_base, "verify_source": self.verify_source,
-                "touches_checked": self.touches_checked, "findings": self.findings,
+                "touches_checked": self.touches_checked, "findings": self.findings, "setup_files": self.setup_files,
                 "changed_files": [c.to_dict() for c in self.changes]}
 
 
@@ -311,6 +316,9 @@ def _before(pkg: Package, merge_base: str, change: Change) -> str | None:
     path = change.git_old_path or change.git_path
     data = gitx.show(cl.toplevel(pkg.root), f"{merge_base}:{path}")
     return data.decode("utf-8", "replace") if data is not None else None
+
+
+content_digest = cl.content_digest  # a file's text as `after_content` reads it, for the setup record
 
 
 def after_content(pkg: Package, head: str | None, change: Change) -> str | None:
@@ -418,11 +426,13 @@ def _plan_findings(pkg: Package, ident: str, texts: dict[str, str | None], resul
 # --- the gate --------------------------------------------------------------------------------------------------
 
 def inspect(pkg: Package, ident: str, base_ref: str | None, *, head: str | None = None,
-            fork: str | None = None, waiver_ref: str | None = None) -> Inspection:
+            fork: str | None = None, waiver_ref: str | None = None,
+            setup_files: dict[str, str] | None = None) -> Inspection:
     """Compare the branch (the working tree, or `head`) with `base_ref`, for the item `ident`. `fork` is the fork
     point when it isn't the merge base: the commit an item started from on the integration branch itself. On that
     plain flow the rules come from the fork point, and the waiver from `waiver_ref`, the last waiver `its waive`
-    committed since (`trust.last_waiver`)."""
+    committed since (`trust.last_waiver`). `setup_files` are the lockfiles `its start`'s own setup wrote (repository
+    path to `content_digest`): one still holding that content is neither a dependency change nor out of scope."""
     root = pkg.root
     backlog = pkg.path_of(BACKLOG)
     if head is None:
@@ -504,6 +514,10 @@ def inspect(pkg: Package, ident: str, base_ref: str | None, *, head: str | None 
         if was_test and not is_test_path(pkg, path, globs):
             result.add({"kind": "test_deleted", "file": change.old_path,
                                     "message": f"test file {change.old_path} was moved out of the tests (to {path})"})
+        if (setup_files and deps.kind_of(path) == "lock" and change.git_path in setup_files
+                and setup_files[change.git_path] == content_digest(after_content(pkg, head, change))):
+            result.setup_files.append(path)
+            continue  # what its's setup wrote before the agent started, from the integration branch's manifests
         if covered(path, [acceptance]) or (change.old_path and covered(change.old_path, [acceptance])):
             result.add({"kind": "acceptance_changed", "file": path,
                         "message": f"the branch changed {path}, a held-out acceptance test; only a person changes "

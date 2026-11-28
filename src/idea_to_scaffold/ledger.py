@@ -1,6 +1,6 @@
 """The run ledger: one JSON line per attempt at an item, so `its stats` can say what works.
 
-`start`, `done`, `block`, `land` and the Stop hook each append a record to `runs/<ID>.jsonl` in the repository's
+`start`, `done`, `block`, `land`, `review --reply` and the Stop hook each append a record to `runs/<ID>.jsonl` in the repository's
 state folder, outside the repository (`locking.state_dir`). That is on the lead's machine, shared by every worktree,
 never committed and never part of a diff, so writing it can't trip the done gate or conflict at land. An agent whose
 sandbox can't write there records nothing; the lead's `&& its done --result` and `its land` still do.
@@ -20,7 +20,7 @@ from pathlib import Path
 from .locking import state_dir
 from .package import Package
 
-EVENTS = ("start", "done", "block", "land", "hook")
+EVENTS = ("start", "done", "block", "land", "hook", "review")
 
 
 def runs_dir(pkg: Package) -> Path | None:
@@ -80,13 +80,14 @@ def stats(pkg: Package) -> dict:
     items: dict[str, dict] = {}
     refusals: Counter = Counter()
     land: Counter = Counter()
+    reviewed: Counter = Counter()
     by_size: dict[str, Counter] = defaultdict(Counter)
     by_agent: dict[str, Counter] = defaultdict(Counter)
     costs: list[float] = []
     for e in entries:
         it = items.setdefault(e["item"], {"id": e["item"], "attempts": 0, "passed": 0, "failed": 0, "blocked": 0,
                                          "landed": False, "cost_usd": 0.0, "first_try": None, "touches": None,
-                                         "agents": []})
+                                         "agents": [], "review": None})
         if e.get("touches") is not None:
             it["touches"] = e["touches"]
         agent = e.get("agent")
@@ -108,6 +109,9 @@ def stats(pkg: Package) -> dict:
                 refusals["check_failed"] += 1
         elif event == "block":
             it["blocked"] += 1
+        elif event == "review":
+            reviewed[outcome] += 1
+            it["review"] = outcome
         elif event == "land":
             land[outcome] += 1
             if outcome == "landed":
@@ -136,6 +140,7 @@ def stats(pkg: Package) -> dict:
         "first_try_rate": round(sum(1 for i in tried if i["first_try"]) / len(tried), 2) if tried else None,
         "refusals": dict(refusals.most_common()),
         "land": dict(land.most_common()),
+        "reviews": dict(reviewed.most_common()),
         "cost_usd": round(sum(costs), 4), "cost_p90_usd": _p90(costs),
         "by_size": rates(by_size), "by_agent": rates(by_agent),
         "ledger": str(runs_dir(pkg)) if runs_dir(pkg) else None,
