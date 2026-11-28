@@ -126,6 +126,8 @@ gate:                              # optional; the done gate's settings (section
   acceptance_path: "tests/acceptance/"  # held-out tests: hidden from agents' worktrees, changes refused
   checks:                          # the mode of the checks that can be relaxed (section 17); `its scaffold`
     tests_pass_on_parent: enforce  # writes enforce for each warn-first check. enforce, warn or off
+  env: ["DATABASE_URL"]            # variables the checks get beyond the allow-list (section 17)
+  timeout: 1200                    # seconds a check may run before its process tree is killed (default 1200)
 launch:                            # optional; the unattended commands `its start` prints (section 17)
   budget_usd: 5                    # --max-budget-usd for a headless Claude run (default 5)
 its_source: "git+https://...@<ref>"  # optional; where scaffolded CI installs `its` from (default: this repo, pinned to the commit that scaffolded it)
@@ -772,8 +774,7 @@ or Codex in each; it never launches an agent itself.
     `py.test`, `python -m pytest`, `uv run pytest`, ...), it runs with
     `PYTEST_ADDOPTS` set to write a JUnit XML report to a fresh temporary
     folder (or the command's own `--junitxml` path wins), and the gate reads
-    it after the checks pass. Every check runs without any `PYTEST_ADDOPTS`
-    or `PYTEST_PLUGINS` from the caller's environment. A run that wrote no
+    it after the checks pass. A run that wrote no
     report stopped before pytest finished, for example on `os._exit(0)` in
     the code under test (`no_test_report`, warn first). A report with failed
     or errored tests behind exit 0 means something rewrote the exit status
@@ -784,6 +785,26 @@ or Codex in each; it never launches an agent itself.
     makes faking a pass harder, not impossible: code running inside the test
     process can still write a report of its own. A report with a `DOCTYPE`
     or entities, or one over 64 MB, counts as no report.
+  - **How checks run.** A check runs code from the branch, and `its land`
+    runs it as the lead, so a check gets only the caller's environment
+    variables on an allow-list: the path, home and user, the locale (`LANG`,
+    `LC_*`), temporary folders, `TERM`, `TZ`, `CI`, `NO_COLOR`, Python's
+    UTF-8 settings, `VIRTUAL_ENV` and Conda's, `UV_*`, Java, Go and Rust
+    homes, proxies and certificate bundles, the commit identity, and the
+    variables Windows itself needs (`SYSTEMROOT`, `COMSPEC`, `PATHEXT`,
+    `USERPROFILE`, `APPDATA`, ...). Names compare without case. A `LC_*` or
+    `UV_*` name that looks like a secret (`TOKEN`, `SECRET`, `PASSWORD`,
+    `API_KEY`, `AUTH`, ...) is left out. The integration branch's `gate.env`
+    lists more names to pass. `PYTEST_ADDOPTS` and `PYTEST_PLUGINS` are never
+    passed, whatever `gate.env` says. So a token in the lead's shell, such as
+    `GH_TOKEN`, never reaches the code under test. A check that runs longer
+    than `gate.timeout` seconds (default 1200) is stopped together with
+    everything it started (its process group on POSIX, its process tree on
+    Windows); it fails with exit code 124 and `timed_out: true`. Its output
+    goes to a file rather than a pipe, so a background process can't hold a
+    check open after it exits. The allow-list keeps secrets out of the
+    environment, not off the disk: the code under test can still read files
+    the lead's account can read, such as `~/.config/gh` or `~/.ssh`.
   - **Red on parent.** After the checks pass, the branch's new and changed
     test files are copied onto the fork point in a throwaway worktree, and
     Verify (or `commands.test` when Verify isn't a command) runs there after

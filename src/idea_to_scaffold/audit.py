@@ -280,11 +280,11 @@ def _run(t: Target, inspection: gate.Inspection, here: Path) -> dict:
     if not any(runs_pytest(c.command) for c in plan):
         return {"skipped": "none of the item's checks runs pytest"}
     if commands.get("setup") and commands["setup"].strip() != "true":
-        if not run_check(Check("setup", commands["setup"]), here)["passed"]:
+        if not run_check(Check("setup", commands["setup"]), here, inspection.policy.run)["passed"]:
             return {"skipped": f"setup ({commands['setup']}) failed in the audit checkout"}
     results = []
     for check in plan:
-        results.append(run_check(check, here))
+        results.append(run_check(check, here, inspection.policy.run))
         if not results[-1]["passed"]:
             break
     if t.marker is not None and not t.marker.exists():

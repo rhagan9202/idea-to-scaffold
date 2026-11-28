@@ -708,11 +708,11 @@ def red_on_parent(pkg: Package, ident: str, inspection: gate.Inspection, verify_
         here = tree / prefix if prefix else tree
         setup = policy.commands.get("setup")
         if setup and setup.strip() != "true":
-            prepared = run_check(Check("setup", setup), here)
+            prepared = run_check(Check("setup", setup), here, policy.run)
             if not prepared["passed"]:
                 return {"ran": False, "reason": "setup failed on the parent", "files": [c.path for c in tests],
                         "command": command}
-        result = run_check(Check("verify", command), here)
+        result = run_check(Check("verify", command), here, policy.run)
     except gate.GateError as exc:
         return {"ran": False, "reason": str(exc), "files": [c.path for c in tests]}
     finally:
@@ -970,7 +970,7 @@ def _done(
         for check in checks_for(pkg, item, verify_command, inspection.policy.commands):
             if on_check:
                 on_check(check)
-            results.append(run_check(check, pkg.root))
+            results.append(run_check(check, pkg.root, inspection.policy.run))
         failed = [r["name"] for r in results if not r["passed"]]
         if failed:
             raise WorkError(

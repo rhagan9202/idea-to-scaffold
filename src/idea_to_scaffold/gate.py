@@ -42,6 +42,7 @@ import yaml
 from . import claims as cl
 from . import gitx, tamper
 from .backlog import BACKLOG, BacklogItem, parse_backlog
+from .checks import Settings
 from .ids import META_FILES, line_fields
 from .package import Package
 from .touches import covered
@@ -98,6 +99,7 @@ class Policy:
     source: str = "working tree"
     modes: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MODES))
     acceptance: str = DEFAULT_ACCEPTANCE   # held-out tests: run by land, hidden from agents' worktrees
+    run: Settings = field(default_factory=Settings)  # how checks run: gate.env and gate.timeout
 
     @classmethod
     def of(cls, manifest: dict, source: str) -> Policy:
@@ -115,7 +117,7 @@ class Policy:
                     modes[str(kind)] = str(mode)
         acceptance = gate.get("acceptance_path")
         acceptance = str(acceptance).strip().strip("/") + "/" if acceptance else DEFAULT_ACCEPTANCE
-        return cls(cmds, globs, source, modes, acceptance)
+        return cls(cmds, globs, source, modes, acceptance, Settings.of(gate))
 
     def mode(self, kind: str) -> str:
         return self.modes.get(kind, "enforce")

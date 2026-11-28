@@ -218,7 +218,7 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
             item = inspection.planned or _item_at(pkg, ref, claim.id)
             plan = checks_for(pkg, item, inspection.verify_command, commands, acceptance=True) if item else []
             if commands.get("setup") and plan:  # a fresh worktree has no installed dependencies yet
-                setup = run_check(Check("setup", commands["setup"]), here)
+                setup = run_check(Check("setup", commands["setup"]), here, inspection.policy.run)
                 if not setup["passed"]:
                     return {**result, "reason": "check_failed", "checks": [setup],
                             "message": f"setup ({commands['setup']}) failed in the merge worktree; "
@@ -226,7 +226,7 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
             for check in plan:
                 if on_check:
                     on_check(claim.id, check)
-                checks.append(run_check(check, here))
+                checks.append(run_check(check, here, inspection.policy.run))
                 if not checks[-1]["passed"]:
                     break
         failed = [c["name"] for c in checks if not c["passed"]]
