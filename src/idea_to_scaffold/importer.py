@@ -71,7 +71,7 @@ def seed_defaults(dest: Path) -> list[str]:
         if not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
             text = (blank / rel).read_text(encoding="utf-8")
-            target.write_text(text.replace("updated: YYYY-MM-DD", f"updated: {date.today().isoformat()}"), encoding="utf-8")
+            target.write_text(text.replace("updated: YYYY-MM-DD", f"updated: {date.today().isoformat()}"), encoding="utf-8", newline="\n")
             copied.append(rel)
     return copied
 
@@ -139,7 +139,7 @@ def import_export(
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         if rel in conflicts:
-            target.with_name(target.name + ".orig").write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
-        target.write_text(content, encoding="utf-8")
+            target.with_name(target.name + ".orig").write_text(target.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+        target.write_text(content, encoding="utf-8", newline="\n")
     seeded = seed_defaults(dest) if seed else []
     return list(to_write), seeded

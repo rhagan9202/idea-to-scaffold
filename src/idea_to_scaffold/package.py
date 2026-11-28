@@ -117,7 +117,7 @@ def new_package(dest: Path, profile: str = "full") -> None:
             n += 1
             line = f"{n}. `{m.group(1)}`{m.group(2)}"
         kept.append(line)
-    agents.write_text("\n".join(kept), encoding="utf-8")
+    agents.write_text("\n".join(kept), encoding="utf-8", newline="\n")
 
 
 def parse_front_matter(text: str) -> tuple[dict[str, Any], str]:

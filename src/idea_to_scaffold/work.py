@@ -37,6 +37,15 @@ from .backlog import (
     set_field,
     set_status,
 )
+from .checks import (  # noqa: F401 - re-exported: check running lived here before phase 9
+    OUTPUT_TAIL,
+    RESULT_KINDS,
+    Check,
+    checks_for,
+    failure_report,
+    result_findings,
+    run_check,
+)
 from .ids import KIND_LABELS, META_FILES, definition_on_line, id_kind, is_placeholder, scan_lines, strip_links
 from .linker import NAV_BLOCK_RE, Doc, Target, _load_docs, link_package, scan_package
 from .locking import LockTimeout, git_store_dir, package_lock
@@ -57,7 +66,6 @@ EXIT_DRIFT = 8
 EXIT_COMPLETE = 9
 EXIT_AUDIT_MISSED = 10  # gate-audit: the gate missed a seeded cheat  # `next`: nothing left, every item is done
 
-OUTPUT_TAIL = 40  # lines of a failed check's output to keep
 
 
 @dataclass
@@ -389,8 +397,7 @@ def launch_commands(ident: str, worktree: str | None) -> dict:
     `claude` and `codex` are shell lines quoted for this platform (cmd.exe on Windows); `argv` and `cwd` give the same
     command unquoted, for a program to run without a shell."""
     prompt = f"Read AGENTS.md, then follow docs/playbooks/implement-task.md for {ident}."
-    sep = " & " if os.name == "nt" else " && "
-    cd = f"cd {_quote(worktree)}{sep}" if worktree else ""
+    cd = f"{results.cd_command(worktree)} && " if worktree else ""
     return {
         "claude": f"{cd}claude {_quote(prompt)}", "codex": f"{cd}codex {_quote(prompt)}",
         "cwd": worktree, "argv": {"claude": ["claude", prompt], "codex": ["codex", prompt]},
@@ -663,12 +670,6 @@ def release(pkg: Package, ident: str, *, force: bool = False, remote: bool = Fal
     return {"schema": SCHEMA, "ok": True, **result}
 
 
-@dataclass
-class Check:
-    name: str
-    command: str
-
-
 def red_on_parent(pkg: Package, ident: str, inspection: gate.Inspection, verify_command: str | None) -> dict | None:
     """Run the branch's new and changed tests against the code they forked from. A test that passes there doesn't
     show that the change does anything, so that is a finding (`tests_pass_on_parent`).
@@ -680,6 +681,10 @@ def red_on_parent(pkg: Package, ident: str, inspection: gate.Inspection, verify_
     policy = inspection.policy
     if policy.mode("tests_pass_on_parent") == "off" or not inspection.merge_base or not cl.in_git(pkg.root):
         return None
+    kind = (inspection.planned.get("Kind") or "").strip().lower() if inspection.planned else ""
+    if kind.strip("`") == "test-only":
+        return {"ran": False, "reason": "the item is Kind: test-only, so its tests are meant to pass on the parent",
+                "files": []}
     globs = policy.test_paths or []
     tests = [c for c in inspection.changes if c.status != "D" and gate.is_test_path(pkg, c.path, globs)
              and not gate.covered(c.path, [policy.acceptance])]
@@ -699,7 +704,7 @@ def red_on_parent(pkg: Package, ident: str, inspection: gate.Inspection, verify_
                 continue
             target = tree / change.git_path
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text, encoding="utf-8")
+            target.write_text(text, encoding="utf-8", newline="\n")
         here = tree / prefix if prefix else tree
         setup = policy.commands.get("setup")
         if setup and setup.strip() != "true":
@@ -723,6 +728,12 @@ def red_on_parent(pkg: Package, ident: str, inspection: gate.Inspection, verify_
             "exit_code": result["exit_code"]}
 
 
+def changed_tests(pkg: Package, inspection: gate.Inspection) -> set[str]:
+    """The test files the branch adds or changes, package-relative, by the integration branch's test_paths."""
+    globs = inspection.policy.test_paths or []
+    return {c.path for c in inspection.changes if c.status != "D" and gate.is_test_path(pkg, c.path, globs)}
+
+
 def hide_acceptance(pkg: Package, worktree: Path, base: str) -> str | None:
     """Leave the held-out acceptance tests out of an agent's worktree with a sparse checkout, so the agent can't
     read them and write code to the test. Returns the hidden folder, or None when the integration branch has none.
@@ -736,57 +747,11 @@ def hide_acceptance(pkg: Package, worktree: Path, base: str) -> str | None:
     if not gate.run_git(pkg.root, "ls-tree", "-d", "--name-only", base, "--", folder.rstrip("/"), check=False).strip():
         return None
     proc = subprocess.run(["git", "sparse-checkout", "set", "--no-cone", "/*", f"!/{folder}"], cwd=worktree,
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         raise WorkError("git_error", f"couldn't hide {folder} from the worktree: {proc.stderr.strip()}",
                         details={"worktree": str(worktree)})
     return folder
-
-
-def checks_for(pkg: Package, item: BacklogItem, verify: str | None | bool = True,
-               commands: dict[str, str] | None = None, *, acceptance: bool = False) -> list[Check]:
-    """The item's Verify command, then the package's test and lint commands, without repeats. `verify` replaces the
-    item's own Verify command and `commands` the package's (both the integration branch's, from `gate.inspect`).
-    `acceptance` adds `commands.acceptance`, the held-out tests, which only `its land` runs."""
-    out: list[Check] = []
-    command = item.verify_command if verify is True else verify
-    commands = pkg.commands if commands is None else commands
-    candidates = [("verify", command or "")]
-    candidates += [(name, commands.get(name, "")) for name in ("test", "lint") + (("acceptance",) if acceptance else ())]
-    for name, command in candidates:
-        command = command.strip()
-        if command and command != "true" and all(c.command != command for c in out):
-            out.append(Check(name, command))
-    return out
-
-
-def run_check(check: Check, cwd: Path) -> dict:
-    proc = subprocess.run(check.command, shell=True, cwd=cwd, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", stdin=subprocess.DEVNULL)
-    output = (proc.stdout + proc.stderr).rstrip("\n").split("\n")
-    return {
-        "name": check.name,
-        "command": check.command,
-        "exit_code": proc.returncode,
-        "passed": proc.returncode == 0,
-        "output": "\n".join(output[-OUTPUT_TAIL:]) if proc.returncode else "",
-    }
-
-
-def failure_report(checks: list[dict]) -> str:
-    """The failed checks for a person or an agent to read. Only the first failure's output is shown in full: the
-    Verify command and the test command usually fail on the same test, and one copy of a traceback is enough."""
-    parts, shown_output = [], False
-    for c in checks:
-        if c["passed"]:
-            continue
-        head = f"{c['name']} failed (exit {c['exit_code']}): {c['command']}"
-        if c["output"] and not shown_output:
-            parts.append(f"{head}\n{c['output']}")
-            shown_output = True
-        else:
-            parts.append(head + ("  (output above)" if c["output"] and shown_output else ""))
-    return "\n\n".join(parts)
 
 
 def base_ref(pkg: Package) -> str | None:
@@ -846,18 +811,35 @@ def check_override(flag: str, reason: str | None) -> str:
     if not reason:
         raise WorkError("override_reason", f"{flag} needs a reason, e.g. {flag}='the old test checked removed "
                         "behaviour'; it is recorded on the item", details={"flag": flag})
-    if os.environ.get(OVERRIDE_ENV) != "1" and not (_isatty()):
+    if os.environ.get(OVERRIDE_ENV) != "1" and not is_terminal(0):
         raise WorkError("override_needs_person", f"{flag} waives the done gate, so a person has to run it: from a "
                         f"terminal, or with {OVERRIDE_ENV}=1 set by whoever runs the agent. An agent that can't "
                         "finish honestly should run its block <ID> --reason '...' instead", details={"flag": flag})
     return reason
 
 
-def _isatty() -> bool:
+def is_terminal(fd: int) -> bool:
+    """Whether `fd` is a terminal that a person types at. On Windows `isatty` is true of any character device,
+    NUL included, and NUL is what a tool usually gives a command as its stdin, so there the handle must also be a
+    console."""
     try:
-        return os.isatty(0)
-    except OSError:
+        if not os.isatty(fd):
+            return False
+        return os.name != "nt" or _windows_console(fd)
+    except (OSError, ValueError):
         return False
+
+
+def _windows_console(fd: int) -> bool:  # pragma: no cover - Windows only
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    get_mode = ctypes.WinDLL("kernel32", use_last_error=True).GetConsoleMode
+    get_mode.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    get_mode.restype = wintypes.BOOL
+    mode = wintypes.DWORD()
+    return bool(get_mode(wintypes.HANDLE(msvcrt.get_osfhandle(fd)), ctypes.byref(mode)))
 
 
 def item_here(pkg: Package, items: list[BacklogItem]) -> str | None:
@@ -870,16 +852,24 @@ def item_here(pkg: Package, items: list[BacklogItem]) -> str | None:
     return active[0] if len(active) == 1 else None
 
 
-def gate_error(ident: str, blocking: list[dict], inspection: gate.Inspection) -> WorkError:
-    """The refusal for findings that aren't allowed: test changes first, since they matter most."""
+def gate_error(ident: str, blocking: list[dict], inspection: gate.Inspection,
+               checks: list[dict] | None = None) -> WorkError:
+    """The refusal for findings that aren't allowed: test changes first, since they matter most. `checks` are the
+    checks that ran, for a refusal that comes from what their test reports say."""
     tests = [f for f in blocking if f["kind"] in gate.TEST_KINDS]
     code = "test_changes" if tests else "outside_touches"
     worst = tests or blocking
+    fix = ("Make the tests run to the end and report honestly (look for code that exits early, skips, or rewrites "
+           "results)" if worst[0]["kind"] in RESULT_KINDS else "Undo that change")
     message = (f"{ident} is not done: {worst[0]['message']}"
                + (f" (and {len(blocking) - 1} more)" if len(blocking) > 1 else "")
-               + f". Undo that change; if you can't finish without it, run its block {ident} --reason '...' and "
+               + f". {fix}; if you can't finish without it, run its block {ident} --reason '...' and "
                  "a person will decide")
-    return WorkError(code, message, EXIT_CHECK_FAILED, {"id": ident, "findings": blocking, **inspection.to_dict()})
+    details = {"id": ident, **inspection.to_dict(), "findings": blocking,
+               "warnings": [f for f in inspection.findings if f not in blocking]}
+    if checks is not None:
+        details["checks"] = checks
+    return WorkError(code, message, EXIT_CHECK_FAILED, details)
 
 
 def done(
@@ -989,6 +979,12 @@ def _done(
                 "check_failed", f"{ident} is not done: {', '.join(failed)} failed", EXIT_CHECK_FAILED,
                 {"id": ident, "checks": results},
             )
+        for finding in result_findings(results, changed_tests(pkg, inspection)):
+            inspection.add(finding)
+        blocking = [f for f in inspection.blocking(allow_test_changes=allow_test_changes is not None)
+                    if f["kind"] in RESULT_KINDS]
+        if blocking:
+            raise gate_error(ident, blocking, inspection, checks=results)
     red = None
     if not skipped and item.status != "done":
         red = red_on_parent(pkg, ident, inspection, verify_command)
@@ -1108,7 +1104,7 @@ def _off_integration_branch(pkg: Package) -> bool:
 def write_backlog_json(pkg: Package) -> Path:
     """Write the backlog mirror next to the backlog. It is generated, gitignored and never edited by hand."""
     path = pkg.path_of(BACKLOG_JSON)
-    path.write_text(json.dumps(backlog_payload(pkg), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(backlog_payload(pkg), indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
     return path
 
 

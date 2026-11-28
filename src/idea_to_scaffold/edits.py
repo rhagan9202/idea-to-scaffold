@@ -87,7 +87,7 @@ def propose(
             if path.exists():
                 raise WorkError("exists", f"{ident} is already proposed", details={"id": ident})
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(body, encoding="utf-8")
+            path.write_text(body, encoding="utf-8", newline="\n")
     except LockTimeout as exc:
         raise WorkError("locked", str(exc)) from None
     item = next(i for p, i in load_proposals(pkg) if p == path)

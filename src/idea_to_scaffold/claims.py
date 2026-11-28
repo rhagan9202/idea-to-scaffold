@@ -36,14 +36,15 @@ class GitError(Exception):
 
 
 def git(cwd: Path, *args: str, check: bool = True) -> str:
-    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if check and proc.returncode != 0:
         raise GitError(proc.stderr.strip() or proc.stdout.strip() or f"git {' '.join(args)} failed")
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
 def in_git(cwd: Path) -> bool:
-    proc = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=cwd, capture_output=True, text=True)
+    proc = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=cwd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
     return proc.returncode == 0 and proc.stdout.strip() == "true"
 
 
@@ -92,7 +93,7 @@ def fetch(cwd: Path, remote: str, base: str) -> None:
     proc = subprocess.run(
         ["git", "fetch", "--quiet", "--prune", remote, f"+refs/heads/{base}:refs/remotes/{remote}/{base}",
          f"+refs/heads/its/*:refs/remotes/{remote}/its/*"],
-        cwd=cwd, capture_output=True, text=True,
+        cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:
         raise GitError(f"couldn't fetch from {remote}: {proc.stderr.strip()}")
@@ -106,7 +107,7 @@ def push_claim(cwd: Path, remote: str, ident: str, branch: str) -> None:
     """Publish a claim. It only succeeds if no claim branch for the item exists on the remote yet, so the remote
     settles a race between machines: the first push wins."""
     proc = subprocess.run(["git", "ls-remote", "--heads", remote, f"refs/heads/its/{ident}",
-                           f"refs/heads/its/{ident}-*"], cwd=cwd, capture_output=True, text=True)
+                           f"refs/heads/its/{ident}-*"], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         raise GitError(f"couldn't reach {remote}: {proc.stderr.strip()}")
     taken = [line.split("refs/heads/", 1)[1] for line in proc.stdout.splitlines() if "refs/heads/" in line]
@@ -116,7 +117,7 @@ def push_claim(cwd: Path, remote: str, ident: str, branch: str) -> None:
     proc = subprocess.run(
         ["git", "push", "--quiet", "--set-upstream", f"--force-with-lease=refs/heads/{branch}:", remote,
          f"refs/heads/{branch}:refs/heads/{branch}"],
-        cwd=cwd, capture_output=True, text=True,
+        cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:
         err = proc.stderr.strip()
@@ -129,7 +130,7 @@ def conflicting_files(cwd: Path, ours: str, theirs: str) -> list[str] | None:
     """Files that would conflict if `theirs` were merged into `ours` (a dry run with `git merge-tree`, which
     changes nothing). [] means it merges cleanly; None means git can't tell (git older than 2.38)."""
     proc = subprocess.run(["git", "merge-tree", "--write-tree", "--name-only", "--no-messages", ours, theirs],
-                          cwd=cwd, capture_output=True, text=True)
+                          cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode == 0:
         return []
     if proc.returncode == 1:
@@ -225,7 +226,7 @@ def _load_store(store: Path) -> dict[str, dict]:
 
 def _save_store(store: Path, data: dict[str, dict]) -> None:
     tmp = store / "claims.json.tmp"
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     os.replace(tmp, store / "claims.json")
 
 
@@ -331,7 +332,7 @@ def _refresh_remote(cwd: Path, name: str) -> str | None:
     remote_name, branch = name.split("/", 1)
     proc = subprocess.run(
         ["git", "fetch", "--quiet", remote_name, f"+refs/heads/{branch}:refs/remotes/{name}"],
-        cwd=cwd, capture_output=True, text=True,
+        cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:
         if "couldn't find remote ref" in proc.stderr.lower():
@@ -441,7 +442,7 @@ def _load_forks(store: Path) -> dict[str, str]:
 
 def _save_forks(store: Path, data: dict[str, str]) -> None:
     tmp = store / "forks.json.tmp"
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     os.replace(tmp, store / "forks.json")
 
 

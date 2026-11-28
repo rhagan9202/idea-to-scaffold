@@ -33,7 +33,8 @@ class LockTimeout(Exception):
 
 def git_store_dir(cwd: Path) -> Path | None:
     """`<git common dir>/its`, or None outside a git repository."""
-    proc = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=cwd, capture_output=True, text=True)
+    proc = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=cwd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
     if proc.returncode != 0 or not proc.stdout.strip():
         return None
     common = Path(proc.stdout.strip())

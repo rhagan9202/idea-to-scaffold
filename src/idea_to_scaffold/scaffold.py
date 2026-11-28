@@ -8,9 +8,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
 
+from .gate import DEFAULT_MODES
 from .linker import link_package
 from .package import GENERATED_MARKER, Package, parse_front_matter, templates_dir
 from .validate import Report, validate
+
+GATE_BLOCK = (
+    "\n# The done gate. A new scaffold enforces every check, including the ones that start in warn mode for older\n"
+    "# projects. Set one to warn (reported, never refusing) if it misfires on honest work here.\n"
+    "gate:\n  checks:\n" + "".join(f"    {kind}: enforce\n" for kind in sorted(DEFAULT_MODES))
+)
 
 ITS_REPO = "https://github.com/rhagan9202/idea-to-scaffold"  # where scaffolded CI installs `its` from
 ITS_SOURCE = f"git+{ITS_REPO}"
@@ -36,7 +43,7 @@ def _its_commit() -> str | None:
 
     def git(*args: str) -> str | None:
         try:
-            proc = subprocess.run(["git", *args], cwd=here, capture_output=True, text=True, timeout=10)
+            proc = subprocess.run(["git", *args], cwd=here, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
         except (OSError, subprocess.SubprocessError):
             return None
         return proc.stdout.strip() if proc.returncode == 0 else None
@@ -105,7 +112,7 @@ def _variables(pkg: Package, warnings: list[str] | None = None) -> dict[str, str
 def _write(root: Path, rel: str, content: str, written: list[str]) -> None:
     target = root / rel
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+    target.write_text(content, encoding="utf-8", newline="\n")
     written.append(rel)
 
 
@@ -270,7 +277,7 @@ def _readme(pkg: Package) -> str:
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 def _git_commit(root: Path, message: str) -> None:
@@ -283,7 +290,7 @@ def _git_commit(root: Path, message: str) -> None:
     if not _git(root, "config", "user.email").stdout.strip():
         identity = ["-c", "user.name=idea-to-scaffold", "-c", "user.email=idea-to-scaffold@localhost"]
     result = subprocess.run(
-        ["git", *identity, "commit", "-m", message], cwd=root, capture_output=True, text=True
+        ["git", *identity, "commit", "-m", message], cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace"
     )
     if result.returncode != 0:
         raise ScaffoldError(f"git commit failed: {result.stderr.strip() or result.stdout.strip()}")
@@ -331,6 +338,10 @@ def scaffold(
     if "docs/planning/package.yaml" not in written:
         shutil.copy2(pkg.manifest_path, root / "docs/planning/package.yaml")
         written.append("docs/planning/package.yaml")
+    if "gate" not in pkg.manifest:
+        manifest = root / "docs/planning/package.yaml"
+        text = manifest.read_text(encoding="utf-8")
+        manifest.write_text(text + ("" if text.endswith("\n") else "\n") + GATE_BLOCK, encoding="utf-8", newline="\n")
     if pkg.playbooks_dir.is_dir():
         _copy_tree(pkg.playbooks_dir, root, "docs/playbooks", written)
     agents_md = pkg.path_of("AGENTS.md").read_text(encoding="utf-8")
@@ -358,7 +369,7 @@ def scaffold(
             repo = github or pkg.slug
             proc = subprocess.run(
                 ["gh", "repo", "create", repo, "--private", "--source", ".", "--remote", "origin", "--push"],
-                cwd=root, capture_output=True, text=True,
+                cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             if proc.returncode != 0:
                 raise ScaffoldError(

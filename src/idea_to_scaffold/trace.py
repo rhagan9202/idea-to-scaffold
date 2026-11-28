@@ -86,7 +86,7 @@ def must_requirements(pkg: Package) -> list[dict]:
 def test_files(pkg: Package) -> list[str]:
     root = pkg.root
     proc = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"], cwd=root,
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode == 0:
         paths = [p for p in proc.stdout.splitlines() if p]
     else:

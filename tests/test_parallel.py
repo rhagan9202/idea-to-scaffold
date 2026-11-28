@@ -70,7 +70,9 @@ def test_worktree_claim_is_exclusive_and_hidden_from_next(repo: Path, capsys):
     worktree = Path(out["claim"]["worktree"])
     assert worktree == repo.parent / "streak-T-1.1" and (worktree / "AGENTS.md").is_file()
     assert git(worktree, "branch", "--show-current") == "its/T-1.1-project-setup-verified"
-    assert "claude 'Read AGENTS.md" in out["commands"]["claude"] and str(worktree) in out["commands"]["codex"]
+    line = out["commands"]["claude"]
+    assert line.startswith("cd ") and " && claude " in line and "Read AGENTS.md" in line
+    assert str(worktree) in out["commands"]["codex"]
     assert status_in(repo, "T-1.1") == "todo"  # the branch is the claim; the backlog is untouched
     assert git(repo, "status", "--porcelain") == ""
 

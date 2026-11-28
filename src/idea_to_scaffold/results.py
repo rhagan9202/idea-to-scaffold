@@ -56,6 +56,12 @@ def _quote(arg: str) -> str:
     return subprocess.list2cmdline([arg]) if os.name == "nt" else shlex.quote(arg)
 
 
+def cd_command(folder: str) -> str:
+    """`cd` into `folder`, for this platform's shell. cmd.exe needs /d to change drive as well as folder. The lines
+    join their steps with &&, which cmd.exe has too, so an agent never starts in the wrong folder after a failed cd."""
+    return f"cd /d {_quote(folder)}" if os.name == "nt" else f"cd {_quote(folder)}"
+
+
 def budget(pkg: Package) -> float:
     value = pkg.get("launch.budget_usd")
     try:
@@ -83,8 +89,8 @@ def agent_files(pkg: Package) -> dict[str, Path] | None:
         "sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True},
     }
     files = {"settings": folder / "claude-settings.json", "schema": folder / "result.schema.json"}
-    files["settings"].write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-    files["schema"].write_text(json.dumps(RESULT_SCHEMA, indent=2) + "\n", encoding="utf-8")
+    files["settings"].write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8", newline="\n")
+    files["schema"].write_text(json.dumps(RESULT_SCHEMA, indent=2) + "\n", encoding="utf-8", newline="\n")
     files["results"] = store / "runs"
     return files
 
@@ -103,19 +109,20 @@ def headless_commands(pkg: Package, ident: str, worktree: str | None) -> dict | 
               "--permission-mode", "acceptEdits", "--permission-prompts", "none"]
     codex = ["codex", "exec", "--sandbox", "workspace-write", "--output-schema", str(files["schema"]),
              "-o", str(result), task]
+    cd = f"{cd_command(worktree)} && " if worktree else ""
     if os.name == "nt":
-        scrub = "".join(f"set {name}=& " for name in SCRUBBED_ENV)
+        # cmd.exe has no env(1): the line unsets the tokens first (`set NAME=`, joined with &, which binds more
+        # loosely than &&), and a program that runs argv drops env_unset itself
+        start = "".join(f"set {name}=& " for name in SCRUBBED_ENV) + cd
         env_prefix: list[str] = []
     else:
-        scrub = "env " + " ".join(f"-u {name}" for name in SCRUBBED_ENV) + " "
+        start = cd + "env " + " ".join(f"-u {name}" for name in SCRUBBED_ENV) + " "
         env_prefix = ["env", *[x for name in SCRUBBED_ENV for x in ("-u", name)]]
-    sep = " & " if os.name == "nt" else " && "
-    cd = f"cd {_quote(worktree)}{sep}" if worktree else ""
     done = f"its done {ident} --result {_quote(str(result))}"
     line = " ".join(_quote(a) for a in claude)
     return {
-        "claude": f"{cd}{scrub}{line} > {_quote(str(result))}{sep}{done}",
-        "codex": f"{cd}{scrub}{' '.join(_quote(a) for a in codex)}{sep}{done}",
+        "claude": f"{start}{line} > {_quote(str(result))} && {done}",
+        "codex": f"{start}{' '.join(_quote(a) for a in codex)} && {done}",
         "argv": {"claude": env_prefix + claude, "codex": env_prefix + codex},
         "cwd": worktree, "result_file": str(result), "settings": str(files["settings"]),
         "schema": str(files["schema"]), "budget_usd": spend, "env_unset": list(SCRUBBED_ENV),

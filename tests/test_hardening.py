@@ -55,7 +55,8 @@ def test_overlapping_worktree_starts_at_the_same_moment_never_both_win(repo: Pat
     for n in range(3):
         procs = [its("start", ident, str(repo), "--worktree", str(tmp_path / f"wt-{n}-{ident}"))
                  for ident in ("T-2.1", "T-2.2")]
-        results = [(p.wait(), json.loads(p.stdout.read())) for p in procs]
+        results = [(p.returncode, json.loads(out)) for p in procs for out in [p.communicate()[0]]]  # read as they
+        # run: a child blocked on a full pipe never exits (Windows pipes hold only 4 KB)
         assert sorted(code for code, _ in results) == [0, 6], results
         winner = next(out["id"] for code, out in results if code == 0)
         assert main(["release", winner, str(repo), "--force"]) == 0
@@ -64,7 +65,7 @@ def test_overlapping_worktree_starts_at_the_same_moment_never_both_win(repo: Pat
 def test_concurrent_status_writes_lose_nothing(mini: Path):
     ids = add_items(mini / "planning/07-backlog.md", 12)
     procs = [its("start", ident, str(mini), "--allow-overlap") for ident in ids]
-    codes = [p.wait() for p in procs]
+    codes = [p.communicate() and p.returncode for p in procs]
     assert codes == [0] * len(ids)
     assert all(status_in(mini, ident) == "in-progress" for ident in ids)
 
@@ -337,5 +338,15 @@ def test_launch_commands_include_argv():
     from idea_to_scaffold.work import launch_commands
     out = launch_commands("T-1.1", "/tmp/wt dir")
     assert out["argv"]["claude"][0] == "claude" and out["cwd"] == "/tmp/wt dir"
-    if os.name != "nt":
+    if os.name == "nt":  # cmd.exe: /d changes drive too
+        assert out["claude"].startswith('cd /d "/tmp/wt dir" && claude ')
+    else:
         assert out["claude"].startswith("cd '/tmp/wt dir' && claude ")
+
+
+def test_nul_is_not_a_person():
+    """On Windows isatty is true of NUL, which is what an agent's tool gives a command as stdin."""
+    from idea_to_scaffold.work import is_terminal
+    with open(os.devnull, encoding="utf-8") as fh:
+        assert not is_terminal(fh.fileno())
+    assert not is_terminal(12345)  # not open at all

@@ -76,7 +76,7 @@ def drift(pkg: Package) -> dict:
     history = History(pkg)
     planning = _planning_prefix(pkg)
     shallow = subprocess.run(["git", "rev-parse", "--is-shallow-repository"], cwd=pkg.root, capture_output=True,
-                             text=True).stdout.strip() == "true"
+                             text=True, encoding="utf-8", errors="replace").stdout.strip() == "true"
     drifted, unknown, no_touches, clean = [], [], [], []
     for item in items:
         if item.status != "done":
