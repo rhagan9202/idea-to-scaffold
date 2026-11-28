@@ -199,11 +199,17 @@ def land(
                                     remote=remote, require_review=require_review, candidate=cand)
                 (landed if outcome["landed"] else skipped).append(outcome)
                 if not dry_run:
-                    ledger.record(pkg, claim.id, "land",
-                                  "landed" if outcome["landed"] else outcome.get("reason", "skipped"),
+                    reason = "landed" if outcome["landed"] else outcome.get("reason", "skipped")
+                    failed = reason in ledger.FAILURES
+                    why = outcome.get("findings") or ([{"message": outcome["message"]}] if outcome.get("message") else [])
+                    ledger.record(pkg, claim.id, "land", reason,
                                   findings=sorted({f["kind"] for f in outcome.get("findings", [])}) or None,
                                   checks=[c["name"] for c in outcome.get("checks", []) if not c["passed"]] or None,
-                                  branch=cand["name"] if cand else None, agent=cand.get("agent") if cand else None)
+                                  branch=cand["name"] if cand else None, agent=cand.get("agent") if cand else None,
+                                  head=gitx.out(root, "rev-parse", "--verify", "--quiet", ref, check=False).strip()
+                                  or None, attempt=len(ledger.failures(pkg, claim.id)) + 1 if failed else None,
+                                  collateral=True if reason == "base_failing" else None,
+                                  **(ledger.failure_fields(outcome.get("checks"), why) if failed else {}))
                 if outcome["landed"]:
                     chosen = outcome
                 if outcome.get("reason") == "base_failing":

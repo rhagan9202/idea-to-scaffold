@@ -704,6 +704,7 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `fetch_failed` | 1 | `--fetch`: fetching the remote failed | `remote` |
 | `gate_error` | 5, 1 | `done`, `review`, `gate`: the gate couldn't compare the branch, so it refused (exit 1 from `review` and `gate`) |  |
 | `git_error` | 1 | a git command failed |  |
+| `github_failed` | 1 | `brief --github`: the GitHub CLI (`gh`) isn't installed, isn't signed in, or failed |  |
 | `incomplete` | 1 | `promote`: the item has no Done when or Touches | `missing` |
 | `internal_error` | 1 | a bug in `its`; the message says what to report | `version` |
 | `launch_settings_changed` | 5 | `done --result`: the headless launch files were changed during the run, so it may have had no Stop hook or sandbox; nothing was marked | `files`, `result_file` |
@@ -727,7 +728,9 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `not_verified` | 5 | `verify --drifted`, `verify --all`: some items failed their checks again; the rest were re-verified | `failed` |
 | `nothing_ready` | 3, 9 | `start --next`: nothing can start, and `reason` says why; exit 9 when every item is done | `reason` |
 | `nothing_to_adopt` | 1 | `adopt`: the branch has no commits the integration branch lacks | `branch` |
+| `nothing_to_retry` | 1 | `brief --retry`: the item has no failed attempt since it was started or adopted |  |
 | `nothing_to_review` | 1 | `review`: the branch only changes the backlog |  |
+| `out_of_attempts` | 1 | `brief --retry`: the item has failed `gate.max_attempts` times; it needs a person (split it, clarify it, or block it) | `attempts`, `max_attempts` |
 | `outside_touches` | 5 | `done`: the done gate refused the branch's scope changes (files outside Touches, or Touches changed); the lead waives them with `its waive <ID> --outside-touches` | `findings`, `warnings` |
 | `overlap` | 6 | `start`: the item may change the same files as one already running | `overlaps`, `touches_listed`, `overlapping_touches` |
 | `placeholder` | 1 | the item has a placeholder ID; `its promote` gives it a permanent one |  |

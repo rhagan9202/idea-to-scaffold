@@ -15,10 +15,15 @@ in the merge commit, and leaves the rest (`not_chosen`). The vendor's branches t
 """
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 from datetime import datetime, timezone
 
 from . import claims as cl
+from . import gate, gitx, ledger
+from .checks import checks_for
 from .contract import SCHEMA, WorkError
 from .package import Package
 from .work import _closed, _find, _locked, integration_branch, overlaps_with_running, remote_of, view
@@ -145,6 +150,8 @@ def adopt(pkg: Package, ref: str, ident: str, *, push: bool | None = None, fetch
                             details={"id": ident, "remote": remote, "claim": theirs}) from exc
         except cl.GitError as exc:
             push_error = str(exc)
+    ledger.record(pkg, ident, "adopt", "claimed" if created else "candidate_added", branch=cand["name"],
+                  agent=cand["agent"], pr=cand.get("pr"))
     claim_dict = {**claim.to_dict(), "candidates": candidates}
     return {
         "schema": SCHEMA, "ok": True, "id": ident, "title": item.title, "claim": claim_dict, "created": created,
@@ -153,3 +160,192 @@ def adopt(pkg: Package, ref: str, ident: str, *, push: bool | None = None, fetch
         "commands": {"land": f"its land {ident}", "review": f"its review {ident} --branch {cand['name']}",
                      "release": f"its release {ident}" + (" --remote" if pushed else "")},
     }
+
+
+# --- its brief ---------------------------------------------------------------------------------------------------
+# A vendor's agent starts from a prompt, usually an issue, and sees none of `its`. The brief is everything it needs
+# in one text: the item and the requirements it satisfies, as the integration branch has them, the commands that
+# must pass, and the rules the gate holds the branch to, so the agent doesn't learn them by being refused.
+
+def brief(pkg: Package, ident: str, *, retry: bool = False, github: bool = False, base: str | None = None) -> dict:
+    """`its brief ID`: a self-contained task for an agent that may never run `its`. `retry` writes the brief for one
+    more attempt after a failed one: only what failed (checks, tests, findings), up to `gate.max_attempts`. `github`
+    puts it on a GitHub issue (created, updated, or commented on for a retry) that can be assigned to an agent."""
+    from .review import _requirement, needs_review  # review imports work; dispatch is imported by the CLI only
+
+    v = view(pkg, base)
+    item = _find(v.items, ident)
+    if item.status in ("done", "dropped"):
+        raise WorkError("bad_status", f"{ident} is {item.status} on {v.source}; there is nothing to brief",
+                        details={"id": ident, "status": item.status})
+    ref = v.base
+    policy = gate.Policy.of((gate.manifest_at(pkg, ref) if ref else pkg.manifest) or {}, ref or "working tree")
+    again = _retry(pkg, ident, policy) if retry else None
+    checks = [{"name": c.name, "command": c.command} for c in checks_for(pkg, item, item.verify_command, policy.commands)]
+    held = bool(ref) and bool(gitx.out(pkg.root, "ls-tree", "-d", "--name-only", ref, "--",
+                                       (_prefix(pkg) + policy.acceptance).rstrip("/"), check=False).strip())
+    review_needed = needs_review(gate.Inspection(base=ref, head=None, policy=policy, planned=item))
+    rules = _rules(item, policy, checks, held, review_needed)
+    if again:
+        text = _retry_text(ident, item, again, rules)
+    else:
+        reqs = [_requirement(pkg, r, ref) for r in item.satisfies]
+        text = _brief_text(ident, item, reqs, rules)
+    issue = _github(pkg, ident, item.title, text, retry=bool(again)) if github else None
+    ledger.record(pkg, ident, "brief", "retry" if again else "written", attempt=again["attempt"] if again else None,
+                  issue=issue["number"] if issue else None)
+    return {"schema": SCHEMA, "ok": True, "id": ident, "title": item.title, "source": v.source, "brief": text,
+            "retry": again, "checks": checks, "held_out": held, "review_required": review_needed, "issue": issue,
+            "commands": {"claude": f"its brief {ident}{' --retry' if again else ''} | claude -p",
+                         "codex": f"its brief {ident}{' --retry' if again else ''} | codex exec -",
+                         "adopt": f"its adopt <branch or pr:N> {ident}", "gate": f"its gate <branch> --id {ident}"}}
+
+
+def _prefix(pkg: Package) -> str:
+    return gitx.out(pkg.root, "rev-parse", "--show-prefix", check=False).strip() if cl.in_git(pkg.root) else ""
+
+
+def _retry(pkg: Package, ident: str, policy: gate.Policy) -> dict:
+    """The last failed attempt at `ident`, for a retry brief, or why there can't be one."""
+    failed = ledger.failures(pkg, ident)
+    if not failed:
+        last = next((e for e in reversed(ledger.of(pkg, ident)) if e.get("collateral")), None)
+        why = " (its last failure was the integration branch's own: fix that first)" if last else ""
+        raise WorkError("nothing_to_retry", f"{ident} has no failed attempt to retry since it was started{why}",
+                        details={"id": ident})
+    if len(failed) >= policy.max_attempts:
+        raise WorkError("out_of_attempts", f"{ident} has failed {len(failed)} time(s) and gate.max_attempts is "
+                        f"{policy.max_attempts}: it needs a person. Split or clarify it, or its block {ident}",
+                        details={"id": ident, "attempts": len(failed), "max_attempts": policy.max_attempts})
+    last = failed[-1]
+    acceptance = "/" + policy.acceptance.strip("/") + "/"
+    tests = last.get("failing_tests") or []
+    hidden = [t for t in tests if acceptance in "/" + t.split("::", 1)[0]]  # held-out tests stay hidden
+    return {"attempt": len(failed) + 1, "max_attempts": policy.max_attempts, "after": last.get("event"),
+            "outcome": last.get("outcome"), "branch": last.get("branch"), "head": last.get("head"),
+            "failing_checks": last.get("failing_checks") or last.get("checks") or [],
+            "failing_tests": [t for t in tests if t not in hidden], "held_out_failed": len(hidden),
+            "findings": last.get("findings") or [], "messages": last.get("messages") or []}
+
+
+def _rules(item, policy: gate.Policy, checks: list[dict], held: bool, review: bool) -> list[str]:
+    touches = ", ".join(f"`{t}`" for t in item.touches)
+    rules = [f"Change only the files the item touches, tests included: {touches}. A change anywhere else is "
+             "refused." if touches else
+             "The item lists no files: keep the change to what it needs, and say which files you changed.",
+             "Don't delete, skip, disable or weaken a test, and don't change the test configuration, package.yaml, "
+             "the item's Verify, other backlog items, or agent instructions and settings (AGENTS.md, CLAUDE.md, "
+             ".claude/, .codex/). The gate refuses a branch that does."]
+    if policy.mode("tests_pass_on_parent") != "off":
+        rules.append("Each test you add or change has to fail on the code you started from: a test that already "
+                     "passes there shows nothing" + (" (the gate refuses it)." if policy.mode("tests_pass_on_parent")
+                                                      == "enforce" else " (the gate flags it)."))
+    if policy.mode("dependency_added") != "off":
+        rules.append("Don't add a dependency unless the item asks for one" +
+                     (": the gate refuses it." if policy.mode("dependency_added") == "enforce" else
+                      ": the gate flags it for the lead."))
+    if checks:
+        rules.append("These commands must pass: " + "; ".join(f"{c['name']} `{c['command']}`" for c in checks) + ".")
+    if held:
+        rules.append("Held-out acceptance tests that you can't see run when the branch lands; they check the "
+                     "requirements.")
+    if review:
+        rules.append("A reviewer checks the change against the requirements before it lands.")
+    return rules
+
+
+def _finish(ident: str, item) -> list[str]:
+    slug = cl.branch_name(ident, item.title).split("/", 1)[-1]
+    return [
+        "## When you finish",
+        f"- Commit on a branch named with the item's ID, such as `<your-prefix>/{slug}`, and put `[{ident}]` in the "
+        "commit message and the pull request title: that is how its finds the item.",
+        f"- If its is installed, end with `its done {ident} --check`. It runs the same gate and commands now (not the "
+        "held-out tests), so you can fix what it finds before you push.",
+        f"- If you can't finish, say why in the pull request (or run `its block {ident} --reason \"...\"`).",
+    ]
+
+
+def _brief_text(ident: str, item, reqs: list[dict], rules: list[str]) -> str:
+    lines = [f"# {ident}: {item.title}", "",
+             f"Implement backlog item {ident}, and only it. Everything you need is below; the repository's AGENTS.md "
+             "has the project's conventions.", "", "## The item",
+             f"- Do: {item.get('Do') or '(see the requirements)'}",
+             f"- Done when: {item.done_when or '(the requirements are met and the commands pass)'}",
+             f"- Verify: {item.verify or '(the test command)'}",
+             f"- Touches: {', '.join(item.touches) or '(not listed)'}"]
+    if item.depends_on:
+        lines.append(f"- Builds on: {', '.join(item.depends_on)} (done already)")
+    lines += ["", "## Requirements it satisfies"]
+    for req in reqs:
+        lines += [req["text"] or f"{req['id']} (not found in the planning docs)", ""]
+    if not reqs:
+        lines += ["(none listed)", ""]
+    lines += ["## How the branch is checked", "It lands only through its gate, with these rules from the integration "
+              "branch (your branch can't change them):"]
+    lines += [f"{n}. {rule}" for n, rule in enumerate(rules, 1)]
+    return "\n".join([*lines, "", *_finish(ident, item)]) + "\n"
+
+
+def _retry_text(ident: str, item, again: dict, rules: list[str]) -> str:
+    where = f" on {again['branch']}" if again.get("branch") else ""
+    lines = [f"# Retry {ident}: {item.title} (attempt {again['attempt']} of {again['max_attempts']})", "",
+             f"An earlier attempt at {ident}{where} failed. Fix what is listed here and keep what already works; the "
+             f"item hasn't changed (`its brief {ident}` has the whole brief).", "", "## What failed"]
+    failed = [f"- check failed: {name}" for name in again["failing_checks"]]
+    if again["failing_tests"]:
+        failed += ["- failing tests:", *[f"  - {t}" for t in again["failing_tests"]]]
+    if again["held_out_failed"]:
+        failed.append(f"- {again['held_out_failed']} held-out acceptance test(s) failed. You can't see them: they "
+                      "check the item's requirements, so re-read those (`its brief` lists them) rather than guessing.")
+    failed += [f"- {m}" for m in again["messages"]]
+    lines += failed or [f"- {again['outcome']}"]
+    lines += ["", "## The rules, as before"]
+    lines += [f"{n}. {rule}" for n, rule in enumerate(rules, 1)]
+    return "\n".join([*lines, "", *_finish(ident, item)]) + "\n"
+
+
+def _github(pkg: Package, ident: str, title: str, text: str, *, retry: bool) -> dict:
+    """Create the item's issue, or update it (comment on it, for a retry), with the GitHub CLI."""
+    gh = shutil.which("gh")
+    if gh is None:
+        raise WorkError("github_failed", "--github needs the GitHub CLI, gh, installed and signed in (gh auth login)",
+                        details={"id": ident})
+    if not cl.in_git(pkg.root):
+        raise WorkError("not_git", "--github needs a git repository with a GitHub remote")
+
+    def run(*args: str, body: str | None = None) -> str:
+        try:
+            proc = subprocess.run([gh, *args], cwd=pkg.root, input=body, capture_output=True, text=True,
+                                  encoding="utf-8", timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise WorkError("github_failed", f"gh {args[0]} {args[1]} failed: {exc}", details={"id": ident}) from exc
+        if proc.returncode != 0:
+            raise WorkError("github_failed", f"gh {args[0]} {args[1]} failed: {(proc.stderr or proc.stdout).strip()}",
+                            details={"id": ident})
+        return proc.stdout
+
+    heading = f"[{ident}] {title}"
+    number = cl.brief_of(pkg.root, ident).get("issue")
+    if number is None:
+        found = json.loads(run("issue", "list", "--state", "open", "--search", f"{ident} in:title", "--json",
+                               "number,title,url", "--limit", "50") or "[]")
+        number = next((i["number"] for i in found if str(i.get("title", "")).startswith(f"[{ident}]")), None)
+    if number is not None and retry:
+        url = run("issue", "comment", str(number), "--body-file", "-", body=text).strip()
+        action = "commented"
+    elif number is not None:
+        run("issue", "edit", str(number), "--title", heading, "--body-file", "-", body=text)
+        url, action = None, "updated"
+    else:
+        url = run("issue", "create", "--title", heading, "--body-file", "-", body=text).strip().splitlines()[-1]
+        match = re.search(r"/issues/(\d+)", url)
+        if match is None:
+            raise WorkError("github_failed", f"gh issue create didn't say which issue it made: {url}",
+                            details={"id": ident})
+        number, action = int(match.group(1)), "created"
+    try:
+        cl.record_brief(pkg.root, ident, {"issue": number, "at": _now()})
+    except (OSError, cl.GitError):
+        pass
+    return {"number": number, "url": url, "action": action}

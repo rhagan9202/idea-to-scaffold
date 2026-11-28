@@ -94,6 +94,7 @@ ERRORS: dict[str, Code] = {
                        "`review` and `gate`)",
                        (EXIT_CHECK_FAILED, EXIT_ERROR)),
     "git_error": Code("a git command failed"),
+    "github_failed": Code("`brief --github`: the GitHub CLI (`gh`) isn't installed, isn't signed in, or failed"),
     "incomplete": Code("`promote`: the item has no Done when or Touches", fields=("missing",)),
     "internal_error": Code("a bug in `its`; the message says what to report", fields=("version",)),
     "launch_settings_changed": Code("`done --result`: the headless launch files were changed during the run, so it "
@@ -119,6 +120,8 @@ ERRORS: dict[str, Code] = {
     "no_waiver_group": Code("`waive`: name what is waived (`--test-changes`, `--outside-touches`, `--dependencies`)"),
     "not_found": Code("no such ID, or a file `its` was given can't be read", fields=("mentioned_in",)),
     "not_git": Code("the command needs a git repository"),
+    "out_of_attempts": Code("`brief --retry`: the item has failed `gate.max_attempts` times; it needs a person "
+                            "(split it, clarify it, or block it)", fields=("attempts", "max_attempts")),
     "not_integration_branch": Code("`land`, `renumber`: run it on the integration branch",
                                    fields=("branch", "integration_branch")),
     "not_on_base": Code("`waive`: run it in the main checkout, on the integration branch",
@@ -129,6 +132,7 @@ ERRORS: dict[str, Code] = {
     "not_utf8": Code("`link`: a planning file isn't valid UTF-8 text"),
     "nothing_to_adopt": Code("`adopt`: the branch has no commits the integration branch lacks",
                              fields=("branch",)),
+    "nothing_to_retry": Code("`brief --retry`: the item has no failed attempt since it was started or adopted"),
     "nothing_ready": Code("`start --next`: nothing can start, and `reason` says why; exit 9 when every item is done",
                           (EXIT_NOTHING_READY, EXIT_COMPLETE), ("reason",)),
     "nothing_to_review": Code("`review`: the branch only changes the backlog"),

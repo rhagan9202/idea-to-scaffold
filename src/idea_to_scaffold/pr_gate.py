@@ -135,10 +135,14 @@ def gate_ref(pkg: Package, ref: str = "HEAD", *, base: str | None = None, ident:
         raise WorkError("not_found", f"{ident} isn't in {base_ref}'s backlog", details={"id": ident})
     out["policy_source"] = inspection.policy.source
     out = {**out, **_run(pkg, ident, inspection, head, verify=verify and pkg.repo_layout, on_check=on_check)}
+    failed = not out["passed"] and out["reason"] in ledger.FAILURES
+    why = out["findings"] or [{"message": out["message"]}]
     try:
-        ledger.record(pkg, ident, "gate", "passed" if out["passed"] else out["reason"], branch=branch,
+        ledger.record(pkg, ident, "gate", "passed" if out["passed"] else out["reason"], branch=branch, head=head,
                       findings=sorted({f["kind"] for f in out["findings"]}) or None,
-                      checks=[c["name"] for c in out["checks"] if not c["passed"]] or None)
+                      checks=[c["name"] for c in out["checks"] if not c["passed"]] or None,
+                      attempt=len(ledger.failures(pkg, ident)) + 1 if failed else None,
+                      **(ledger.failure_fields(out["checks"], why) if failed else {}))
     except (OSError, gitx.GitError):
         pass
     return out

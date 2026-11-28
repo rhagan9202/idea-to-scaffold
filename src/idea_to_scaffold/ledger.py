@@ -1,13 +1,17 @@
 """The run ledger: one JSON line per attempt at an item, so `its stats` can say what works.
 
-`start`, `done`, `block`, `land`, `review --reply` and the Stop hook each append a record to `runs/<ID>.jsonl` in the repository's
-state folder, outside the repository (`locking.state_dir`). That is on the lead's machine, shared by every worktree,
-never committed and never part of a diff, so writing it can't trip the done gate or conflict at land. An agent whose
-sandbox can't write there records nothing; the lead's `&& its done --result` and `its land` still do.
+`start`, `adopt`, `done`, `block`, `land`, `gate`, `review --reply` and the Stop hook each append a record to
+`runs/<ID>.jsonl` in the repository's state folder, outside the repository (`locking.state_dir`). That is on the
+lead's machine, shared by every worktree, never committed and never part of a diff, so writing it can't trip the done
+gate or conflict at land. An agent whose sandbox can't write there records nothing; the lead's
+`&& its done --result` and `its land` still do.
 
 A record is `{ts, item, event, outcome, ...}`. `done` records the checks and the gate's findings; with `--result`
-it adds what the agent reported (`agent`, `cost_usd`, `turns`, `duration_ms`, `session_id`). Nothing here is ever
-read back into an agent's prompt: the ledger is for people deciding how to size and assign work.
+it adds what the agent reported (`agent`, `cost_usd`, `turns`, `duration_ms`, `session_id`). A failed attempt
+(`done`, `land` or `gate`) also records its number (`attempt`), the failing checks and tests and the findings'
+messages: `its brief --retry` reads the last one back, and that is the only way anything here reaches an agent's
+prompt. A failure that isn't the change's (`base_failing`: the integration branch fails on its own) is marked
+`collateral`, and doesn't count as an attempt. Otherwise the ledger is for people deciding how to size and assign work.
 """
 from __future__ import annotations
 
@@ -20,7 +24,11 @@ from pathlib import Path
 from .locking import state_dir
 from .package import Package
 
-EVENTS = ("start", "done", "block", "land", "hook", "review")
+EVENTS = ("start", "adopt", "brief", "done", "block", "land", "gate", "hook", "review")
+FAILURES = ("check_failed", "gate_error", "no_fork_point", "test_changes", "dependency_changes", "outside_touches",
+            "no_changes")  # the outcomes of `done`, `land` and `gate` that end an attempt at the item
+KEPT_TESTS = 20
+KEPT_MESSAGES = 10
 
 
 def runs_dir(pkg: Package) -> Path | None:
@@ -41,6 +49,55 @@ def record(pkg: Package, item: str, event: str, outcome: str, **fields) -> None:
             fh.write(json.dumps(entry, sort_keys=True) + "\n")
     except OSError:
         pass
+
+
+def failure_fields(checks: list[dict] | None, findings: list[dict] | None) -> dict:
+    """What a failed attempt records for `its brief --retry`: the failing checks, the failing tests their test
+    reports name, and the findings' messages (a few of each)."""
+    failing = [c for c in checks or [] if not c.get("passed")]
+    tests = sorted({t for c in failing for t in (c.get("results") or {}).get("failed_tests") or []})
+    return {"failing_checks": [c["name"] for c in failing] or None, "failing_tests": tests[:KEPT_TESTS] or None,
+            "messages": [str(f.get("message")) for f in findings or []][:KEPT_MESSAGES] or None}
+
+
+def of(pkg: Package, item: str) -> list[dict]:
+    """One item's records, oldest first."""
+    folder = runs_dir(pkg)
+    path = folder / f"{item}.jsonl" if folder is not None else None
+    if path is None or not path.is_file():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            out.append(entry)
+    return out
+
+
+def is_failure(entry: dict) -> bool:
+    """Whether a record ends a failed attempt at its item: a refusal or failed check from `done` (not `--check`),
+    `land` or `gate`, unless it was the integration branch's own failure."""
+    return (entry.get("event") in ("done", "land", "gate") and entry.get("outcome") in FAILURES
+            and not entry.get("check_only") and not entry.get("collateral"))
+
+
+def failures(pkg: Package, item: str) -> list[dict]:
+    """The failed attempts at an item since it was last started or adopted, oldest first. One attempt is one agent
+    run (its `session_id`, from `done --result`) or one commit (`head`): running `its done` again on the same work,
+    or gating the same commit twice, is the same attempt, and only its latest record is kept."""
+    entries = of(pkg, item)
+    last = max((n for n, e in enumerate(entries)
+                if e.get("event") == "start" or (e.get("event") == "adopt" and e.get("outcome") == "claimed")), default=-1)
+    seen: dict[str, dict] = {}
+    for e in entries[last + 1:]:
+        if is_failure(e):
+            key = str(e.get("session_id") or e.get("head") or e.get("ts"))
+            seen.pop(key, None)
+            seen[key] = e
+    return list(seen.values())
 
 
 def read(pkg: Package) -> list[dict]:

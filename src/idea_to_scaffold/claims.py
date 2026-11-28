@@ -683,3 +683,18 @@ def _save_json(store: Path, name: str, data: dict) -> None:
     tmp = store / f"{name}.tmp"
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     os.replace(tmp, store / name)
+
+
+# --- briefs ------------------------------------------------------------------------------------------------------
+
+def record_brief(cwd: Path, ident: str, data: dict) -> None:
+    """Remember what `its brief --github` made for an item: the issue it created or updated."""
+    store = _store_dir(cwd)
+    briefs = _load_json(store / "briefs.json")
+    briefs[ident] = {**(briefs.get(ident) if isinstance(briefs.get(ident), dict) else {}), **data}
+    _save_json(store, "briefs.json", briefs)
+
+
+def brief_of(cwd: Path, ident: str) -> dict:
+    entry = _load_json(_store_dir(cwd) / "briefs.json").get(ident)
+    return entry if isinstance(entry, dict) else {}

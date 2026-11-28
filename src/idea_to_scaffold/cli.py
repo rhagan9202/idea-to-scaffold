@@ -27,7 +27,7 @@ from .contract import (
     SCHEMA,
     WorkError,
 )
-from .dispatch import adopt
+from .dispatch import adopt, brief
 from .drift import drift
 from .edits import apply_result, block, drop, promote, propose, set_item_status, unblock, waive
 from .hooks import hook_agents, hook_dir, install_hooks, parse_event, stop_hook
@@ -690,6 +690,11 @@ def cmd_done(args: argparse.Namespace) -> int:
                 print(f"  {finding['kind']}: {finding['message']}")
         if err.code == "check_failed" and not args.json:
             print("\n" + failure_report(err.details["checks"]))
+        again = err.details.get("retry")
+        if again and getattr(args, "result", None) and not args.json:  # a headless run ended: say what's next
+            print(f"attempt {again['attempt']} of {again['max_attempts']}: "
+                  + (f"retry with {again['command']}" if again["command"] else "no retries left; it needs a person"),
+                  file=sys.stderr)
         return _fail(args, err)
     if args.json:
         _emit(payload)
@@ -820,6 +825,29 @@ def cmd_land(args: argparse.Namespace) -> int:
     if payload["proposals"]:
         print(f"{len(payload['proposals'])} proposal(s) are waiting: its promote <ID>, or its renumber to number them")
     return code
+
+
+def cmd_brief(args: argparse.Namespace) -> int:
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+    try:
+        payload = brief(pkg, args.id, retry=args.retry, github=args.github, base=args.base)
+    except WorkError as err:
+        return _fail(args, err)
+    if args.json:
+        _emit(payload)
+        return 0
+    issue = payload["issue"]
+    if issue is None:
+        sys.stdout.write(payload["brief"])
+        return 0
+    where = f": {issue['url']}" if issue.get("url") else ""
+    print(f"{issue['action']} issue #{issue['number']} for {payload['id']}{where}")
+    if issue["action"] == "created":
+        print("assign it to an agent on GitHub (Copilot, Claude or Codex), then: "
+              f"its adopt <its branch or pr:N> {payload['id']}")
+    return 0
 
 
 def cmd_gate(args: argparse.Namespace) -> int:
@@ -1232,6 +1260,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fetch", action="store_true", help=fetch_help)
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_claims)
+
+    s = sub.add_parser("brief", help="print a self-contained task for an agent that may never run its "
+                                     "(or put it on a GitHub issue)")
+    s.add_argument("id", help="the item")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--retry", action="store_true", help="a brief for one more attempt: only what the last failed "
+                                                        "attempt got wrong (up to gate.max_attempts)")
+    s.add_argument("--github", action="store_true", help="create or update the item's GitHub issue with gh "
+                                                         "(a retry is posted as a comment)")
+    s.add_argument("--base", help="the integration branch to read the item and the rules from")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_brief)
 
     s = sub.add_parser("gate", help="run the done gate on a branch or pull request with the integration branch's "
                                     "rules, for CI; changes nothing")

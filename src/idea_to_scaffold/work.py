@@ -1001,18 +1001,49 @@ def done(
         payload = _done(pkg, ident, verify=verify, check_only=check_only, on_check=on_check)
     except WorkError as err:
         target = err.details.get("id") or ident
-        if target and err.code in ("check_failed", "gate_error", "no_fork_point", *gate.REFUSALS):
-            kinds = sorted({f["kind"] for f in err.details.get("findings", [])})
-            ledger.record(pkg, target, "done", err.code, findings=kinds, check_only=check_only or None,
+        if target and err.code in ledger.FAILURES:
+            findings = err.details.get("findings", [])
+            kinds = sorted({f["kind"] for f in findings})
+            head = _head_of(pkg)
+            block = retry_block(pkg, target, err.details.get("checks"), findings, head=head, run=extra)
+            ledger.record(pkg, target, "done", err.code, findings=kinds, check_only=check_only or None, head=head,
                           checks=[c["name"] for c in err.details.get("checks", []) if not c["passed"]] or None,
                           touches=_touch_count(pkg, target), gate_ms=int((time.monotonic() - started) * 1000),
-                          **extra)
+                          attempt=None if check_only else block["attempt"],
+                          **ledger.failure_fields(err.details.get("checks"), findings), **extra)
+            err.details["retry"] = block
         raise
+    attempt = None if check_only else len(ledger.failures(pkg, payload["id"])) + 1
     ledger.record(pkg, payload["id"], "done", "passed", check_only=check_only or None,
                   warnings=sorted({f["kind"] for f in payload.get("warnings", [])}) or None,
                   touches=_touch_count(pkg, payload["id"]), gate_ms=int((time.monotonic() - started) * 1000),
-                  **extra)
+                  attempt=attempt, **extra)
+    if attempt is not None:
+        payload["attempt"] = attempt
     return payload
+
+
+def _head_of(pkg: Package) -> str | None:
+    if not cl.in_git(pkg.root):
+        return None
+    return gitx.out(pkg.root, "rev-parse", "--verify", "--quiet", "HEAD", check=False).strip() or None
+
+
+def retry_block(pkg: Package, ident: str, checks: list[dict] | None, findings: list[dict] | None, *,
+                head: str | None = None, run: dict | None = None) -> dict:
+    """What a failed attempt tells whoever runs the next one: its number, how many the integration branch allows
+    (`gate.max_attempts`), and the failing checks and tests. A failure of the same run or commit as an earlier one
+    is the same attempt (ledger.failures)."""
+    base = base_ref(pkg) if cl.in_git(pkg.root) else None
+    allowed = gate.Policy.of((gate.manifest_at(pkg, base) if base else pkg.manifest) or {}, base or "").max_attempts
+    key = str((run or {}).get("session_id") or head or "")
+    earlier = ledger.failures(pkg, ident)
+    attempt = len(earlier) + (0 if key and any(str(e.get("session_id") or e.get("head") or "") == key
+                                               for e in earlier) else 1)
+    fields = ledger.failure_fields(checks, findings)
+    return {"attempt": attempt, "max_attempts": allowed, "retries_left": max(allowed - attempt, 0),
+            "failing_checks": fields["failing_checks"] or [], "failing_tests": fields["failing_tests"] or [],
+            "command": f"its brief --retry {ident}" if attempt < allowed else None}
 
 
 def _touch_count(pkg: Package, ident: str) -> int | None:
