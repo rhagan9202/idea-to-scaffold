@@ -245,7 +245,7 @@ def test_a9_no_verify_says_the_checks_were_skipped(repo: Path, capsys):  # noqa:
 
 def test_a7_no_environment_or_terminal_waives_the_gate(claim: Path, repo: Path, capsys, monkeypatch):  # noqa: F811
     monkeypatch.setenv("ITS_ALLOW_OVERRIDES", "1")
-    monkeypatch.setattr("idea_to_scaffold.work.is_terminal", lambda fd: True)  # what `script` gives an agent
+    monkeypatch.setattr("idea_to_scaffold.terminal.is_terminal", lambda fd: True)  # what `script` gives an agent
     (claim / TEST).unlink()
     code, out = finish(claim, capsys=capsys)
     assert code == 12 and out["error"]["code"] == "test_changes"

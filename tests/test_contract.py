@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from idea_to_scaffold import contract, gate, work
+from idea_to_scaffold import contract, gate
 from idea_to_scaffold.contract import ERRORS, EXIT_CODES, EXIT_REFUSED
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,6 +109,3 @@ def test_the_generator_rewrites_and_checks(tmp_path):
     assert contract.main([]) == 2
 
 
-def test_work_still_exports_the_contract_names():
-    assert work.WorkError is contract.WorkError and work.SCHEMA == contract.SCHEMA == 1
-    assert work.EXIT_CHECK_FAILED == contract.EXIT_CHECK_FAILED

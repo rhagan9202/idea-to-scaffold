@@ -322,7 +322,7 @@ def test_the_stop_hook_finds_the_package_from_the_payload_cwd(claim: Path, repo:
 
 
 def test_a_failing_test_is_reported_once():
-    from idea_to_scaffold.work import failure_report
+    from idea_to_scaffold.checks import failure_report
     trace = "E   assert 1 == 2\nFAILED tests/test_store.py::test_add"
     report = failure_report([
         {"name": "verify", "command": "pytest tests/test_store.py", "exit_code": 1, "passed": False, "output": trace},
@@ -334,7 +334,7 @@ def test_a_failing_test_is_reported_once():
 
 
 def test_a_second_different_failure_is_shown_too():  # B8
-    from idea_to_scaffold.work import failure_report
+    from idea_to_scaffold.checks import failure_report
     report = failure_report([
         {"name": "test", "command": "pytest", "exit_code": 1, "passed": False, "output": "E   assert 1 == 2"},
         {"name": "lint", "command": "ruff check .", "exit_code": 1, "passed": False,

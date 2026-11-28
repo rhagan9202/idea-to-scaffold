@@ -429,7 +429,7 @@ def test_a_merge_that_breaks_a_done_items_verify_doesnt_land(repo: Path, capsys)
 
 
 def test_the_committed_hash_matches_the_disk_hash_on_a_clean_checkout(repo: Path):  # noqa: F811
-    from idea_to_scaffold.work import touches_hash, touches_hash_at
+    from idea_to_scaffold.verified import touches_hash, touches_hash_at
     pkg = Package.load(repo)
     for touches in (["src/"], ["tests/"], ["src/streak/"]):
         assert touches_hash(pkg, touches) == touches_hash_at(pkg, touches, "HEAD")
@@ -439,8 +439,8 @@ def test_the_committed_hash_matches_the_disk_hash_on_a_clean_checkout(repo: Path
 
 def test_a_block_written_while_the_checks_run_is_kept(claim: Path):  # noqa: F811
     from idea_to_scaffold.contract import WorkError
+    from idea_to_scaffold.done import done
     from idea_to_scaffold.edits import block
-    from idea_to_scaffold.work import done
     pkg = Package.load(claim)
     (claim / "src/streak/store.py").write_text("def add(): ...\n")
     blocked = []

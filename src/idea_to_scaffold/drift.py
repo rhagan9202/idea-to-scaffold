@@ -23,7 +23,7 @@ from .contract import SCHEMA, WorkError
 from .gate import _planning_prefix
 from .package import Package
 from .touches import covered
-from .work import touched_files, touches_hash
+from .verified import touched_files, touches_hash
 
 COMMIT_LIMIT = 10
 TREE_RE = re.compile(r"\btree ([0-9a-f]{6,40})\b")

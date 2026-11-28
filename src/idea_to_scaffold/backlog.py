@@ -11,6 +11,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from .contract import WorkError
 from .ids import (
     ID_RE,
     FieldSpan,
@@ -420,3 +421,37 @@ def load_proposals(pkg: Package) -> list[tuple[Path, BacklogItem]]:
         for item in parse_backlog(_read(path)):
             out.append((path, item))
     return out
+
+
+def find_item(items: list[BacklogItem], ident: str) -> BacklogItem:
+    """The item with ID `ident`. Raises `not_found`, or `duplicate_id` when the backlog defines it twice."""
+    found = [i for i in items if i.id == ident]
+    if not found:
+        raise WorkError("not_found", f"{ident} is not in the backlog", details={"id": ident})
+    if len(found) > 1:
+        raise WorkError("duplicate_id", f"{ident} is defined {len(found)} times in the backlog; give each a unique ID "
+                        "first (its validate lists them)", details={"id": ident})
+    return found[0]
+
+
+def check_unique(items: list[BacklogItem]) -> None:
+    """Raise `duplicate_id` when the backlog defines an ID more than once."""
+    seen: set[str] = set()
+    dupes = sorted({i.id for i in items if i.id in seen or seen.add(i.id)})
+    if dupes:
+        raise WorkError("duplicate_id", f"{', '.join(dupes)} {'is' if len(dupes) == 1 else 'are'} defined more than "
+                        "once in the backlog; give each a unique ID first (its validate lists them)",
+                        details={"ids": dupes})
+
+
+
+def read_raw(path: Path) -> str:
+    """Read a file as it is on disk, line endings and all."""
+    with open(path, encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def write_raw(path: Path, text: str) -> None:
+    """Write text without translating its line endings."""
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)

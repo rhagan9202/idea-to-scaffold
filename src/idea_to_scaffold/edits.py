@@ -14,10 +14,12 @@ from pathlib import Path
 from . import claims as cl
 from . import gitx, ledger, results, sizing, trust
 from .backlog import (
+    BACKLOG,
     NO_VALUE,
     BacklogError,
     BacklogItem,
     check_proposal,
+    find_item,
     load_backlog,
     load_proposals,
     remove_field,
@@ -27,21 +29,11 @@ from .backlog import (
 from .contract import SCHEMA, WorkError
 from .gate import WAIVER_FIELD, WAIVER_GROUPS, Waiver
 from .ids import is_placeholder
-from .locking import LockTimeout, package_lock
+from .locking import LockTimeout, holding_lock, package_lock
+from .mirror import refresh_mirror
 from .package import BACKLOG_STATUSES, Package
-from .work import (
-    BACKLOG,
-    _find,
-    _locked,
-    _on_base_checkout,
-    _refresh_mirror,
-    integration_branch,
-    item_here,
-    item_payload,
-    remote_of,
-    renumber,
-    shown,
-)
+from .renumber import renumber
+from .view import integration_branch, item_here, item_payload, on_base_checkout, remote_of, shown
 
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -117,7 +109,7 @@ def _locate(pkg: Package, ident: str) -> tuple[BacklogItem, Path | None, list[Ba
     """An item and the proposal file holding it (None when it is in the backlog)."""
     items = load_backlog(pkg)
     if any(i.id == ident for i in items):
-        return _find(items, ident), None, items
+        return find_item(items, ident), None, items
     for path, item in load_proposals(pkg):
         if item.id == ident:
             return item, path, items
@@ -125,7 +117,7 @@ def _locate(pkg: Package, ident: str) -> tuple[BacklogItem, Path | None, list[Ba
 
 
 def _result(pkg: Package, ident: str, previous: str, status: str, **extra) -> dict:
-    _refresh_mirror(pkg)
+    refresh_mirror(pkg)
     items = load_backlog(pkg)
     item = next((i for i in items if i.id == ident), None)
     return {"schema": SCHEMA, "ok": True, "id": ident, "previous_status": previous, "status": status,
@@ -188,12 +180,12 @@ def waive(pkg: Package, ident: str, groups: list[str], reason: str) -> dict:
         raise WorkError("not_git", "a waiver is committed on the integration branch, so it needs a git repository",
                         details={"id": ident})
     base = integration_branch(pkg)
-    if not _on_base_checkout(pkg):
+    if not on_base_checkout(pkg):
         raise WorkError(
             "not_on_base", f"run its waive on {base}, in the repository's main checkout: done and land honour a waiver "
             "only on the integration branch, where an agent's worktree can't write it",
             details={"id": ident, "branch": cl.current_branch(pkg.root), "integration_branch": base})
-    item = _find(load_backlog(pkg), ident)
+    item = find_item(load_backlog(pkg), ident)
     if item.status in ("done", "dropped"):
         raise WorkError("bad_status", f"{ident} is {item.status}; there is nothing left to waive",
                         details={"id": ident, "status": item.status})
@@ -204,7 +196,7 @@ def waive(pkg: Package, ident: str, groups: list[str], reason: str) -> dict:
     waiver = Waiver(date.today().isoformat(), chosen, reason)
     before = gitx.out(pkg.root, "rev-parse", "HEAD", check=False)
     try:
-        with _locked(pkg):
+        with holding_lock(pkg):
             commit = _commit_waiver(pkg, ident, waiver, f"Waive {', '.join(chosen)} for {ident}\n\n{reason}")
             set_field(pkg, ident, WAIVER_FIELD, waiver.render(), add=True, apart=True)  # the working tree too
             gitx.run(pkg.root, "reset", "--quiet", "HEAD", "--", str(backlog))  # and the index
@@ -214,7 +206,7 @@ def waive(pkg: Package, ident: str, groups: list[str], reason: str) -> dict:
         raise WorkError("git_error", f"the waiver couldn't be committed: {exc}", details={"id": ident}) from exc
     trust.note_waiver(pkg.root, base, commit)
     trusted = trust.record(pkg.root, base, commit, after=before or None, remote=remote_of(pkg))
-    _refresh_mirror(pkg)
+    refresh_mirror(pkg)
     return {"schema": SCHEMA, "ok": True, "id": ident, "waiver": waiver.to_dict(),
             "committed": commit[:7], "trusted": trusted}
 
@@ -303,7 +295,7 @@ def apply_result(pkg: Package, ident: str | None, result_file: str, *, push: boo
     item, _, _ = _locate(pkg, ident)
     check_only = done_options.get("check_only", False)
     if result["status"] == "done":
-        from .work import done, verify
+        from .done import done, verify
         if item.status == "done" and not check_only:
             payload = verify(pkg, ident, on_check=done_options.get("on_check"), run=run)
             payload.update(status="done", previous_status="done", already_done=True)

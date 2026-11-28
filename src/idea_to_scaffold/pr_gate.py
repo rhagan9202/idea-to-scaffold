@@ -27,8 +27,9 @@ from . import gate, gitx, heldout, ledger
 from .backlog import BACKLOG, BacklogItem, load_backlog, parse_backlog
 from .checks import RESULT_KINDS, Check, checks_for, result_findings, run_check
 from .contract import EXIT_CHECK_FAILED, EXIT_OK, EXIT_REFUSED, SCHEMA, WorkError
+from .gating import changed_tests, red_on_parent
 from .package import Package
-from .work import changed_tests, integration_branch, red_on_parent, remote_of
+from .view import integration_branch, remote_of
 
 ID_IN_NAME = re.compile(r"(?<![\w.-])(T-\d+\.\d+)(?![\d.])")  # claude/T-2.1-store, T-2.1/store
 TAG_RE = re.compile(r"\[(T-\d+\.\d+)\]")  # `[T-2.1] add the store` in a commit message

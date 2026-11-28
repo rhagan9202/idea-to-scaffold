@@ -23,10 +23,12 @@ from datetime import datetime, timezone
 
 from . import claims as cl
 from . import gate, gitx, ledger
+from .backlog import find_item
 from .checks import checks_for
 from .contract import SCHEMA, WorkError
+from .locking import holding_lock
 from .package import Package
-from .work import _closed, _find, _locked, integration_branch, overlaps_with_running, remote_of, view
+from .view import closed_ids, integration_branch, overlaps_with_running, remote_of, view
 
 # Vendor branch prefixes, read as the agent that made the branch (the agent identity in the run ledger).
 VENDORS = {"claude": "claude", "copilot": "copilot", "codex": "codex", "cursor": "cursor", "gemini": "gemini",
@@ -100,12 +102,12 @@ def adopt(pkg: Package, ref: str, ident: str, *, push: bool | None = None, fetch
     cand = resolve(pkg, ref, remote, fetch=fetch)
     cand.update(agent=agent or vendor_of(cand["name"]), adopted=_now())
     created = False
-    with _locked(pkg):
+    with holding_lock(pkg):
         v = view(pkg)
         if v.base is None:
             raise WorkError("no_base", f"can't adopt for {ident}: there is no integration branch ({base})",
                             details={"id": ident})
-        item = _find(v.items, ident)
+        item = find_item(v.items, ident)
         if item.placeholder:
             raise WorkError("placeholder", f"{ident} has a placeholder ID; give it a permanent T-n.m ID first",
                             details={"id": ident})
@@ -125,7 +127,7 @@ def adopt(pkg: Package, ref: str, ident: str, *, push: bool | None = None, fetch
         if claim is None:
             try:
                 claim = cl.create_claim(pkg.root, ident, item.title, base_ref=v.base, worktree=None,
-                                        agent=cand["agent"], closed=_closed(v.items), switch=False,
+                                        agent=cand["agent"], closed=closed_ids(v.items), switch=False,
                                         integration=base)
             except cl.ClaimTaken as exc:
                 raise WorkError("claimed", str(exc), details={"id": ident, "claim": exc.claim.to_dict()}) from exc
@@ -175,7 +177,7 @@ def brief(pkg: Package, ident: str, *, retry: bool = False, github: bool = False
     from .review import _requirement, needs_review  # review imports work; dispatch is imported by the CLI only
 
     v = view(pkg, base)
-    item = _find(v.items, ident)
+    item = find_item(v.items, ident)
     if item.status in ("done", "dropped"):
         raise WorkError("bad_status", f"{ident} is {item.status} on {v.source}; there is nothing to brief",
                         details={"id": ident, "status": item.status})

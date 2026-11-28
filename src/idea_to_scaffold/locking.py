@@ -35,8 +35,13 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import gitx
+from .contract import WorkError
+
+if TYPE_CHECKING:
+    from .package import Package
 
 LOCK_WAIT_SECONDS = 60.0
 LOCK_NAME = "claims.lock"
@@ -188,3 +193,14 @@ def package_lock(cwd: Path, wait: float | None = None) -> Iterator[Path]:
     """The lock for the repository (or package folder) that `cwd` is in."""
     with locked(lock_path(cwd), wait) as folder:
         yield folder
+
+
+@contextmanager
+def holding_lock(pkg: Package) -> Iterator[None]:
+    """Hold the package lock (the repository's, in git) for a check-then-write sequence; `locked` if another
+    `its` command holds it."""
+    try:
+        with package_lock(pkg.root):
+            yield
+    except LockTimeout as exc:
+        raise WorkError("locked", str(exc)) from None

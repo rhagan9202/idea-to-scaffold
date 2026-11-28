@@ -16,6 +16,7 @@ from . import __version__, gate, trust
 from . import claims as cl
 from .audit import gate_audit
 from .backlog import BacklogError
+from .checks import failure_report
 from .contract import (
     EXIT_AUDIT_MISSED,
     EXIT_CHECK_FAILED,
@@ -29,6 +30,7 @@ from .contract import (
     WorkError,
 )
 from .dispatch import adopt, brief
+from .done import done, verify, verify_many
 from .drift import drift
 from .edits import apply_result, block, drop, promote, propose, set_item_status, unblock, waive
 from .hooks import hook_agents, hook_dir, install_hooks, parse_event, stop_hook
@@ -37,36 +39,31 @@ from .importer import ImportConflict, import_export
 from .landing import land
 from .ledger import stats
 from .linker import link_package
+from .mirror import write_backlog_json
 from .package import BACKLOG_STATUSES, PROFILES, Package, PackageError, new_package
 from .pr_gate import exit_code as gate_exit
 from .pr_gate import gate_ref
+from .renumber import renumber
 from .review import REPLY_SCHEMA, judge, review
 from .scaffold import ScaffoldError, scaffold
 from .sizing import sizing
+from .start import start
 from .status import STATE_LABELS, render, status_payload
+from .terminal import is_terminal
+from .tips import claims_payload, release
 from .trace import trace
 from .validate import validate
-from .work import (
-    _on_base_checkout,
+from .view import (
     backlog_payload,
-    claims_payload,
-    done,
-    failure_report,
     fetch,
     integration_branch,
-    is_terminal,
     next_payload,
-    release,
+    on_base_checkout,
     remote_freshness,
     remote_of,
-    renumber,
     show_payload,
     shown,
     stale_note,
-    start,
-    verify,
-    verify_many,
-    write_backlog_json,
 )
 
 TASK_RE = re.compile(TASK_PATTERN)
@@ -922,7 +919,7 @@ def _commit(args: argparse.Namespace, pkg: Package, payload: dict, message: str)
         before = cl.git(pkg.root, "rev-parse", "--verify", "--quiet", "HEAD", check=False)
         cl.git(pkg.root, "commit", "--quiet", "-m", message, "--", folder)
         payload["committed"] = cl.git(pkg.root, "rev-parse", "--short", "HEAD")
-        if _on_base_checkout(pkg):
+        if on_base_checkout(pkg):
             trust.record(pkg.root, integration_branch(pkg), "HEAD", after=before or None, remote=remote_of(pkg))
     return payload
 
