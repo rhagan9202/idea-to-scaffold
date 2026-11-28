@@ -35,7 +35,7 @@ EXIT_CODES: dict[int, str] = {
                         "alongside the claims)",
     EXIT_BLOCKED: "`start`: a dependency isn't done",
     EXIT_CHECK_FAILED: "`done`: a check or the done gate failed, or a headless run's launch settings were changed; "
-                       "the status is unchanged",
+                       "the status is unchanged. `gate`: the branch failed the done gate or a check",
     EXIT_OVERLAP: "`start`: the item may change the same files as one already running",
     EXIT_NOT_LANDED: "`land`: a branch could not land (it conflicted, failed the done gate or its checks, isn't done, "
                      "has no commits, or the base moved), or the integration branch has commits nothing vouches for "
@@ -90,7 +90,8 @@ ERRORS: dict[str, Code] = {
     "duplicate_id": Code("an ID is defined more than once in the backlog", fields=("ids",)),
     "exists": Code("`propose`: that proposal exists already"),
     "fetch_failed": Code("`--fetch`: fetching the remote failed", fields=("remote",)),
-    "gate_error": Code("`done`, `review`: the gate couldn't compare the branch, so it refused (exit 1 from `review`)",
+    "gate_error": Code("`done`, `review`, `gate`: the gate couldn't compare the branch, so it refused (exit 1 from "
+                       "`review` and `gate`)",
                        (EXIT_CHECK_FAILED, EXIT_ERROR)),
     "git_error": Code("a git command failed"),
     "incomplete": Code("`promote`: the item has no Done when or Touches", fields=("missing",)),
@@ -101,9 +102,11 @@ ERRORS: dict[str, Code] = {
     "link_outdated": Code("`link --check`: generated links, the index or the commands blocks are out of date",
                           fields=("changed",)),
     "locked": Code("another `its` command holds the package lock"),
-    "no_branch": Code("`adopt`: there is no such branch or pull request, here or on the remote",
+    "no_branch": Code("`adopt`, `gate`, `review --branch`: there is no such branch or pull request, here or on the "
+                      "remote",
                       fields=("branch",)),
-    "no_base": Code("`start --claim`, `gate-audit`: there is no integration branch"),
+    "no_base": Code("`start --claim`, `gate-audit`, `adopt`, `gate`: there is no integration branch (or no base "
+                    "to gate against)"),
     "no_changes": Code("`done`: the branch changes nothing outside the planning folder, so nothing shows the item "
                        "was implemented", (EXIT_CHECK_FAILED,), ("findings", "warnings")),
     "no_fork_point": Code("`done` on the integration branch: no start was recorded for the item, so the gate can't "
@@ -143,7 +146,8 @@ ERRORS: dict[str, Code] = {
                          "them with `its waive <ID> --test-changes`", (EXIT_CHECK_FAILED,), ("findings", "warnings")),
     "usage": Code("the command line is wrong", (EXIT_USAGE,)),
     "use_waive": Code("an `--allow-*` flag, which is gone: the lead waives with `its waive`", fields=("flag",)),
-    "which_item": Code("`done`, `review`: name the item; none could be inferred", fields=("in_progress",)),
+    "which_item": Code("`done`, `review`: name the item; none could be inferred. `gate`: the branch could be for "
+                       "several (`candidates`)", fields=("in_progress", "candidates")),
     "worktree_exists": Code("`start --claim`: the worktree's folder exists already", fields=("worktree",)),
 }
 

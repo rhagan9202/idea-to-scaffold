@@ -381,6 +381,8 @@ def test_scaffold_adds_plan_checks_to_ci_and_hooks_on_request(plan: Path, tmp_pa
     assert git(root, "status", "--porcelain") == ""  # committed with the scaffold
     assert "fetch-depth: 0" in ci and "its drift --check ." in ci and "actions/setup-python" in ci
     assert "uv python install" not in ci  # a bare pip in the setup command would miss that Python
+    gate_job = ci[ci.index("  gate:"):]
+    assert "its gate HEAD ." in gate_job and "fetch-depth: 0" in gate_job and "pull_request" in gate_job
 
 
 def test_scaffolded_ci_pins_its(plan: Path, tmp_path: Path, monkeypatch):

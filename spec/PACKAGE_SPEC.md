@@ -702,15 +702,15 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `duplicate_id` | 1 | an ID is defined more than once in the backlog | `ids` |
 | `exists` | 1 | `propose`: that proposal exists already |  |
 | `fetch_failed` | 1 | `--fetch`: fetching the remote failed | `remote` |
-| `gate_error` | 5, 1 | `done`, `review`: the gate couldn't compare the branch, so it refused (exit 1 from `review`) |  |
+| `gate_error` | 5, 1 | `done`, `review`, `gate`: the gate couldn't compare the branch, so it refused (exit 1 from `review` and `gate`) |  |
 | `git_error` | 1 | a git command failed |  |
 | `incomplete` | 1 | `promote`: the item has no Done when or Touches | `missing` |
 | `internal_error` | 1 | a bug in `its`; the message says what to report | `version` |
 | `launch_settings_changed` | 5 | `done --result`: the headless launch files were changed during the run, so it may have had no Stop hook or sandbox; nothing was marked | `files`, `result_file` |
 | `link_outdated` | 1 | `link --check`: generated links, the index or the commands blocks are out of date | `changed` |
 | `locked` | 1 | another `its` command holds the package lock |  |
-| `no_base` | 1 | `start --claim`, `gate-audit`: there is no integration branch |  |
-| `no_branch` | 1 | `adopt`: there is no such branch or pull request, here or on the remote | `branch` |
+| `no_base` | 1 | `start --claim`, `gate-audit`, `adopt`, `gate`: there is no integration branch (or no base to gate against) |  |
+| `no_branch` | 1 | `adopt`, `gate`, `review --branch`: there is no such branch or pull request, here or on the remote | `branch` |
 | `no_changes` | 5 | `done`: the branch changes nothing outside the planning folder, so nothing shows the item was implemented | `findings`, `warnings` |
 | `no_fork_point` | 5 | `done` on the integration branch: no start was recorded for the item, so the gate can't tell which commits are its work; `its start <ID> --force` records one |  |
 | `no_package` | 1 | no planning package was found |  |
@@ -737,7 +737,7 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `test_changes` | 5 | `done`: the done gate refused the branch's test changes (tests, test config, or how the item is verified); the lead waives them with `its waive <ID> --test-changes` | `findings`, `warnings` |
 | `usage` | 2 | the command line is wrong |  |
 | `use_waive` | 1 | an `--allow-*` flag, which is gone: the lead waives with `its waive` | `flag` |
-| `which_item` | 1 | `done`, `review`: name the item; none could be inferred | `in_progress` |
+| `which_item` | 1 | `done`, `review`: name the item; none could be inferred. `gate`: the branch could be for several (`candidates`) | `in_progress`, `candidates` |
 | `worktree_exists` | 1 | `start --claim`: the worktree's folder exists already | `worktree` |
 <!-- /contract:errors -->
 
@@ -751,7 +751,7 @@ Exit codes, the same with or without `--json`:
 | 2 | bad command-line usage |
 | 3 | `next`, `start --next`, `land`: nothing is ready (with `--parallel`: nothing can start alongside the claims) |
 | 4 | `start`: a dependency isn't done |
-| 5 | `done`: a check or the done gate failed, or a headless run's launch settings were changed; the status is unchanged |
+| 5 | `done`: a check or the done gate failed, or a headless run's launch settings were changed; the status is unchanged. `gate`: the branch failed the done gate or a check |
 | 6 | `start`: the item may change the same files as one already running |
 | 7 | `land`: a branch could not land (it conflicted, failed the done gate or its checks, isn't done, has no commits, or the base moved), or the integration branch has commits nothing vouches for (`base_untrusted`); branches only waiting on dependencies don't count |
 | 8 | `drift --check`: a done item's files changed after it was verified |

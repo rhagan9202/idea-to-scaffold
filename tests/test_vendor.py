@@ -15,7 +15,8 @@ STORE = ("from pathlib import Path\n\ndef test_store_adds():\n"
          "    assert 'def add' in Path('src/streak/store.py').read_text()\n")
 
 
-def vendor_branch(remote_repo: Path, tmp_path: Path, branch: str, files: dict[str, str]) -> str:
+def vendor_branch(remote_repo: Path, tmp_path: Path, branch: str, files: dict[str, str],
+                  message: str | None = None) -> str:
     """What a vendor's cloud agent does: clone, commit on a branch of its own name, push. Returns the tip."""
     clone = tmp_path / ("vendor-" + branch.replace("/", "-"))
     git(tmp_path, "clone", "-q", str(remote_repo), str(clone))
@@ -25,7 +26,7 @@ def vendor_branch(remote_repo: Path, tmp_path: Path, branch: str, files: dict[st
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body)
     git(clone, "add", "-A")
-    git(clone, "commit", "-qm", f"agent work on {branch}")
+    git(clone, "commit", "-qm", message or f"agent work on {branch}")
     git(clone, "push", "-q", "origin", branch)
     return git(clone, "rev-parse", "HEAD")
 
@@ -142,3 +143,44 @@ def test_a_claim_with_no_commit_for_days_is_stale(repo: Path, capsys, monkeypatc
     capsys.readouterr()
     assert main(["status", str(repo)]) == 0
     assert "stale (no commit for a while" in capsys.readouterr().out
+
+
+def test_gate_passes_a_good_pull_request_and_refuses_a_bad_one(repo: Path, remote: Path, tmp_path: Path,  # noqa: F811
+                                                               capsys, monkeypatch):
+    held_out(repo, {"T-2.1/test_store_held_out.py": STORE})
+    git(repo, "push", "-q", "origin", "main")
+    vendor_branch(remote, tmp_path, "copilot/T-2.1-store", {"src/streak/store.py": "def add():\n    return 1\n"})
+    vendor_branch(remote, tmp_path, "codex/store", {"src/streak/store.py": "def remove():\n    return 1\n"},
+                  message="[T-2.1] a store that can't add")
+    vendor_branch(remote, tmp_path, "claude/T-2.1-cheat", {"src/streak/store.py": "def remove():\n    return 1\n",
+                                                           "tests/acceptance/T-2.1/test_store_held_out.py": "def test_x():\n    pass\n"})
+    vendor_branch(remote, tmp_path, "copilot/readme", {"NOTES.txt": "hello\n"})
+    git(repo, "fetch", "-q", "origin")
+    before = git(repo, "status", "--porcelain")
+
+    code, out = run_json(capsys, "gate", "origin/copilot/T-2.1-store", str(repo))
+    assert code == 0 and out["passed"] and out["id"] == "T-2.1" and out["found_by"] == "branch_name", out
+    assert any(c["name"] == "acceptance" and c["passed"] for c in out["checks"]) and out["held_out"]["included"] == ["T-2.1"]
+    code, out = run_json(capsys, "gate", "origin/codex/store", str(repo))
+    assert code == 5 and out["found_by"] == "commit_tags" and out["reason"] == "check_failed", out
+    assert out["held_out_failed"] == ["T-2.1"]
+    code, out = run_json(capsys, "gate", "origin/claude/T-2.1-cheat", str(repo))
+    assert code == 5 and [f["kind"] for f in out["findings"]] == ["acceptance_changed"], out
+    assert out["checks"] == []  # refused before anything ran
+    code, out = run_json(capsys, "gate", "origin/copilot/readme", str(repo))
+    assert code == 0 and out["id"] is None and out["reason"] == "no_item", out
+    assert run_json(capsys, "gate", "origin/copilot/readme", str(repo), "--require-item")[0] == 5
+    assert run_json(capsys, "gate", "origin/nope", str(repo))[1]["error"]["code"] == "no_branch"
+    assert git(repo, "status", "--porcelain") == before  # the checkout is untouched
+
+    # in a pull request's CI: a detached checkout of the pull request, the base only on the remote
+    ci = tmp_path / "ci"
+    git(tmp_path, "clone", "-q", str(remote), str(ci))
+    git(ci, "checkout", "-q", "--detach", "origin/copilot/T-2.1-store")
+    git(ci, "branch", "-q", "-D", "main")
+    monkeypatch.setenv("GITHUB_BASE_REF", "main")
+    monkeypatch.setenv("GITHUB_HEAD_REF", "copilot/T-2.1-store")
+    capsys.readouterr()
+    assert main(["gate", str(ci)]) == 0
+    text = capsys.readouterr().out
+    assert "gate T-2.1 (branch name) on copilot/T-2.1-store against origin/main: passed" in text, text

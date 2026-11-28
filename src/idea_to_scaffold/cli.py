@@ -37,6 +37,7 @@ from .landing import land
 from .ledger import stats
 from .linker import link_package
 from .package import BACKLOG_STATUSES, PROFILES, Package, PackageError, new_package
+from .pr_gate import gate_ref
 from .review import REPLY_SCHEMA, judge, review
 from .scaffold import ScaffoldError, scaffold
 from .sizing import sizing
@@ -821,6 +822,41 @@ def cmd_land(args: argparse.Namespace) -> int:
     return code
 
 
+def cmd_gate(args: argparse.Namespace) -> int:
+    if args.ref and args.dir == "." and Path(args.ref).is_dir():  # `its gate DIR`
+        args.dir, args.ref = args.ref, None
+    pkg = _load(args)
+    if pkg is None:
+        return 1
+
+    def announce(ident, check) -> None:
+        if not args.json:
+            print(f"{ident}: running {check.name}: {check.command}", flush=True)
+
+    try:
+        payload = gate_ref(pkg, args.ref or "HEAD", base=args.base, ident=args.id, require_item=args.require_item,
+                           verify=not args.no_verify, on_check=announce)
+    except WorkError as err:
+        return _fail(args, err)
+    code = 0 if payload["passed"] else EXIT_CHECK_FAILED
+    if args.json:
+        _emit(payload)
+        return code
+    what = f"{payload['id']} ({payload['found_by'].replace('_', ' ')})" if payload["id"] else "nothing"
+    print(f"gate {what} on {payload['branch'] or payload['ref']} against {payload['base']}: "
+          + ("passed" if payload["passed"] else "refused"))
+    print(f"  {payload['message']}")
+    for finding in payload["findings"]:
+        print(f"  {finding['kind']}: {finding['message']}")
+    for check in payload["checks"]:
+        print(f"  {'ok' if check['passed'] else 'failed'}: {check['name']}: {check['command']}")
+        if not check["passed"] and check.get("output"):
+            print(check["output"])
+    for w in payload["warnings"]:
+        print(f"  warning: {w['kind']}: {w['message']}")
+    return code
+
+
 def _waiver_flags(args: argparse.Namespace) -> WorkError | None:
     """The error for the --allow-* flags, which phase 10 replaced with `its waive`."""
     for flag in ("allow_test_changes", "allow_outside_touches"):
@@ -1196,6 +1232,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fetch", action="store_true", help=fetch_help)
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_claims)
+
+    s = sub.add_parser("gate", help="run the done gate on a branch or pull request with the integration branch's "
+                                    "rules, for CI; changes nothing")
+    s.add_argument("ref", nargs="?", help="the branch or commit to gate (default: HEAD, the pull request in CI)")
+    s.add_argument("dir", nargs="?", default=".", help=dir_help)
+    s.add_argument("--base", help="the branch to compare with and take the rules from (default: GITHUB_BASE_REF in a "
+                                  "pull request, else the integration branch)")
+    s.add_argument("--id", help="the item the branch is for (default: from the branch name, its backlog change, or "
+                                "[T-n.m] in its commits)")
+    s.add_argument("--require-item", action="store_true", help="fail when the branch names no backlog item")
+    s.add_argument("--no-verify", action="store_true", help="only the checks of the change; run no commands")
+    s.add_argument("--json", action="store_true", help=json_help)
+    s.set_defaults(func=cmd_gate)
 
     s = sub.add_parser("land", help="merge finished claim branches one at a time, testing each merged result")
     s.add_argument("ids", nargs="*", metavar="ID", help="only these items (default: every claim that is done)")
