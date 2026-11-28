@@ -171,7 +171,7 @@ prompts/claude-skill/plan-project/      the same flow as a Claude skill
 src/idea_to_scaffold/                   the `its` package; service.py has one function per command
 src/idea_to_scaffold/cli/               the command line: parses arguments, renders what service.py returns
 src/idea_to_scaffold/templates/package/ blank planning package
-src/idea_to_scaffold/templates/stacks/  per-language repo skeletons (python, generic)
+src/idea_to_scaffold/templates/stacks/  per-language repo skeletons (python, node, generic)
 examples/streak/                        a sample chat export
 tests/                                  end-to-end tests
 ```
