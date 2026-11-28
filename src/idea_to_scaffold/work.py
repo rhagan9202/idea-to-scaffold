@@ -282,7 +282,46 @@ def next_payload(pkg: Package, *, base: str | None = None, parallel: int | None 
         chosen, held = _parallel(v, ready, parallel)
         payload["parallel"] = [item_payload(pkg, i, items) for i in chosen]
         payload["held_back"] = held
+    wip = wip_warning(pkg, v)
+    payload["warnings"] = [wip] if wip else []
     return payload
+
+
+def waiting_on_lead(pkg: Package, v: View) -> list[str]:
+    """The claimed items whose work is finished and waits for the lead to review or land it: done on the claim
+    branch, or an adopted claim with a candidate that has commits."""
+    if v.base is None:
+        return []
+    out = []
+    for c in v.claims:
+        if c.finished or c.orphaned:
+            continue
+        if c.candidates:
+            if any(cl.ref_exists(pkg.root, x["ref"]) and cl.ahead(pkg.root, x["ref"], v.base) for x in c.candidates):
+                out.append(c.id)
+            continue
+        ref = _ref(c)
+        if not cl.ahead(pkg.root, ref, v.base):
+            continue
+        text = cl.read_at(pkg.root, ref, pkg.path_of(BACKLOG))
+        item = next((i for i in parse_backlog(text) if i.id == c.id), None) if text else None
+        if item is not None and item.status == "done":
+            out.append(c.id)
+    return out
+
+
+def wip_warning(pkg: Package, v: View) -> dict | None:
+    """`gate.max_unreviewed` on the integration branch: a warning once that many finished items wait for the lead,
+    since agents can finish work faster than a person can review and land it. Nothing is refused."""
+    if v.base is None:
+        return None
+    limit = gate.Policy.of(gate.manifest_at(pkg, v.base) or {}, v.base).max_unreviewed
+    waiting = waiting_on_lead(pkg, v) if limit else []
+    if not limit or len(waiting) < limit:
+        return None
+    return {"kind": "wip_limit", "limit": limit, "items": waiting,
+            "message": f"{len(waiting)} finished item(s) wait for you to review or land ({', '.join(waiting)}), and "
+                       f"gate.max_unreviewed is {limit}: land or review them before starting more (its status)"}
 
 
 def _definition(doc: Doc, ident: str, target: Target) -> tuple[int, str]:
@@ -426,6 +465,11 @@ def start(pkg: Package, ident: str | None, *, setup: bool = True, **kwargs) -> d
     ledger.record(pkg, payload["id"], "start", "claimed" if claim else "in-progress", agent=kwargs.get("agent"),
                   branch=claim.get("branch"), worktree=claim.get("worktree"),
                   touches=len(payload["item"]["touches"]) if payload.get("item", {}).get("touches") else None)
+    try:
+        wip = wip_warning(pkg, view(pkg, kwargs.get("base")))
+    except WorkError:
+        wip = None
+    payload["warnings"] = [*payload.get("warnings", []), wip] if wip else payload.get("warnings", [])
     return payload
 
 

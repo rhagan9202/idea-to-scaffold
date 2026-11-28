@@ -402,6 +402,8 @@ def cmd_next(args: argparse.Namespace) -> int:
     if args.json:
         _emit(payload)
         return code
+    for w in payload.get("warnings", []):
+        print(f"warning: {w['message']}", file=sys.stderr)
     if args.parallel is not None:
         for item in payload["parallel"]:
             print(_item_line(item))
@@ -506,6 +508,8 @@ def cmd_start(args: argparse.Namespace) -> int:
             print(f"  warning: setup failed in the worktree (exit {setup['exit_code']}): {setup['command']}")
             for line in (setup.get("output") or "").splitlines()[-5:]:
                 print(f"    {line}")
+        for w in payload.get("warnings", []):
+            print(f"  warning: {w['message']}")
         print("start an agent on it:")
         print(f"  {payload['commands']['claude']}")
         print(f"  {payload['commands']['codex']}")
@@ -956,7 +960,7 @@ def cmd_review(args: argparse.Namespace) -> int:
             return 1
         try:
             text = sys.stdin.read() if args.reply == "-" else Path(args.reply).read_text(encoding="utf-8")
-            payload = judge(pkg, args.id, text, min_severity=args.min_severity, base=args.base)
+            payload = judge(pkg, args.id, text, min_severity=args.min_severity, base=args.base, branch=args.branch)
         except OSError as exc:
             return _fail(args, WorkError("not_found", f"can't read {args.reply}: {exc}"))
         except WorkError as err:
@@ -983,7 +987,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     if pkg is None:
         return 1
     try:
-        payload = review(pkg, args.id, base=args.base)
+        payload = review(pkg, args.id, base=args.base, branch=args.branch)
     except WorkError as err:
         return _fail(args, err)
     if args.json:
@@ -1361,6 +1365,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id", nargs="?", help="the item (default: this claim branch's)")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--base", help="the ref to diff against (default: the integration branch)")
+    s.add_argument("--branch", metavar="REF", help="review this branch: one of an adopted item's candidates, or any "
+                                                   "branch here (default: the claim's, or its first candidate)")
     s.add_argument("--schema", action="store_true", help="print the JSON schema the reviewer's reply must follow")
     s.add_argument("--reply", metavar="FILE", help="read a reviewer's JSON reply to the item's review (- for stdin), "
                                                    "record the verdict, and say if it passes (exit 5 if not)")

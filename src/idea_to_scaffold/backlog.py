@@ -325,6 +325,15 @@ def _one(text: str, item_id: str) -> BacklogItem:
     return items[0]
 
 
+RISKS = ("low", "normal", "high")  # an item's optional Risk; high needs an approving review to land
+
+
+def risk_of(item: BacklogItem | None) -> str:
+    """An item's Risk: low, normal (the default, and what an unknown value counts as) or high."""
+    value = item.get("Risk").lower() if item is not None else ""
+    return value if value in RISKS else "normal"
+
+
 BRANCH_FIELDS = ("status", "verified", "blocked", "override")  # what `its done` and `its block` change
 
 

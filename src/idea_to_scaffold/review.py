@@ -27,11 +27,11 @@ from datetime import datetime, timezone
 
 from . import claims as cl
 from . import gate, gitx, ledger
-from .backlog import BACKLOG, load_backlog
+from .backlog import BACKLOG, load_backlog, risk_of
 from .contract import SCHEMA, WorkError
 from .ids import ID_RE, sections, strip_links
 from .package import Package
-from .work import _find, _ref, base_ref, gate_target, item_here, show_payload
+from .work import _find, _ref, base_ref, gate_target, item_here, remote_of, show_payload
 
 DIFF_LIMIT = 200_000  # characters of diff to include; the rest is cut and flagged
 AUTHOR_NOTES = re.compile(r"(^|/)(HANDOFF|NOTES|PROGRESS|SUMMARY|WORKLOG|CHANGES)(\.[\w-]+)?\.(md|txt)$|(^|/)\.its/", re.I)
@@ -143,13 +143,15 @@ def _claim_elsewhere(pkg: Package, ident: str) -> cl.Claim | None:
     return claims[0] if claims else None
 
 
-def review(pkg: Package, ident: str | None = None, *, base: str | None = None) -> dict:
+def review(pkg: Package, ident: str | None = None, *, base: str | None = None, branch: str | None = None) -> dict:
+    """The review prompt for `ident`: its claim branch's change, or with `branch` (and by default for an adopted
+    claim) a candidate branch's, so each agent's try at the item gets its own review."""
     items = load_backlog(pkg)
     ident = ident or item_here(pkg, items)
     if ident is None:
         raise WorkError("which_item", "name the item to review, e.g. `its review T-1.1`")
     item = _find(items, ident)
-    claim, ref, fork, inspection, omitted = _target(pkg, ident, base)
+    claim, ref, fork, inspection, omitted, name = _target(pkg, ident, base, branch)
     backlog = pkg.path_of(BACKLOG).resolve().relative_to(pkg.root.resolve()).as_posix()
     try:
         diff, truncated = gate.diff_text(pkg, inspection, DIFF_LIMIT, omitted)
@@ -157,7 +159,7 @@ def review(pkg: Package, ident: str | None = None, *, base: str | None = None) -
         raise WorkError("gate_error", f"{ident} can't be reviewed: {exc}", details={"id": ident}) from exc
     if not [c for c in inspection.changes if c.path != backlog]:
         raise WorkError("nothing_to_review", f"{ident} has no changes to review against {ref}"
-                        + (f" on {claim.branch}" if claim else " in this checkout")
+                        + (f" on {name}" if name else f" on {claim.branch}" if claim else " in this checkout")
                         + "; run it in the claim's worktree, or once the claim has commits",
                         details={"id": ident})
     planned = inspection.planned or item  # judged against the plan as the integration branch has it
@@ -166,24 +168,31 @@ def review(pkg: Package, ident: str | None = None, *, base: str | None = None) -
     prompt = _prompt(item_dict, requirements, inspection, diff, truncated, omitted)
     digest = reviewed_digest(pkg, inspection, omitted)
     try:  # what this prompt shows, so the verdict on it counts for this content only
-        cl.record_review(pkg.root, ident, prompt={"digest": digest, "head": _tip_of(pkg, inspection), "at": _now()})
+        cl.record_review(pkg.root, ident, prompt={"digest": digest, "head": _tip_of(pkg, inspection), "at": _now()},
+                         target=name)
     except (OSError, cl.GitError):
         pass
+    which = f"{ident} --branch {name}" if name else ident
     return {
         "schema": SCHEMA, "ok": True, "id": ident, "item": item_dict, "requirements": requirements,
         **inspection.to_dict(), "diff": diff, "diff_truncated": truncated, "prompt": prompt,
-        "omitted": sorted(omitted), "reply_schema": REPLY_SCHEMA, "digest": digest,
-        "commands": {"claude": f"its review {ident} | claude -p > review.json && its review {ident} --reply review.json",
-                     "codex": f"its review {ident} | codex exec - > review.json && its review {ident} --reply review.json"},
+        "omitted": sorted(omitted), "reply_schema": REPLY_SCHEMA, "digest": digest, "reviewed_branch": name,
+        "commands": {"claude": f"its review {which} | claude -p > review.json && its review {which} --reply review.json",
+                     "codex": f"its review {which} | codex exec - > review.json && its review {which} --reply review.json"},
     }
 
 
-def _target(pkg: Package, ident: str, base: str | None) -> tuple:
-    """What a review of `ident` looks at: the claim branch when run from another checkout (main), else this
-    checkout. Returns (claim, base ref, fork point, the gate's inspection, the changed paths not shown)."""
-    head = None
+def _target(pkg: Package, ident: str, base: str | None, branch: str | None = None) -> tuple:
+    """What a review of `ident` looks at: `branch` when given; an adopted claim's candidate (the one checked out
+    here, else the first with commits); the claim branch when run from another checkout (main); else this checkout.
+    Returns (claim, base ref, fork point, the gate's inspection, the changed paths not shown, the branch reviewed
+    when it isn't the claim's own)."""
+    head = name = None
     claim = _claim_elsewhere(pkg, ident)
-    if claim is not None:  # run from main (or another checkout): review the claim's branch, not this checkout
+    if branch is not None or (claim is not None and claim.candidates):
+        ref, fork = base or base_ref(pkg), None
+        head, name = _candidate_head(pkg, claim, branch, ref)
+    elif claim is not None:  # run from main (or another checkout): review the claim's branch, not this checkout
         ref, fork, head = base or base_ref(pkg), None, _ref(claim)
     else:
         ref, fork = (base, None) if base else gate_target(pkg, ident)
@@ -191,7 +200,30 @@ def _target(pkg: Package, ident: str, base: str | None) -> tuple:
         inspection = gate.inspect(pkg, ident, ref, head=head, fork=fork)
     except gate.GateError as exc:
         raise WorkError("gate_error", f"{ident} can't be reviewed: {exc}", details={"id": ident}) from exc
-    return claim, ref, fork, inspection, omitted_paths(pkg, inspection)
+    return claim, ref, fork, inspection, omitted_paths(pkg, inspection), name
+
+
+def _candidate_head(pkg: Package, claim: cl.Claim | None, branch: str | None, base: str) -> tuple[str, str | None]:
+    """The ref and name of the branch to review for an adopted claim, or for `--branch REF` (a candidate's name,
+    or any branch or ref here). Without `branch`: the candidate checked out here, else the first with commits."""
+    cands = claim.candidates if claim is not None else []
+    if branch:
+        for c in cands:
+            if branch in (c.get("name"), c["ref"], f"{c.get('remote')}/{c.get('name')}"):
+                return c["ref"], c.get("name") or c["ref"]
+        remote = remote_of(pkg)
+        for ref in (branch, f"refs/remotes/{remote}/{branch}" if remote else None):
+            if ref and cl.ref_exists(pkg.root, ref):
+                return ref, branch
+        raise WorkError("no_branch", f"there is no branch {branch} here to review", details={"branch": branch})
+    here = cl.current_branch(pkg.root)
+    for c in cands:
+        if c.get("name") == here and cl.ref_exists(pkg.root, c["ref"]):
+            return c["ref"], c["name"]
+    for c in cands:
+        if cl.ref_exists(pkg.root, c["ref"]) and cl.ahead(pkg.root, c["ref"], base):
+            return c["ref"], c.get("name") or c["ref"]
+    return _ref(claim), None  # nothing to review yet: the claim branch, which has no commits
 
 
 def _validate(reply: object) -> list[str]:
@@ -305,22 +337,33 @@ def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def recorded(pkg: Package, ident: str) -> dict | None:
-    """The last verdict recorded for an item, or None."""
+def recorded(pkg: Package, ident: str, digest: str | None = None) -> dict | None:
+    """The verdict recorded for `digest` (one content of the item), else the last one recorded, or None."""
     try:
         entry = cl.reviews_of(pkg.root, ident)
     except cl.GitError:
         return None
-    verdict = entry.get("verdict")
+    kept = entry.get("verdicts") if isinstance(entry.get("verdicts"), dict) else {}
+    verdict = kept.get(digest) if digest else None
+    if not (isinstance(verdict, dict) and verdict.get("digest") == digest):
+        verdict = entry.get("verdict")
     return verdict if isinstance(verdict, dict) and verdict.get("digest") else None
 
 
 def standing(pkg: Package, ident: str, inspection: gate.Inspection) -> dict | None:
-    """The recorded verdict for an item, with `current`: whether it judged the content `inspection` sees now."""
-    verdict = recorded(pkg, ident)
+    """The recorded verdict for an item, with `current`: whether it judged the content `inspection` sees now. A
+    verdict on this exact content counts even when a later one judged other content (another candidate)."""
+    digest = reviewed_digest(pkg, inspection)
+    verdict = recorded(pkg, ident, digest)
     if verdict is None:
         return None
-    return {**verdict, "current": verdict["digest"] == reviewed_digest(pkg, inspection)}
+    return {**verdict, "current": verdict["digest"] == digest}
+
+
+def needs_review(inspection: gate.Inspection) -> bool:
+    """Whether land needs an approving review of this item: `gate.require_review` on the integration branch, or the
+    item's Risk is high there."""
+    return inspection.policy.require_review or risk_of(inspection.planned) == "high"
 
 
 def land_refusal(pkg: Package, ident: str, inspection: gate.Inspection, *, require: bool) -> dict | None:
@@ -340,7 +383,8 @@ def land_refusal(pkg: Package, ident: str, inspection: gate.Inspection, *, requi
     return None
 
 
-def judge(pkg: Package, ident: str | None, text: str, *, min_severity: str = "major", base: str | None = None) -> dict:
+def judge(pkg: Package, ident: str | None, text: str, *, min_severity: str = "major", base: str | None = None,
+          branch: str | None = None) -> dict:
     """`its review ID --reply FILE`: check a reviewer's reply against the item and record the verdict. Every
     requirement the item satisfies must be in the reply and met (a reply that leaves one out doesn't pass)."""
     items = load_backlog(pkg)
@@ -348,14 +392,16 @@ def judge(pkg: Package, ident: str | None, text: str, *, min_severity: str = "ma
     if ident is None:
         raise WorkError("which_item", "name the item the review is of: `its review T-2.1 --reply review.json`")
     item = _find(items, ident)
-    _, _, _, inspection, omitted = _target(pkg, ident, base)
+    _, _, _, inspection, omitted, name = _target(pkg, ident, base, branch)
     planned = inspection.planned or item
     payload = read_reply(text, min_severity=min_severity, expected=planned.satisfies)
     now = reviewed_digest(pkg, inspection, omitted)
     try:
-        prompt = cl.reviews_of(pkg.root, ident).get("prompt") or {}
+        entry = cl.reviews_of(pkg.root, ident)
     except cl.GitError:
-        prompt = {}
+        entry = {}
+    prompts = entry.get("prompts") if isinstance(entry.get("prompts"), dict) else {}
+    prompt = (prompts.get(name) if name else entry.get("prompt")) or {}
     digest = prompt.get("digest") or now
     verdict = {"verdict": payload["verdict"], "passed": payload["passed"], "digest": digest, "at": _now(),
                "head": prompt.get("head") if prompt else _tip_of(pkg, inspection), "min_severity": min_severity,
@@ -367,8 +413,9 @@ def judge(pkg: Package, ident: str | None, text: str, *, min_severity: str = "ma
         saved = False
     ledger.record(pkg, ident, "review", "approved" if payload["passed"] else "changes_requested",
                   verdict=payload["verdict"], unmet=payload["unmet"] or None, blocking=len(payload["blocking"]),
-                  digest=digest)
-    return {**payload, "id": ident, "digest": digest, "current": digest == now, "recorded": saved}
+                  digest=digest, branch=name)
+    return {**payload, "id": ident, "digest": digest, "current": digest == now, "recorded": saved,
+            "reviewed_branch": name}
 
 
 def _tip_of(pkg: Package, inspection: gate.Inspection) -> str | None:
@@ -378,15 +425,28 @@ def _tip_of(pkg: Package, inspection: gate.Inspection) -> str | None:
 
 def claim_review(pkg: Package, claim: dict, base: str) -> dict | None:
     """For `its status`: the review standing of a done claim's branch tip, as `its land` would judge it. None when
-    nothing was recorded and the integration branch doesn't require a review."""
-    ident = claim["id"]
+    nothing was recorded and the integration branch doesn't require a review. For an adopted claim each candidate
+    with commits gets its own (`candidates[].review`), and the claim's is that of the first candidate its review
+    doesn't hold back, since land tries them in turn."""
+    if claim.get("candidates"):
+        found = []
+        for cand in claim["candidates"]:
+            if cand.get("ahead"):
+                cand["review"] = _review_of(pkg, claim["id"], base, cand["ref"])
+                found.append(cand["review"])
+        free = [r for r in found if r is None or not (r["current"] and not r["passed"] or r["required"] and not r["current"])]
+        return (free or found or [None])[0]
     ref = f"refs/remotes/{claim['branch']}" if claim.get("remote_only") else f"refs/heads/{claim['branch']}"
+    return _review_of(pkg, claim["id"], base, ref)
+
+
+def _review_of(pkg: Package, ident: str, base: str, ref: str) -> dict | None:
     try:
         inspection = gate.inspect(pkg, ident, base, head=ref)
     except gate.GateError:
         return None
     state = standing(pkg, ident, inspection)
-    required = inspection.policy.require_review
+    required = needs_review(inspection)
     if state is None and not required:
         return None
     if state is None:

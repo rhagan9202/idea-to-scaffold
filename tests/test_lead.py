@@ -43,7 +43,8 @@ def test_status_shows_each_claim_from_main(claim: Path, repo: Path, capsys):  # 
     capsys.readouterr()
     assert main(["status", str(repo)]) == 0
     text = capsys.readouterr().out
-    assert "T-2.1    ready to land" in text and "ready to land: T-2.1  (its land)" in text
+    assert "ready to land (its land):\n  T-2.1    ready to land" in text
+    assert out["attention"]["ready_to_land"] == ["T-2.1"] and out["attention"]["needs_you"] == []
 
     assert run_json(capsys, "land", "--dir", str(repo))[0] == 0
     _, out = run_json(capsys, "status", str(repo))

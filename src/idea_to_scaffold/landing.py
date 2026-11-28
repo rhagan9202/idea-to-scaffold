@@ -288,8 +288,7 @@ def _land_one(pkg: Package, claim: cl.Claim, ref: str, *, verify: bool, dry_run:
         tests = [f for f in blocking if f["kind"] in gate.TEST_KINDS]
         return {**result, "reason": gate.refusal(blocking), "findings": blocking,
                 "message": (tests or blocking)[0]["message"]}
-    refused = reviews.land_refusal(pkg, claim.id, inspection,
-                                   require=require_review or inspection.policy.require_review)
+    refused = reviews.land_refusal(pkg, claim.id, inspection, require=require_review or reviews.needs_review(inspection))
     if refused:
         return {**result, **refused}
     review = reviews.standing(pkg, claim.id, inspection)

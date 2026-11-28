@@ -648,15 +648,27 @@ def _load_json(path: Path) -> dict:
 # `its review` notes what it put in front of the reviewer, and `its review --reply` the verdict, per item, so that
 # `its land` and `its status` can act on it (review.py). Like the setup record, it is the lead's record, not proof.
 
-def record_review(cwd: Path, ident: str, *, prompt: dict | None = None, verdict: dict | None = None) -> None:
-    """Record the review prompt `its review` made for an item, or the verdict on it."""
+KEPT_VERDICTS = 20  # verdicts kept per item, one per content reviewed (several candidates each keep theirs)
+
+
+def record_review(cwd: Path, ident: str, *, prompt: dict | None = None, verdict: dict | None = None,
+                  target: str | None = None) -> None:
+    """Record the review prompt `its review` made for an item, or the verdict on it. `target` names the branch the
+    prompt showed when it isn't the claim's own (an adopted candidate); verdicts are kept by the digest they judged."""
     store = _store_dir(cwd)
     data = _load_json(store / "reviews.json")
     entry = data.get(ident) if isinstance(data.get(ident), dict) else {}
     if prompt is not None:
         entry["prompt"] = prompt
+        if target:
+            prompts = entry.get("prompts") if isinstance(entry.get("prompts"), dict) else {}
+            entry["prompts"] = {**prompts, target: prompt}
     if verdict is not None:
         entry["verdict"] = verdict
+        kept = entry.get("verdicts") if isinstance(entry.get("verdicts"), dict) else {}
+        kept = {k: v for k, v in kept.items() if isinstance(v, dict) and k != verdict["digest"]}
+        newest = sorted(kept.items(), key=lambda kv: str(kv[1].get("at") or ""))[-(KEPT_VERDICTS - 1):]
+        entry["verdicts"] = {**dict(newest), verdict["digest"]: verdict}
     data[ident] = entry
     _save_json(store, "reviews.json", data)
 
