@@ -13,7 +13,7 @@ from idea_to_scaffold.checks import Check, run_check
 from idea_to_scaffold.scaffold import scaffold
 from idea_to_scaffold.stacks import NODE_TEST, PYTEST, runner_for
 
-from .test_landing import py
+from .test_landing import git_identity, py  # noqa: F401 - git_identity is autouse: commits need a name
 from .test_parallel import git, run_json, set_field
 
 needs_node = pytest.mark.skipif(shutil.which("node") is None or shutil.which("npm") is None,
