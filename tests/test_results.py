@@ -75,7 +75,7 @@ def test_an_honest_fix_passes_and_its_report_is_read(real: Path, capsys):
 def test_os_exit_in_the_items_source_is_refused(real: Path, repo: Path, capsys):  # noqa: F811
     (real / STORE).write_text("import os\nos._exit(0)\n")
     code, out = done(real, capsys)
-    assert code == 5 and out["error"]["code"] == "test_changes" and kinds(out) == {"no_test_report"}, out
+    assert code == 12 and out["error"]["code"] == "test_changes" and kinds(out) == {"no_test_report"}, out
     assert "stopped before pytest finished" in out["error"]["message"]
     assert "Make the tests run to the end" in out["error"]["message"]
     assert status_in(real, "T-2.1") == "todo"
@@ -101,10 +101,10 @@ def test_a_conftest_that_resets_the_exit_status_is_refused(real: Path, repo: Pat
     (real / "tests/conftest.py").write_text(
         "def pytest_sessionfinish(session, exitstatus):\n    session.exitstatus = 0\n")
     code, out = done(real, capsys)
-    assert code == 5 and kinds(out) == {"test_config_changed"}  # a new scaffold refuses the conftest.py itself
+    assert code == 12 and kinds(out) == {"test_config_changed"}  # a new scaffold refuses the conftest.py itself
     older_project(repo)
     code, out = done(real, capsys)
-    assert code == 5 and kinds(out) == {"failures_hidden"}, out  # and the report shows the failure it hid
+    assert code == 12 and kinds(out) == {"failures_hidden"}, out  # and the report shows the failure it hid
     assert out["error"]["findings"][0]["tests"] == ["tests/test_store.py::test_add"]
     assert [f["kind"] for f in out["error"]["warnings"]] == ["test_config_changed"]
 
@@ -121,14 +121,14 @@ def test_a_skip_from_the_code_under_test_is_no_tests_ran(real: Path, repo: Path,
     set_field(repo, "T-2.1", "Verify", f"`{PYTEST} -k test_add`")
     (real / STORE).write_text("def add(a, b):\n    import pytest\n    pytest.skip('not today')\n")
     code, out = done(real, capsys)
-    assert code == 5 and "no_tests_ran" in kinds(out), out  # every test skipped, so pytest exits 0
+    assert code == 12 and "no_tests_ran" in kinds(out), out  # every test skipped, so pytest exits 0
     assert "skipped every test it collected (1)" in out["error"]["message"]
 
 
 def test_a_test_skipped_at_run_time_is_found(real: Path, repo: Path, capsys):  # noqa: F811
     (real / STORE).write_text("def add(a, b):\n    import pytest\n    pytest.skip('later')\n")
     code, out = done(real, capsys)
-    assert code == 5 and kinds(out) == {"tests_skipped"}, out
+    assert code == 12 and kinds(out) == {"tests_skipped"}, out
     assert out["error"]["findings"][0]["tests"] == ["tests/test_store.py::test_add"]
     older_project(repo)
     code, out = done(real, capsys, "--check")
@@ -139,7 +139,7 @@ def test_a_renamed_test_is_removed_but_one_moved_to_another_file_is_not(real: Pa
     (real / STORE).write_text(BROKEN + "# touched\n")
     (real / TEST).write_text(MAIN_TEST.replace("def test_add", "def check_add"))
     code, out = done(real, capsys)
-    assert code == 5 and kinds(out) == {"test_removed"}, out
+    assert code == 12 and kinds(out) == {"test_removed"}, out
     assert out["error"]["findings"][0]["tests"] == ["test_add"]
     (real / TEST).write_text("from streak.store import add\n\n\ndef test_importable():\n    assert callable(add)\n")
     (real / "tests/test_store_add.py").write_text(
@@ -153,10 +153,10 @@ def test_an_empty_parametrize_and_a_list_assert_are_refused(real: Path, capsys):
     (real / TEST).write_text(MAIN_TEST.replace(
         "def test_add():", "import pytest\n\n@pytest.mark.parametrize('x', [])\ndef test_add(x):"))
     code, out = done(real, capsys)
-    assert code == 5 and "skip_added" in kinds(out)
+    assert code == 12 and "skip_added" in kinds(out)
     (real / TEST).write_text(MAIN_TEST.replace("assert add(1, 1) == 2", "assert [add(1, 1) == 2]"))
     code, out = done(real, capsys)
-    assert code == 5 and {"assertions_removed", "assertions_weakened"} <= kinds(out)
+    assert code == 12 and {"assertions_removed", "assertions_weakened"} <= kinds(out)
 
 
 def test_kind_test_only_skips_red_on_parent(real: Path, repo: Path, capsys):  # noqa: F811
@@ -164,7 +164,7 @@ def test_kind_test_only_skips_red_on_parent(real: Path, repo: Path, capsys):  # 
         "from streak.store import add\n\n\ndef test_add_is_callable():\n    assert callable(add)\n")
     set_field(repo, "T-2.1", "Verify", f"`{PYTEST.replace(TEST, 'tests/test_more.py')}`")
     code, out = done(real, capsys, "--check")
-    assert code == 5 and kinds(out) == {"tests_pass_on_parent"}  # the new test passes before any change
+    assert code == 12 and kinds(out) == {"tests_pass_on_parent"}  # the new test passes before any change
     set_field(repo, "T-2.1", "Kind", "test-only")
     code, out = done(real, capsys)
     assert code == 0 and out["red_on_parent"]["ran"] is False and "test-only" in out["red_on_parent"]["reason"]

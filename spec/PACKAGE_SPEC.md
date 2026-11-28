@@ -745,24 +745,24 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `check_failed` | 5 | `done`: a check failed | `checks` |
 | `claim_branch` | 1 | `adopt`: the branch is an `its` claim branch already, which `its land` takes as it is | `branch` |
 | `claimed` | 1 | `start`, `adopt`: another branch holds the item's claim | `claim` |
-| `dependency_changes` | 5 | `done`: the done gate refused the branch's dependency changes (`dependency_added` enforced); the lead waives them with `its waive <ID> --dependencies` | `findings`, `warnings` |
+| `dependency_changes` | 12 | `done`, `gate`: the done gate refused the branch's dependency changes (`dependency_added` enforced); the lead waives them with `its waive <ID> --dependencies` | `findings`, `warnings` |
 | `dirty` | 1 | `land`, `waive`: uncommitted or staged changes are in the way |  |
 | `diverged` | 1 | `land --fetch`: the integration branch and its remote copy have diverged |  |
 | `duplicate_id` | 1 | an ID is defined more than once in the backlog | `ids` |
 | `exists` | 1 | `propose`: that proposal exists already |  |
-| `fetch_failed` | 1 | `--fetch`: fetching the remote failed | `remote` |
-| `gate_error` | 5, 1 | `done`, `review`, `gate`: the gate couldn't compare the branch, so it refused (exit 1 from `review` and `gate`) |  |
+| `fetch_failed` | 11 | `--fetch`: fetching the remote failed | `remote` |
+| `gate_error` | 1 | `done`, `review`, `gate`: the gate couldn't compare the branch (git couldn't answer, or the branch is set up wrong), so nothing passed |  |
 | `git_error` | 1 | a git command failed |  |
 | `github_failed` | 1 | `brief --github`: the GitHub CLI (`gh`) isn't installed, isn't signed in, or failed |  |
 | `incomplete` | 1 | `promote`: the item has no Done when or Touches | `missing` |
 | `internal_error` | 1 | a bug in `its`; the message says what to report | `version` |
-| `launch_settings_changed` | 5 | `done --result`: the headless launch files were changed during the run, so it may have had no Stop hook or sandbox; nothing was marked | `files`, `result_file` |
-| `link_outdated` | 1 | `link --check`: generated links, the index or the commands blocks are out of date | `changed` |
-| `locked` | 1 | another `its` command holds the package lock |  |
+| `launch_settings_changed` | 12 | `done --result`: the headless launch files were changed during the run, so it may have had no Stop hook or sandbox; nothing was marked | `files`, `result_file` |
+| `link_outdated` | 8 | `link --check`: generated links, the index or the commands blocks are out of date | `changed` |
+| `locked` | 11 | another `its` command holds the package lock |  |
 | `no_base` | 1 | `start --claim`, `gate-audit`, `adopt`, `gate`: there is no integration branch (or no base to gate against) |  |
 | `no_branch` | 1 | `adopt`, `gate`, `review --branch`: there is no such branch or pull request, here or on the remote | `branch` |
-| `no_changes` | 5 | `done`: the branch changes nothing outside the planning folder, so nothing shows the item was implemented | `findings`, `warnings` |
-| `no_fork_point` | 5 | `done` on the integration branch: no start was recorded for the item, so the gate can't tell which commits are its work; `its start <ID> --force` records one |  |
+| `no_changes` | 12 | `done`: the branch changes nothing outside the planning folder, so nothing shows the item was implemented | `findings`, `warnings` |
+| `no_fork_point` | 12 | `done` on the integration branch: no start was recorded for the item, so the gate can't tell which commits are its work; `its start <ID> --force` records one |  |
 | `no_package` | 1 | no planning package was found |  |
 | `no_reason` | 1 | `block`, `waive`: `--reason` is missing |  |
 | `no_result` | 1 | `done --result`: the agent's run ended without a result; nothing was marked | `result_file` |
@@ -780,13 +780,13 @@ spec/PACKAGE_SPEC.md` rewrites them), so a new code is added there:
 | `nothing_to_retry` | 1 | `brief --retry`: the item has no failed attempt since it was started or adopted |  |
 | `nothing_to_review` | 1 | `review`: the branch only changes the backlog |  |
 | `out_of_attempts` | 1 | `brief --retry`: the item has failed `gate.max_attempts` times; it needs a person (split it, clarify it, or block it) | `attempts`, `max_attempts` |
-| `outside_touches` | 5 | `done`: the done gate refused the branch's scope changes (files outside Touches, or Touches changed); the lead waives them with `its waive <ID> --outside-touches` | `findings`, `warnings` |
+| `outside_touches` | 12 | `done`, `gate`: the done gate refused the branch's scope changes (files outside Touches, or Touches changed); the lead waives them with `its waive <ID> --outside-touches` | `findings`, `warnings` |
 | `overlap` | 6 | `start`: the item may change the same files as one already running | `overlaps`, `touches_listed`, `overlapping_touches` |
 | `placeholder` | 1 | the item has a placeholder ID; `its promote` gives it a permanent one |  |
-| `push_failed` | 1 | `land --push`: the branches landed locally, but the push failed | `landed`, `skipped` |
+| `push_failed` | 11 | `land --push`: the branches landed locally, but the push failed | `landed`, `skipped` |
 | `result_mismatch` | 1 | `done --result`: the result is for another item | `result_id`, `result_file` |
 | `status_changed` | 1 | `done`: the item's status changed while its checks ran (a `block`, say), and that change is kept | `status`, `was` |
-| `test_changes` | 5 | `done`: the done gate refused the branch's test changes (tests, test config, or how the item is verified); the lead waives them with `its waive <ID> --test-changes` | `findings`, `warnings` |
+| `test_changes` | 12 | `done`, `gate`: the done gate refused the branch's test changes (tests, test config, or how the item is verified); the lead waives them with `its waive <ID> --test-changes` | `findings`, `warnings` |
 | `usage` | 2 | the command line is wrong |  |
 | `use_waive` | 1 | an `--allow-*` flag, which is gone: the lead waives with `its waive` | `flag` |
 | `which_item` | 1 | `done`, `review`: name the item; none could be inferred. `gate`: the branch could be for several (`candidates`) | `in_progress`, `candidates` |
@@ -803,12 +803,14 @@ Exit codes, the same with or without `--json`:
 | 2 | bad command-line usage |
 | 3 | `next`, `start --next`, `land`: nothing is ready (with `--parallel`: nothing can start alongside the claims) |
 | 4 | `start`: a dependency isn't done |
-| 5 | `done`: a check or the done gate failed, or a headless run's launch settings were changed; the status is unchanged. `gate`: the branch failed the done gate or a check |
+| 5 | `done`, `gate`, `verify`: a check failed (the change is in scope, but it doesn't work yet); the status is unchanged. `review --reply`: the review didn't pass |
 | 6 | `start`: the item may change the same files as one already running |
 | 7 | `land`: a branch could not land (it conflicted, failed the done gate or its checks, isn't done, has no commits, or the base moved), or the integration branch has commits nothing vouches for (`base_untrusted`); branches only waiting on dependencies don't count |
-| 8 | `drift --check`: a done item's files changed after it was verified |
+| 8 | `drift --check`, `link --check`: something is out of date (a done item's files changed after it was verified; generated links, the index or the commands blocks need `its link`) |
 | 9 | `next`, `start --next`: every item is done |
 | 10 | `gate-audit`: a seeded cheat was missed, or only warned about (unless `--allow-warn`) |
+| 11 | nothing is wrong with the work, so the same command may succeed later: another `its` command holds the lock, or fetching or pushing failed |
+| 12 | `done`, `gate`: the done gate refused the change itself (tests or how they run changed, files outside Touches, new dependencies, no change, or a headless run's launch files changed); trying again won't help, a person decides |
 <!-- /contract:exit-codes -->
 
 `its backlog --write` saves the `its backlog --json` object as
@@ -1102,8 +1104,8 @@ or Codex in each; it never launches an agent itself.
 
   The gate fails closed: with no integration branch, a shallow clone, a fork
   point that left the history, or a git error, `its done` refuses with
-  `gate_error` (exit 5) instead of passing. On the integration branch with no
-  start recorded for the item, it refuses with `no_fork_point` (exit 5), since
+  `gate_error` (exit 1) instead of passing. On the integration branch with no
+  start recorded for the item, it refuses with `no_fork_point` (exit 12), since
   nothing says which commits are the item's; `its start <ID> --force`
   records one.
 
@@ -1311,7 +1313,7 @@ or Codex in each; it never launches an agent itself.
     the OS sandbox on. It is written to `launch/`, outside the repository, so
     a sandboxed agent can't edit it, and `its done --result` refuses a run
     whose launch files no longer match what `its` wrote
-    (`launch_settings_changed`, exit 5). The budget is `launch.budget_usd`
+    (`launch_settings_changed`, exit 12). The budget is `launch.budget_usd`
     (default 5). The prompt tells the agent to check its work with `its done
     ID --check` and leave the status and the commit to `its done --result`.
   - `codex exec --sandbox workspace-write --output-schema FILE -o RESULT

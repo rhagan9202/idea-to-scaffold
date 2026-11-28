@@ -284,7 +284,7 @@ def test_a_lockfile_the_agent_changed_is_still_a_dependency_change(repo: Path, c
     (wt / "src/streak/store.py").write_text("def add(): ...\n")
     (wt / "uv.lock").write_text("version = 1\n[[package]]\nname = 'evil'\n")
     code, out = run_json(capsys, "done", "T-2.1", str(wt))
-    assert code == 5 and out["error"]["code"] == "outside_touches" and out["error"]["setup_files"] == [], out
+    assert code == 12 and out["error"]["code"] == "outside_touches" and out["error"]["setup_files"] == [], out
     assert "uv.lock" in out["error"]["findings"][0]["files"]
     assert any(f["kind"] == "dependency_added" for f in out["error"]["warnings"])  # warn mode until it is committed
 

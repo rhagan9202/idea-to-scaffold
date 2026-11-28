@@ -24,7 +24,7 @@ from .backlog import (
     set_field,
     set_status,
 )
-from .contract import EXIT_CHECK_FAILED, SCHEMA, WorkError
+from .contract import SCHEMA, WorkError
 from .gate import WAIVER_FIELD, WAIVER_GROUPS, Waiver
 from .ids import is_placeholder
 from .locking import LockTimeout, package_lock
@@ -298,7 +298,7 @@ def apply_result(pkg: Package, ident: str | None, result_file: str, *, push: boo
         raise WorkError("launch_settings_changed",
                         f"the headless launch files were changed ({', '.join(tampered)}), so this run may have had "
                         "no Stop hook or no sandbox; nothing was marked. Check the run's work by hand; its start "
-                        "writes the files again", EXIT_CHECK_FAILED,
+                        "writes the files again",
                         details={"id": ident, "files": tampered, "result_file": result_file})
     item, _, _ = _locate(pkg, ident)
     check_only = done_options.get("check_only", False)

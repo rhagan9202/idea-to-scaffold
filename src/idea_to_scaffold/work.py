@@ -907,13 +907,13 @@ def gate_target(pkg: Package, ident: str) -> tuple[str | None, str | None]:
     if claim_id and here and (name == here or ref in (here, f"{remote}/{here}")):
         raise WorkError("gate_error", f"{ident} can't be checked: the integration branch ({name}) is this claim's own "
                         "branch; set integration_branch in package.yaml to the branch work lands on",
-                        EXIT_CHECK_FAILED, {"id": ident})
+                        details={"id": ident})
     fork = None
     if here is not None and here == name:
         fork = cl.fork_of(pkg.root, ident)
         if fork and not gitx.ok(pkg.root, "merge-base", "--is-ancestor", fork, "HEAD"):
             raise WorkError("gate_error", f"{ident} can't be checked: the commit it started from ({fork[:10]}) is no "
-                            f"longer in {name}'s history; start it again", EXIT_CHECK_FAILED, {"id": ident})
+                            f"longer in {name}'s history; start it again", details={"id": ident})
     return ref, fork
 
 
@@ -924,7 +924,7 @@ def inspect_item(pkg: Package, ident: str) -> gate.Inspection:
     try:
         return gate.inspect(pkg, ident, ref, fork=fork, waiver_ref=waiver_ref, setup_files=cl.setup_of(pkg.root, ident))
     except gate.GateError as exc:
-        raise WorkError("gate_error", f"{ident} can't be checked: {exc}", EXIT_CHECK_FAILED, {"id": ident}) from exc
+        raise WorkError("gate_error", f"{ident} can't be checked: {exc}", details={"id": ident}) from exc
 
 
 def is_terminal(fd: int) -> bool:
@@ -983,7 +983,7 @@ def gate_error(ident: str, blocking: list[dict], inspection: gate.Inspection,
                "warnings": [f for f in inspection.findings if f not in blocking]}
     if checks is not None:
         details["checks"] = checks
-    return WorkError(code, message, EXIT_CHECK_FAILED, details)
+    return WorkError(code, message, details=details)
 
 
 def done(
@@ -1097,7 +1097,7 @@ def _done(
         raise WorkError(
             "no_fork_point", f"{ident} is {item.status} on {integration_branch(pkg)}, but no start was recorded for "
             f"it, so the gate can't tell which commits are its work; run its start {ident} --force to record where "
-            "it starts from, or work on it in a claim (its start --worktree)", EXIT_CHECK_FAILED, {"id": ident})
+            "it starts from, or work on it in a claim (its start --worktree)", details={"id": ident})
     if item.status == "done":  # re-checking finished work (its verify, the Stop hook): it needn't change anything
         inspection.findings = [f for f in inspection.findings if f["kind"] != "no_changes"]
     blocking = inspection.blocking()

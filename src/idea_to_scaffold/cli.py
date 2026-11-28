@@ -38,6 +38,7 @@ from .landing import land
 from .ledger import stats
 from .linker import link_package
 from .package import BACKLOG_STATUSES, PROFILES, Package, PackageError, new_package
+from .pr_gate import exit_code as gate_exit
 from .pr_gate import gate_ref
 from .review import REPLY_SCHEMA, judge, review
 from .scaffold import ScaffoldError, scaffold
@@ -306,7 +307,7 @@ def cmd_link(args: argparse.Namespace) -> int:
             for rel in changed:
                 print(f"  {rel}")
             print("run `its link` and commit the result")
-            return 1
+            return EXIT_DRIFT
         print("cross-links and commands are up to date")
         return 0
     print(f"updated {len(changed)} file(s)" if changed else "already up to date")
@@ -877,7 +878,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
                            verify=not args.no_verify, on_check=announce)
     except WorkError as err:
         return _fail(args, err)
-    code = 0 if payload["passed"] else EXIT_CHECK_FAILED
+    code = gate_exit(payload)
     if args.json:
         _emit(payload)
         return code
@@ -1204,7 +1205,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("link", help="cross-link IDs, refresh nav blocks, the planning index and the commands blocks")
     s.add_argument("dir", nargs="?", default=".", help="package folder or scaffolded repo (default: .)")
-    s.add_argument("--check", action="store_true", help="don't write; exit 1 if anything is out of date (for CI)")
+    s.add_argument("--check", action="store_true", help="don't write; exit 8 if anything is out of date (for CI)")
     s.add_argument("--json", action="store_true", help=f"print JSON (schema {SCHEMA}) instead of text")
     s.set_defaults(func=cmd_link)
 
@@ -1424,11 +1425,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true", help=json_help)
     s.set_defaults(func=cmd_renumber)
 
-    s = sub.add_parser("done", help="run an item's checks, then set it done (exit 5 if a check fails)")
+    s = sub.add_parser("done", help="run an item's checks, then set it done (exit 5 if a check fails, 12 if refused)")
     s.add_argument("id", nargs="?", help="the item (default: the only in-progress item)")
     s.add_argument("dir", nargs="?", default=".", help=dir_help)
     s.add_argument("--no-verify", action="store_true", help="don't run Verify, test and lint first")
-    s.add_argument("--check", action="store_true", help="run every check but leave the status alone (exit 5 if any fails)")
+    s.add_argument("--check", action="store_true", help="run every check but leave the status alone (exit 5 if any fails, 12 if refused)")
     s.add_argument("--result", metavar="FILE",
                    help="act on a headless agent's result JSON: done runs the checks, blocked or needs_human blocks "
                         "it; in a claim checkout the work is then committed and the branch pushed")

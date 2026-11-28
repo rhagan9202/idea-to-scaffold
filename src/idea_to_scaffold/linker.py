@@ -333,7 +333,7 @@ def _index_md(pkg: Package, docs: dict[str, Doc], index: dict[str, Target]) -> s
         "- Work items live only in the backlog. Don't keep task lists in other docs, issues or code comments.",
         "- Start and finish items with `its start <ID>` and `its done <ID>`, or change the item's **Status** in the "
         "backlog in the same commit as the work.",
-        "- After editing any planning doc, run `its link` then `its validate` (`its link --check` exits 1 if links are stale).",
+        "- After editing any planning doc, run `its link` then `its validate` (`its link --check` exits 8 if links are stale).",
         "- Changes to approved docs go through the update-plan playbook. `its show <ID>` lists the docs that mention an ID.",
         "",
     ]

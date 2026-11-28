@@ -94,7 +94,7 @@ def test_done_says_which_attempt_failed(repo: Path, capsys):  # noqa: F811
     wt = Path(out["claim"]["worktree"])
     (wt / "src/streak/streak.py").write_text("x = 1\n")  # outside T-2.1's Touches
     code, out = run_json(capsys, "done", "T-2.1", str(wt))
-    assert code == 5 and out["error"]["code"] == "outside_touches"
+    assert code == 12 and out["error"]["code"] == "outside_touches"
     assert out["error"]["retry"]["attempt"] == 1 and out["error"]["retry"]["command"] == "its brief --retry T-2.1"
     code, out = run_json(capsys, "done", "T-2.1", str(wt))  # the same work again is the same attempt
     assert out["error"]["retry"]["attempt"] == 1

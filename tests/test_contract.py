@@ -6,7 +6,7 @@ import ast
 from pathlib import Path
 
 from idea_to_scaffold import contract, gate, work
-from idea_to_scaffold.contract import ERRORS, EXIT_CHECK_FAILED, EXIT_CODES
+from idea_to_scaffold.contract import ERRORS, EXIT_CODES, EXIT_REFUSED
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "idea_to_scaffold"
@@ -21,7 +21,7 @@ def _raises(cls: str) -> list[tuple[str, set[int], str]]:
     """(code, exit codes, where) for each `cls(...)` call in the source. A code that isn't a literal is the
     unparsed expression, such as "code" or "exc.code"; a literal code is never one of those (they aren't codes)."""
     out = []
-    for path in sorted(SRC.glob("*.py")):
+    for path in sorted(p for p in SRC.rglob("*.py") if "templates" not in p.relative_to(SRC).parts):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             func = getattr(node, "func", None)
@@ -33,7 +33,10 @@ def _raises(cls: str) -> list[tuple[str, set[int], str]]:
             if cls == "WorkError":  # a ResultError has no exit code: apply_result raises it as a WorkError
                 exit_node = node.args[2] if len(node.args) > 2 else next(
                     (k.value for k in node.keywords if k.arg == "exit_code"), None)
-            exits = {contract.EXIT_ERROR} if exit_node is None else _exit_values(exit_node, f"{path.name}:{node.lineno}")
+            if exit_node is None:  # the code's usual exit, from the registry
+                exits = {ERRORS[code].exits[0]} if code in ERRORS else {contract.EXIT_ERROR}
+            else:
+                exits = _exit_values(exit_node, f"{path.name}:{node.lineno}")
             out.append((code, exits, f"{path.name}:{node.lineno}"))
     return out
 
@@ -64,8 +67,8 @@ def test_every_raised_error_code_is_registered_with_its_exit_codes():
         if code not in ERRORS:
             problems.append(f"{where}: the result error {code} isn't in contract.ERRORS")
     for code in gate.REFUSALS:
-        if ERRORS.get(code) is None or ERRORS[code].exits != (EXIT_CHECK_FAILED,):
-            problems.append(f"the gate refusal {code} must be registered with exit {EXIT_CHECK_FAILED}")
+        if ERRORS.get(code) is None or ERRORS[code].exits != (EXIT_REFUSED,):
+            problems.append(f"the gate refusal {code} must be registered with exit {EXIT_REFUSED}")
     assert not problems, "\n".join(problems)
 
 

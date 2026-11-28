@@ -170,11 +170,11 @@ def test_gate_passes_a_good_pull_request_and_refuses_a_bad_one(repo: Path, remot
     assert code == 5 and out["found_by"] == "commit_tags" and out["reason"] == "check_failed", out
     assert out["held_out_failed"] == ["T-2.1"]
     code, out = run_json(capsys, "gate", "origin/claude/T-2.1-cheat", str(repo))
-    assert code == 5 and [f["kind"] for f in out["findings"]] == ["acceptance_changed"], out
+    assert code == 12 and [f["kind"] for f in out["findings"]] == ["acceptance_changed"], out
     assert out["checks"] == []  # refused before anything ran
     code, out = run_json(capsys, "gate", "origin/copilot/readme", str(repo))
     assert code == 0 and out["id"] is None and out["reason"] == "no_item", out
-    assert run_json(capsys, "gate", "origin/copilot/readme", str(repo), "--require-item")[0] == 5
+    assert run_json(capsys, "gate", "origin/copilot/readme", str(repo), "--require-item")[0] == 12
     assert run_json(capsys, "gate", "origin/nope", str(repo))[1]["error"]["code"] == "no_branch"
     assert git(repo, "status", "--porcelain") == before  # the checkout is untouched
 

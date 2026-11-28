@@ -53,7 +53,7 @@ def finish(worktree: Path, *flags: str, capsys) -> tuple[int, dict]:
 def test_a_branch_that_edits_its_own_verify_is_refused(claim: Path, repo: Path, capsys):  # noqa: F811
     set_field(claim, "T-2.1", "Verify", "`true`")
     code, out = finish(claim, capsys=capsys)
-    assert code == 5 and out["error"]["code"] == "test_changes"
+    assert code == 12 and out["error"]["code"] == "test_changes"
     assert [f["kind"] for f in out["error"]["findings"]] == ["verify_changed"]
     assert status_in(claim, "T-2.1") == "todo"
     waive(repo, "T-2.1", "test-changes", reason="planned test rewrite")
@@ -67,7 +67,7 @@ def test_a_branch_that_edits_its_own_verify_is_refused(claim: Path, repo: Path, 
 def test_a_branch_that_deletes_a_test_is_refused(claim: Path, capsys):
     (claim / TEST).unlink()
     code, out = finish(claim, capsys=capsys)
-    assert code == 5 and out["error"]["code"] == "test_changes"
+    assert code == 12 and out["error"]["code"] == "test_changes"
     assert out["error"]["findings"][0] == {"kind": "test_deleted", "file": TEST,
                                           "message": f"test file {TEST} was deleted", "mode": "enforce"}
     git(claim, "add", "-A")
@@ -78,12 +78,12 @@ def test_a_branch_that_deletes_a_test_is_refused(claim: Path, capsys):
 def test_removed_assertions_and_new_skips_are_refused(claim: Path, capsys):
     (claim / TEST).write_text("import pytest\n\n@pytest.mark.skip\ndef test_add():\n    pass\n")
     code, out = finish(claim, capsys=capsys)
-    assert code == 5
+    assert code == 12
     assert {f["kind"] for f in out["error"]["findings"]} == {"assertions_removed", "skip_added", "test_disabled"}
     (claim / TEST).write_text("def test_add():\n    assert len('ab') == 2\n    assert True\n\n"
                               "def test_remove():\n    assert len('a') == 1\n")
     code, out = finish(claim, capsys=capsys)
-    assert code == 5  # adding tests is fine, but this Verify passes whatever the code does, and a new scaffold
+    assert code == 12  # adding tests is fine, but this Verify passes whatever the code does, and a new scaffold
     assert [(f["kind"], f["mode"]) for f in out["error"]["findings"]] == [("tests_pass_on_parent", "enforce")]
 
 
@@ -136,7 +136,7 @@ def test_a_conftest_that_deselects_a_test_is_found_and_can_enforce(claim: Path, 
         "    items[:] = [i for i in items if 'url' not in i.name]\n")
     (claim / "src/streak/store.py").write_text("def add(): ...\n")
     code, out = run_json(capsys, "done", "T-2.1", str(claim), "--no-verify", "--check")
-    assert code == 5 and [f["kind"] for f in out["error"]["findings"]] == ["test_config_changed"]
+    assert code == 12 and [f["kind"] for f in out["error"]["findings"]] == ["test_config_changed"]
 
 
 def test_pytest_settings_in_pyproject_are_test_config(claim: Path, repo: Path, capsys):  # noqa: F811
@@ -193,7 +193,7 @@ def test_a_test_that_passes_without_the_change_is_found(real_verify: Path, repo:
     pkg_yaml.write_text(pkg_yaml.read_text() + "gate:\n  checks:\n    tests_pass_on_parent: enforce\n")
     git(repo, "commit", "-qam", "enforce red on parent")
     code, out = run_json(capsys, "done", "T-2.1", str(real_verify))
-    assert code == 5 and out["error"]["findings"][0]["kind"] == "tests_pass_on_parent"
+    assert code == 12 and out["error"]["findings"][0]["kind"] == "tests_pass_on_parent"
 
 
 def test_held_out_tests_are_hidden_from_the_worktree_and_run_by_land(repo: Path, capsys):  # noqa: F811
@@ -213,7 +213,7 @@ def test_held_out_tests_are_hidden_from_the_worktree_and_run_by_land(repo: Path,
     (worktree / "tests/acceptance").mkdir()
     (worktree / "tests/acceptance/test_store_works.py").write_text("print('rewritten')\n")
     code, out = run_json(capsys, "done", "T-2.1", str(worktree), "--no-verify")
-    assert code == 5 and out["error"]["findings"][0]["kind"] == "acceptance_changed"
+    assert code == 12 and out["error"]["findings"][0]["kind"] == "acceptance_changed"
     import shutil
     shutil.rmtree(worktree / "tests/acceptance")
 
@@ -239,7 +239,7 @@ def test_changes_outside_touches_are_refused_but_planning_files_are_not(claim: P
     assert main(["propose", "Follow-up", "--dir", str(claim), "--satisfies", "FR-001"]) == 0  # planning: exempt
     (claim / "src/streak/other.py").write_text("x = 1\n")
     code, out = finish(claim, capsys=capsys)
-    assert code == 5 and out["error"]["code"] == "outside_touches"
+    assert code == 12 and out["error"]["code"] == "outside_touches"
     assert out["error"]["findings"][0]["files"] == ["src/streak/other.py"]
     waive(repo, "T-2.1", "outside-touches", reason="shared file")
     code, out = finish(claim, capsys=capsys)

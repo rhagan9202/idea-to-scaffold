@@ -26,7 +26,7 @@ from . import claims as cl
 from . import gate, gitx, heldout, ledger
 from .backlog import BACKLOG, BacklogItem, load_backlog, parse_backlog
 from .checks import RESULT_KINDS, Check, checks_for, result_findings, run_check
-from .contract import SCHEMA, WorkError
+from .contract import EXIT_CHECK_FAILED, EXIT_OK, EXIT_REFUSED, SCHEMA, WorkError
 from .package import Package
 from .work import changed_tests, integration_branch, red_on_parent, remote_of
 
@@ -211,6 +211,14 @@ def _run(pkg: Package, ident: str, inspection: gate.Inspection, head: str, *, ve
         gitx.run(cl.toplevel(root), "worktree", "remove", "--force", str(tree))
         shutil.rmtree(scratch, ignore_errors=True)
         gitx.run(cl.toplevel(root), "worktree", "prune")
+
+
+def exit_code(payload: dict) -> int:
+    """What `its gate` exits with: 0 when it passed, 5 when a check failed (the work isn't right yet), 12 when the
+    gate refused the change itself (or found no item with `--require-item`)."""
+    if payload["passed"]:
+        return EXIT_OK
+    return EXIT_CHECK_FAILED if payload["reason"] == "check_failed" else EXIT_REFUSED
 
 
 def _verdict(inspection: gate.Inspection, reason: str | None, message: str, findings: list[dict] | None = None) -> dict:

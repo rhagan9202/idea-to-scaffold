@@ -139,7 +139,7 @@ def test_done_result_still_refuses_a_cheat(claim: Path, tmp_path: Path, capsys):
     (claim / TEST).write_text("def test_add():\n    assert True\n")
     path = write(tmp_path, envelope({"id": "T-2.1", "status": "done", "summary": "store"}))
     code, out = run_json(capsys, "done", "T-2.1", str(claim), "--result", path)
-    assert code == 5 and out["error"]["code"] == "test_changes"
+    assert code == 12 and out["error"]["code"] == "test_changes"
 
 
 def test_a_blocked_result_blocks_and_commits(claim: Path, tmp_path: Path, capsys):  # noqa: F811
@@ -171,7 +171,7 @@ def test_stats_reports_first_try_rate_refusals_and_cost(claim: Path, repo: Path,
                                                          capsys):
     (claim / "src/streak/store.py").write_text("def add(): ...\n")
     (claim / TEST).write_text("def test_add():\n    assert True\n")
-    assert run_json(capsys, "done", "T-2.1", str(claim))[0] == 5  # refused: weakened test
+    assert run_json(capsys, "done", "T-2.1", str(claim))[0] == 12  # refused: weakened test
     git(claim, "checkout", "--", TEST)
     path = write(tmp_path, envelope({"id": "T-2.1", "status": "done", "summary": "store"}))
     code, out = run_json(capsys, "done", "T-2.1", str(claim), "--result", path)
