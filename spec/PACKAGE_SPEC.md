@@ -1199,7 +1199,9 @@ or Codex in each; it never launches an agent itself.
   `commands.setup` run in it already (*The branch is the claim*).
   - `claude -p PROMPT --setting-sources user --settings FILE --output-format
     json --json-schema SCHEMA --max-budget-usd N --permission-mode acceptEdits
-    --permission-prompts none`. The project's settings aren't loaded, so the
+    --permission-prompts none`, where SCHEMA is the result schema as compact
+    JSON with its spaces written `\u0020`: one word with no whitespace, which
+    every shell passes whole. The project's settings aren't loaded, so the
     settings file carries the Stop hook (`its hook stop --headless`, which
     runs `done --check` and never asks the agent to mark the item) and turns
     the OS sandbox on. It is written to `launch/`, outside the repository, so

@@ -47,6 +47,9 @@ def test_start_writes_launchers_that_keep_the_guards(repo: Path, capsys, state_h
     assert claude[claude.index("--setting-sources") + 1] == "user"  # not the worktree's own .claude/ settings
     assert claude[claude.index("--max-budget-usd") + 1] == "5"
     assert json.loads(claude[claude.index("--json-schema") + 1]) == RESULT_SCHEMA
+    # one word for every shell: no whitespace for Windows PowerShell 5.1 to misquote, nothing cmd.exe (npm's
+    # claude.cmd shim) would act on
+    assert not set(claude[claude.index("--json-schema") + 1]) & set(" \t\r\n&|<>^%!")
     assert codex[codex.index("--sandbox") + 1] == "workspace-write" and "--output-schema" in codex
     worktree = Path(out["claim"]["worktree"]).resolve()
     for agent in ("claude", "codex"):

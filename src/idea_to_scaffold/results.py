@@ -20,7 +20,8 @@
   `its block` with the agent's reason, and either way the claim branch is committed and pushed (`edits.apply_result`).
 - **One script per shell.** `T-n.m-claude.sh` for sh; `T-n.m-claude.ps1` for PowerShell, which also sets the
   argument passing that keeps the JSON schema's quotes on Windows PowerShell 5.1 and on PowerShell 7; and
-  `T-n.m-claude.cmd`, which runs the PowerShell one, for cmd. The same for Codex.
+  `T-n.m-claude.cmd`, which runs the PowerShell one, for cmd. The same for Codex. The schema goes on the command
+  line as one word with no whitespace (`compact_schema`), so no shell's quoting rules can split it.
 """
 from __future__ import annotations
 
@@ -144,6 +145,13 @@ def launch_changes(pkg: Package) -> list[str]:
     return changed
 
 
+def compact_schema() -> str:
+    """RESULT_SCHEMA as one command-line word: compact JSON with each space written `\\u0020`, which JSON reads back
+    as a space. Windows PowerShell 5.1 decides whether an argument needs quotes by counting its double quotes, and
+    JSON's quotes make it pass the schema unquoted, so a space would split it in two."""
+    return json.dumps(RESULT_SCHEMA, separators=(",", ":")).replace(" ", "\\u0020")
+
+
 def _sh(arg: str) -> str:
     return shlex.quote(arg)
 
@@ -172,7 +180,8 @@ def _sh_script(ident: str, agent: str, argv: list[str], worktree: str | None, re
 def _ps_script(ident: str, agent: str, argv: list[str], worktree: str | None, result: str, stdout: bool) -> str:
     """PowerShell: Windows PowerShell 5.1 passes a native argument's double quotes unescaped, and PowerShell 7.3+
     does so for a .cmd shim (npm's `claude.cmd`) unless told otherwise, so the JSON schema would lose its quotes.
-    7.3+ is set to Standard passing; on older versions the script escapes them itself."""
+    7.3+ is set to Standard passing; on older versions the script escapes them itself, which is enough because the
+    schema has no whitespace for 5.1 to quote, or fail to quote (`compact_schema`)."""
     names = ", ".join(_ps(n) for n in SCRUBBED_ENV)
     args = []
     for a in argv[1:]:
@@ -234,7 +243,7 @@ def headless_commands(pkg: Package, ident: str, worktree: str | None) -> dict | 
     spend = budget(pkg)
     argv = {
         "claude": ["claude", "-p", task, "--setting-sources", "user", "--settings", str(files["settings"]),
-                   "--output-format", "json", "--json-schema", json.dumps(RESULT_SCHEMA, separators=(",", ":")),
+                   "--output-format", "json", "--json-schema", compact_schema(),
                    "--max-budget-usd", f"{spend:g}", "--permission-mode", "acceptEdits",
                    "--permission-prompts", "none"],
         "codex": ["codex", "exec", "--sandbox", "workspace-write", "--output-schema", str(files["schema"]),
